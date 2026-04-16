@@ -23,7 +23,7 @@ import numpy as np
 from use_cases.base import (
     FONT, C_RED, C_ORANGE, C_YELLOW, C_WHITE, C_GREEN, C_GRAY,
     auto_device, open_video, create_writer, build_output_path,
-    load_model, draw_hud_panel, draw_alert_bar, draw_label,
+    load_model, draw_hud_panel, draw_alert_bar, draw_label, validate_output_video,
 )
 
 
@@ -188,8 +188,7 @@ def process_video(
         if show:
             cv2.destroyAllWindows()
 
-    if not os.path.isfile(out_p) or os.path.getsize(out_p) == 0:
-        raise RuntimeError(f"Output missing or empty: {out_p}")
+    validate_output_video(out_p)
 
     processing_time_sec = round(time.time() - t0, 2)
     duration_sec = round(frame_num / sfps, 2) if sfps else None

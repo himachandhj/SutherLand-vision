@@ -636,11 +636,18 @@ def open_video(path):
 
 def create_writer(path, fps, w, h):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    for cc in ("avc1", "h264", "H264", "mp4v"):
-        wr = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*cc), fps, (w, h))
-        if wr.isOpened(): return wr
+    width = int(w)
+    height = int(h)
+    safe_fps = float(fps) if fps and fps > 0 else 30.0
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Invalid video dimensions for output writer: width={width}, height={height}")
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    wr = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
+    if not wr.isOpened():
         wr.release()
-    raise RuntimeError("No MP4 codec available.")
+        raise RuntimeError(f"VideoWriter failed to open for {path}")
+    return wr
 
 
 def _status_vote_bucket(status: str) -> str:
@@ -846,7 +853,11 @@ def process_video(
         if show:
             cv2.destroyAllWindows()
 
-    if not os.path.isfile(out_p) or os.path.getsize(out_p) == 0:
+    if not os.path.isfile(out_p):
+        raise RuntimeError(f"Output missing: {out_p}")
+    print("Output:", out_p)
+    print("Size:", os.path.getsize(out_p))
+    if os.path.getsize(out_p) <= 0:
         raise RuntimeError(f"Output missing or empty: {out_p}")
 
     processing_time_sec = round(time.time() - t0, 2)

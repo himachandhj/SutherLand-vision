@@ -126,25 +126,53 @@ export const dashboardData = {
       status: breached === "Yes" ? "Alert" : "Normal",
     };
   }),
-  "speed-estimation": createRows(50, (index) => {
-    const objectTypes = ["Forklift", "Truck", "Person"];
-    const speedLimits = [5, 10, 15];
-    const detectedSpeed = speedLimits[index % 3] + (index % 6) + (index % 5 === 0 ? 6 : 0);
-    const overspeed = detectedSpeed > speedLimits[index % 3] ? "Yes" : "No";
+  "speed-estimation": createRows(52, (index) => {
+    const zoneProfiles = [
+      { zone: "Forklift Bay", speedLimit: 5, location: "Warehouse A", objectTypes: ["forklift", "person"], bias: "high" },
+      { zone: "Dispatch Area", speedLimit: 10, location: "Warehouse B", objectTypes: ["truck", "car", "bus"], bias: "medium-high" },
+      { zone: "Loading Dock", speedLimit: 8, location: "Warehouse C", objectTypes: ["truck", "forklift", "car"], bias: "medium" },
+      { zone: "Storage Bay", speedLimit: 6, location: "Warehouse A", objectTypes: ["forklift", "bicycle", "person"], bias: "medium" },
+      { zone: "Receiving Bay", speedLimit: 12, location: "Warehouse B", objectTypes: ["truck", "car", "bicycle"], bias: "low" },
+      { zone: "Packaging Zone", speedLimit: 7, location: "Warehouse C", objectTypes: ["forklift", "person", "bicycle"], bias: "low-medium" },
+    ];
+    const profile = zoneProfiles[index % zoneProfiles.length];
+    const objectType = profile.objectTypes[index % profile.objectTypes.length];
+    const simulated = new Date("2025-04-01T06:00:00");
+    simulated.setDate(1 + (index % 26));
+    simulated.setHours([6, 8, 10, 12, 14, 16, 18, 20, 22, 5][index % 10], (index * 9) % 60, 0, 0);
+
+    const speedDelta =
+      profile.bias === "high"
+        ? [4, 6, 8, 3, 7][index % 5]
+        : profile.bias === "medium-high"
+          ? [2, 5, 7, 3, 6][index % 5]
+          : profile.bias === "medium"
+            ? [1, 3, 4, 0, 5][index % 5]
+            : profile.bias === "low-medium"
+              ? [0, 2, 3, 1, 0][index % 5]
+              : [-1, 1, 0, 2, -2][index % 5];
+    const detectedSpeed = Math.max(profile.speedLimit + speedDelta, objectType === "person" ? 3 : 4);
+    const excessSpeed = Math.max(detectedSpeed - profile.speedLimit, 0);
+    const isOverspeeding = excessSpeed > 0 ? "Yes" : "No";
+
     return {
-      id: `SE-${index + 1}`,
-      timestamp: timestampFor(index),
-      location: locations[index % locations.length],
-      zone: zones[index % zones.length],
-      cameraId: cameras[index % cameras.length],
-      objectId: `OBJ-${2000 + index}`,
-      objectType: objectTypes[index % objectTypes.length],
-      detectedSpeedKmh: detectedSpeed,
-      speedLimitKmh: speedLimits[index % speedLimits.length],
-      isOverspeeding: overspeed,
-      excessSpeed: Math.max(detectedSpeed - speedLimits[index % speedLimits.length], 0),
-      confidence: 0.82 + ((index % 8) * 0.015),
-      status: overspeed === "Yes" ? "Violation" : "Normal",
+      input_id: 7000 + index,
+      camera_id: cameras[(index * 2) % cameras.length],
+      location: profile.location,
+      zone: profile.zone,
+      zone_speed_limit_kmh: profile.speedLimit,
+      minio_video_link: `minio://vision-demo/speed/input/speed_run_${String(index + 1).padStart(3, "0")}.mp4`,
+      load_time_sec: Number((4.2 + ((index % 6) * 0.7)).toFixed(1)),
+      simulated_timestamp: simulated.toISOString(),
+      output_id: 9000 + index,
+      object_id: `TRK-${3000 + index}`,
+      object_type: objectType,
+      detected_speed_kmh: detectedSpeed,
+      speed_limit_kmh: profile.speedLimit,
+      is_overspeeding: isOverspeeding,
+      excess_speed_kmh: excessSpeed,
+      confidence_score: Number((0.8 + ((index % 7) * 0.02)).toFixed(2)),
+      status: isOverspeeding === "Yes" ? "Violation" : "Normal",
     };
   }),
   "fire-detection": createRows(50, (index) => {
@@ -243,32 +271,64 @@ export const dashboardData = {
       status: anomaly === "Yes" ? "Alert" : "Normal",
     };
   }),
-  "ppe-detection": createRows(54, (index) => {
-    const ts = new Date(timestampFor(index));
-    const helmet = index % 4 === 0 ? "No" : "Yes";
-    const vest = index % 5 === 0 ? "No" : "Yes";
-    const gloves = index % 6 === 0 ? "No" : "Yes";
-    const boots = index % 7 === 0 ? "No" : "Yes";
-    const violations = [];
-    if (helmet === "No") violations.push("Missing Helmet");
-    if (vest === "No") violations.push("Missing Vest");
-    if (gloves === "No") violations.push("Missing Gloves");
-    if (boots === "No") violations.push("Missing Boots");
+  "ppe-detection": createRows(42, (index) => {
+    const swingShiftHours = [14, 15, 16, 17, 18, 19, 20, 21];
+    const morningShiftHours = [6, 7, 8, 9, 10, 11, 12, 13];
+    const nightShiftHours = [22, 23, 0, 1, 2, 3, 4, 5];
+    const shiftPattern = [
+      "Swing Shift",
+      "Swing Shift",
+      "Swing Shift",
+      "Morning Shift",
+      "Night Shift",
+      "Swing Shift",
+      "Morning Shift",
+      "Night Shift",
+    ];
+    const shift = shiftPattern[index % shiftPattern.length];
+    const processedAt = new Date("2025-04-01T00:00:00");
+    processedAt.setDate(1 + (index % 28));
+    const hourPool = shift === "Swing Shift" ? swingShiftHours : shift === "Morning Shift" ? morningShiftHours : nightShiftHours;
+    processedAt.setHours(hourPool[index % hourPool.length], (index * 13) % 60, 0, 0);
+
+    const swingVestHeavy = shift === "Swing Shift" && index % 4 !== 0;
+    const missingBoth = index % 11 === 0;
+    const missingHelmet = !swingVestHeavy && index % 5 === 0;
+    const helmetWorn = !(missingBoth || missingHelmet);
+    const vestWorn = !(missingBoth || swingVestHeavy);
+    const violationType = !helmetWorn && !vestWorn ? "Missing Both" : !helmetWorn ? "Missing Helmet" : !vestWorn ? "Missing Vest" : "Compliant";
+    const isActive = violationType !== "Compliant" ? index % 3 !== 0 : false;
+    const firstSeenSec = 6 + (index % 7) * 8;
+    const durationSec = isActive ? 135 + (index % 6) * 22 : violationType === "Compliant" ? 18 + (index % 4) * 6 : 42 + (index % 5) * 14;
+    const lastSeenSec = firstSeenSec + durationSec;
+
     return {
-      id: `PPE-${index + 1}`,
-      timestamp: ts.toISOString(),
-      location: locations[index % locations.length],
-      zone: zones[index % zones.length],
-      cameraId: cameras[index % cameras.length],
-      shift: shiftForHour(ts.getHours()),
-      personId: `WRK-${4000 + index}`,
-      helmet,
-      vest,
-      gloves,
-      boots,
-      violationType: violations[0] ?? "Compliant",
-      confidence: 0.86 + ((index % 7) * 0.014),
-      status: violations.length ? "Violation" : "Compliant",
+      output_id: index + 1,
+      input_id: 9000 + index,
+      person_id: `WRK-${4100 + (index % 24)}`,
+      helmet_worn: helmetWorn,
+      vest_worn: vestWorn,
+      shoes_worn: index % 9 !== 0,
+      violation_type: violationType,
+      confidence_score: violationType === "Compliant" ? Number((0.91 + ((index % 4) * 0.01)).toFixed(2)) : Number((0.82 + ((index % 6) * 0.025)).toFixed(2)),
+      status: isActive ? "Active" : "Resolved",
+      first_seen_frame: firstSeenSec * 30,
+      last_seen_frame: lastSeenSec * 30,
+      first_seen_sec: firstSeenSec,
+      last_seen_sec: lastSeenSec,
+      processed_at: processedAt.toISOString(),
+      notes:
+        violationType === "Missing Vest" && shift === "Swing Shift"
+          ? "Repeated vest non-compliance during loading overlap."
+          : violationType === "Missing Both"
+            ? "Supervisor review recommended for full PPE breach."
+            : violationType === "Compliant"
+              ? "Worker passed PPE check."
+              : "Helmet non-compliance detected near aisle crossing.",
+      metadata_json: {
+        source: "demo",
+        detector_version: "ppe-monitor-v1",
+      },
     };
   }),
 };
@@ -277,11 +337,11 @@ export const dashboardInfo = {
   "object-counting": "Monitors production-oriented object counts against expected throughput to surface over-count and under-count deviations by zone and camera.",
   "region-alerts": "Shows where restricted-zone violations are happening, when they peak, how serious they are, and which incidents supervisors or security should action first.",
   "queue-management": "Measures queue build-up, staffing impact, breach thresholds, and wait time trends across operational counters and service zones.",
-  "speed-estimation": "Estimates movement speed against configured limits to identify overspeeding objects, hotspots, and high-risk zones over time.",
+  "speed-estimation": "Shows where unsafe movement is happening across industrial zones, which object types exceed configured speed limits most often, and which detections require the quickest operational follow-up.",
   "fire-detection": "A focused safety view showing where fire and smoke alerts are appearing, how quickly they are detected, and which cameras need the closest attention.",
   "class-wise-counting": "Breaks counts down by tracked class to compare actual versus expected activity and reveal which cameras and zones see the highest class mix.",
   "object-tracking": "Tracks object movements, time spent in zones, path sequences, and anomaly rates to reveal congestion and movement inefficiencies.",
-  "ppe-detection": "Measures compliance across workers and shifts, surfacing PPE violations, zone-level risk, and compliance trends over time.",
+  "ppe-detection": "Tracks helmet and vest compliance so operations managers can see which shift carries the most PPE risk, what item is missed most often, and which workers need the fastest follow-up.",
 };
 
 export const globalKeys = {

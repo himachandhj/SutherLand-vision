@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -29,6 +29,11 @@ import testPPEImage from "../Test_PPE.png";
 const BRAND_BLUE = "#27235C";
 const BRAND_RED = "#DE1B54";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+const resolveBackendUrl = (value) => {
+  if (!value) return "";
+  if (value.startsWith("http://") || value.startsWith("https://")) return value;
+  return `${API_BASE_URL}${value}`;
+};
 
 // ── Use Cases (updated lineup) ───────────────────────────────────────────
 
@@ -215,7 +220,7 @@ function VisionLabPage() {
   const [selectedSample, setSelectedSample] = useState(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [selectedFile, setSelectedFile] = useState("PPE_VIDEO1.mp4");
+  const [selectedFile, setSelectedFile] = useState("");
   const [analysisState, setAnalysisState] = useState("idle");
   const [playgroundState, setPlaygroundState] = useState({
     status: "idle",
@@ -254,9 +259,15 @@ function VisionLabPage() {
   });
   const [isConnectingIntegration, setIsConnectingIntegration] = useState(false);
   const [integrationError, setIntegrationError] = useState("");
-  const [isIntegrationUploading, setIsIntegrationUploading] = useState(false);
-  const [integrationUploadMessage, setIntegrationUploadMessage] = useState("");
   const [integrationMode, setIntegrationMode] = useState("manual");
+  const [integrationFetchCount, setIntegrationFetchCount] = useState(10);
+  const [integrationFetchedVideos, setIntegrationFetchedVideos] = useState([]);
+  const [selectedIntegrationVideos, setSelectedIntegrationVideos] = useState([]);
+  const [isFetchingIntegrationVideos, setIsFetchingIntegrationVideos] = useState(false);
+  const [isProcessingIntegrationVideos, setIsProcessingIntegrationVideos] = useState(false);
+  const [integrationFetchMessage, setIntegrationFetchMessage] = useState("");
+  const [integrationProcessMessage, setIntegrationProcessMessage] = useState("");
+  const [expandedRunId, setExpandedRunId] = useState(null);
 
   const currentView =
     searchParams.get("view") === "detail"
@@ -389,23 +400,55 @@ function VisionLabPage() {
 
   const handleIntegrationModeChange = async (nextMode) => {
     setIntegrationMode(nextMode);
-    setIntegrationUploadMessage("");
+    setIntegrationFetchMessage("");
+    setIntegrationProcessMessage("");
     if (!integrationOverview.connected) return;
     await handleIntegrationConnect(nextMode);
   };
 
-  const handleIntegrationUpload = async (files) => {
-    if (!Array.isArray(files) || files.length === 0) return false;
-    setIsIntegrationUploading(true);
-    setIntegrationUploadMessage("");
+  const handleIntegrationFetchVideos = async () => {
+    if (!integrationSupportedUseCases.has(activeUseCaseId)) return;
+    setIsFetchingIntegrationVideos(true);
+    setIntegrationFetchMessage("");
     try {
-      const formData = new FormData();
-      files.forEach((file) => formData.append("files", file));
-      formData.append("use_case_id", activeUseCaseId);
-      const response = await fetch(`${API_BASE_URL}/api/integrations/minio/upload`, { method: "POST", body: formData });
+      const response = await fetch(
+        `${API_BASE_URL}/api/integrations/minio/input-videos?use_case_id=${encodeURIComponent(activeUseCaseId)}&limit=${encodeURIComponent(String(integrationFetchCount))}`
+      );
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null);
-        throw new Error(errorPayload?.detail ?? "Unable to upload videos to MinIO.");
+        throw new Error(errorPayload?.detail ?? "Unable to fetch MinIO videos.");
+      }
+      const data = await response.json();
+      const videos = Array.isArray(data?.videos) ? data.videos : [];
+      setIntegrationFetchedVideos(videos);
+      setSelectedIntegrationVideos((current) => current.filter((key) => videos.some((video) => video.object_key === key && video.status !== "completed" && video.status !== "processing")));
+      setIntegrationFetchMessage(
+        `Fetched ${Number(data?.fetched_count ?? videos.length)} video${Number(data?.fetched_count ?? videos.length) === 1 ? "" : "s"} from ${activeUseCase.title} input storage.`
+      );
+      setIntegrationError("");
+    } catch (error) {
+      setIntegrationFetchMessage(`✗ ${error instanceof Error ? error.message : "Unable to fetch MinIO videos."}`);
+    } finally {
+      setIsFetchingIntegrationVideos(false);
+    }
+  };
+
+  const handleIntegrationProcessSelected = async () => {
+    if (selectedIntegrationVideos.length === 0) return;
+    setIsProcessingIntegrationVideos(true);
+    setIntegrationProcessMessage("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/integrations/minio/process-selected`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          use_case_id: activeUseCaseId,
+          object_keys: selectedIntegrationVideos,
+        }),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        throw new Error(errorPayload?.detail ?? "Unable to queue selected videos.");
       }
       const data = await response.json();
       if (data?.overview) {
@@ -413,15 +456,13 @@ function VisionLabPage() {
       } else {
         await fetchIntegrationOverview();
       }
-      const queuedCount = Number(data?.queued_count ?? files.length);
-      setIntegrationUploadMessage(`✓ Uploaded ${queuedCount} video${queuedCount === 1 ? "" : "s"} to MinIO input and queued for processing.`);
-      setIntegrationError("");
-      return true;
+      setIntegrationProcessMessage(data?.message ?? "Selected videos have been queued.");
+      setSelectedIntegrationVideos([]);
+      await handleIntegrationFetchVideos();
     } catch (error) {
-      setIntegrationUploadMessage(`✗ ${error instanceof Error ? error.message : "Unable to upload videos to MinIO."}`);
-      return false;
+      setIntegrationProcessMessage(`✗ ${error instanceof Error ? error.message : "Unable to queue selected videos."}`);
     } finally {
-      setIsIntegrationUploading(false);
+      setIsProcessingIntegrationVideos(false);
     }
   };
 
@@ -443,6 +484,14 @@ function VisionLabPage() {
     const poller = setInterval(fetchIntegrationOverview, 5000);
     return () => clearInterval(poller);
   }, [activeUseCaseId, integrationOverview.connected, integrationOverview.processing]);
+
+  useEffect(() => {
+    setIntegrationFetchedVideos([]);
+    setSelectedIntegrationVideos([]);
+    setIntegrationFetchMessage("");
+    setIntegrationProcessMessage("");
+    setExpandedRunId(null);
+  }, [activeUseCaseId]);
 
   useEffect(() => {
     setSelectedSample(null);
@@ -472,7 +521,8 @@ function VisionLabPage() {
     }));
     setIntegrationMode("manual");
     setIntegrationError("");
-    setIntegrationUploadMessage("");
+    setIntegrationFetchMessage("");
+    setIntegrationProcessMessage("");
   }, [activeUseCaseId]);
 
   const navigateTo = (nextView, nextTab, method = "push", nextSection = activeSection, useCaseId) => {
@@ -567,7 +617,9 @@ function VisionLabPage() {
       const data = await response.json();
       setAnalysisState("completed");
       setVideoAnalysisMessage(data.message ?? "Analysis started.");
-      setVideoResultUrl(data.result_url ? `${API_BASE_URL}${data.result_url}` : "");
+      const resolvedOutputUrl = resolveBackendUrl(data.output_url || data.result_url || "");
+      console.log("Processed output_url:", resolvedOutputUrl);
+      setVideoResultUrl(resolvedOutputUrl);
       if (data.metrics && Object.keys(data.metrics).length > 0) setLatestMetrics(data.metrics);
       fetchJobs();
     } catch (error) {
@@ -621,13 +673,23 @@ function VisionLabPage() {
           integrationOverview={integrationOverview}
           integrationError={integrationError}
           isConnectingIntegration={isConnectingIntegration}
-          isIntegrationUploading={isIntegrationUploading}
           integrationMode={integrationMode}
-          integrationUploadMessage={integrationUploadMessage}
+          integrationFetchCount={integrationFetchCount}
+          integrationFetchedVideos={integrationFetchedVideos}
+          selectedIntegrationVideos={selectedIntegrationVideos}
+          isFetchingIntegrationVideos={isFetchingIntegrationVideos}
+          isProcessingIntegrationVideos={isProcessingIntegrationVideos}
+          integrationFetchMessage={integrationFetchMessage}
+          integrationProcessMessage={integrationProcessMessage}
+          expandedRunId={expandedRunId}
           onIntegrationFieldChange={handleIntegrationFieldChange}
           onIntegrationConnect={handleIntegrationConnect}
           onIntegrationModeChange={handleIntegrationModeChange}
-          onIntegrationUpload={handleIntegrationUpload}
+          onIntegrationFetchCountChange={setIntegrationFetchCount}
+          onIntegrationFetchVideos={handleIntegrationFetchVideos}
+          onIntegrationSelectionChange={setSelectedIntegrationVideos}
+          onIntegrationProcessSelected={handleIntegrationProcessSelected}
+          onToggleRunAnalysis={(runId) => setExpandedRunId((current) => (current === runId ? null : runId))}
           onOpenAnalyticsDashboard={() => {
             const slug = useCaseToAnalyticsDashboardSlug[activeUseCaseId] ?? activeUseCaseId;
             router.push(`/dashboard/${slug}`);
@@ -800,8 +862,10 @@ function DetailPage({
   jobHistory, jobsError, isLoadingJobs, videoAnalysisMessage, videoResultUrl, latestMetrics,
   videoFiles, isUploading, uploadMessage, onUploadVideo,
   integrationForm, integrationOverview, integrationError, isConnectingIntegration,
-  isIntegrationUploading, integrationMode, integrationUploadMessage,
-  onIntegrationFieldChange, onIntegrationConnect, onIntegrationModeChange, onIntegrationUpload,
+  integrationMode, integrationFetchCount, integrationFetchedVideos, selectedIntegrationVideos,
+  isFetchingIntegrationVideos, isProcessingIntegrationVideos, integrationFetchMessage, integrationProcessMessage, expandedRunId,
+  onIntegrationFieldChange, onIntegrationConnect, onIntegrationModeChange,
+  onIntegrationFetchCountChange, onIntegrationFetchVideos, onIntegrationSelectionChange, onIntegrationProcessSelected, onToggleRunAnalysis,
   onOpenAnalyticsDashboard,
 }) {
   return (
@@ -853,13 +917,23 @@ function DetailPage({
             integrationOverview={integrationOverview}
             integrationError={integrationError}
             isConnectingIntegration={isConnectingIntegration}
-            isIntegrationUploading={isIntegrationUploading}
             integrationMode={integrationMode}
-            integrationUploadMessage={integrationUploadMessage}
+            integrationFetchCount={integrationFetchCount}
+            integrationFetchedVideos={integrationFetchedVideos}
+            selectedIntegrationVideos={selectedIntegrationVideos}
+            isFetchingIntegrationVideos={isFetchingIntegrationVideos}
+            isProcessingIntegrationVideos={isProcessingIntegrationVideos}
+            integrationFetchMessage={integrationFetchMessage}
+            integrationProcessMessage={integrationProcessMessage}
+            expandedRunId={expandedRunId}
             onIntegrationFieldChange={onIntegrationFieldChange}
             onIntegrationConnect={onIntegrationConnect}
             onIntegrationModeChange={onIntegrationModeChange}
-            onIntegrationUpload={onIntegrationUpload}
+            onIntegrationFetchCountChange={onIntegrationFetchCountChange}
+            onIntegrationFetchVideos={onIntegrationFetchVideos}
+            onIntegrationSelectionChange={onIntegrationSelectionChange}
+            onIntegrationProcessSelected={onIntegrationProcessSelected}
+            onToggleRunAnalysis={onToggleRunAnalysis}
           />
         )}
         {activeTab === "Dashboard" && (
@@ -1035,6 +1109,57 @@ function formatIntegrationTime(value) {
   return date.toLocaleString();
 }
 
+function formatAnalysisLabel(key) {
+  return (key || "")
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatAnalysisValue(value) {
+  if (value === null || value === undefined || value === "") return "\u2014";
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) return String(value);
+    return value.toFixed(2);
+  }
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function RunAnalysisPanel({ run }) {
+  const entries = Object.entries(run.metrics ?? {});
+
+  return (
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-900">Output Analysis</h4>
+          <p className="mt-1 text-sm text-slate-500">Latest analysis metadata captured for this {run.use_case_id.replaceAll("-", " ")} run.</p>
+        </div>
+        <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
+      </div>
+      {entries.length === 0 ? (
+        <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+          No analysis metadata was stored for this run.
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {entries.map(([key, value]) => (
+            <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{formatAnalysisLabel(key)}</div>
+              <div className="mt-2 break-words text-sm font-medium text-slate-800">{formatAnalysisValue(value)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-4 text-xs text-slate-400">
+        {run.message || "No additional run note available."}
+      </div>
+    </div>
+  );
+}
+
 function IntegrationField({ label, type = "text", value, onChange, placeholder }) {
   return (
     <label className="block">
@@ -1123,99 +1248,144 @@ function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLa
   );
 }
 
-function IntegrationUploadPanel({ connection, disabled, isUploading, message, onUpload, useCaseLabel }) {
-  const fileInputRef = useRef(null);
-  const [selectedFiles, setSelectedFiles] = useState([]);
+function IntegrationManualPanel({
+  connection,
+  disabled,
+  fetchCount,
+  fetchedVideos,
+  isFetching,
+  isProcessing,
+  fetchMessage,
+  processMessage,
+  selectedVideos,
+  useCaseLabel,
+  onFetchCountChange,
+  onFetchVideos,
+  onProcessSelected,
+  onSelectionChange,
+}) {
+  const selectableVideos = fetchedVideos.filter((video) => !["completed", "processing"].includes(video.status));
+  const allSelectableSelected = selectableVideos.length > 0 && selectableVideos.every((video) => selectedVideos.includes(video.object_key));
 
-  const handleFilesSelected = (event) => {
-    const files = Array.from(event.target.files ?? []);
-    setSelectedFiles(files);
+  const toggleVideo = (objectKey) => {
+    onSelectionChange(
+      selectedVideos.includes(objectKey)
+        ? selectedVideos.filter((key) => key !== objectKey)
+        : [...selectedVideos, objectKey]
+    );
   };
 
-  const handleUpload = async () => {
-    if (selectedFiles.length === 0) return;
-    const uploaded = await onUpload(selectedFiles);
-    if (uploaded) {
-      setSelectedFiles([]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  const toggleSelectAll = () => {
+    if (allSelectableSelected) {
+      onSelectionChange(selectedVideos.filter((key) => !selectableVideos.some((video) => video.object_key === key)));
+      return;
     }
+    const next = new Set(selectedVideos);
+    selectableVideos.forEach((video) => next.add(video.object_key));
+    onSelectionChange(Array.from(next));
   };
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h3 className="text-lg font-semibold text-slate-900">Upload Videos To MinIO</h3>
+          <h3 className="text-lg font-semibold text-slate-900">Manual Fetch & Process</h3>
           <p className="mt-1 text-sm text-slate-500">
-            Add one or more videos into the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix and queue them for <strong>{useCaseLabel}</strong> processing.
+            Fetch videos from the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix, choose the {useCaseLabel} inputs you want, and process only those selections.
           </p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
           Target bucket: <strong className="text-slate-700">{connection?.bucket ?? "Not connected"}</strong>
         </div>
       </div>
-      <div className={`mt-5 rounded-2xl border-2 border-dashed p-6 ${disabled ? "border-slate-200 bg-slate-50" : "border-brandBlue/30 bg-brandBlue/[0.03]"}`}>
-        <input ref={fileInputRef} accept=".mp4,.avi,.mov,.mkv,.webm,video/*" className="hidden" multiple type="file" onChange={handleFilesSelected} />
+      <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="text-sm font-semibold text-slate-700">
-              {selectedFiles.length === 0 ? "Select one or more videos to upload into MinIO input storage." : `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected`}
-            </div>
-            {selectedFiles.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {selectedFiles.map((file) => (
-                  <span key={`${file.name}-${file.size}`} className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600">{file.name}</span>
-                ))}
-              </div>
-            )}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-sm font-semibold text-slate-700" htmlFor="integration-fetch-count">Fetch count</label>
+            <select
+              id="integration-fetch-count"
+              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+              disabled={disabled || isFetching}
+              value={fetchCount}
+              onChange={(event) => onFetchCountChange(Number(event.target.value))}
+            >
+              {[5, 10, 20, 50].map((count) => (
+                <option key={count} value={count}>{count}</option>
+              ))}
+            </select>
+            <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isFetching} onClick={onFetchVideos} type="button">
+              {isFetching ? "Fetching..." : "Fetch Videos"}
+            </button>
           </div>
           <div className="flex flex-wrap gap-3">
-            <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isUploading} onClick={() => fileInputRef.current?.click()} type="button">Select Files</button>
-            <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isUploading || selectedFiles.length === 0} onClick={handleUpload} type="button">
-              {isUploading ? "Uploading..." : "Upload To MinIO"}
+            <button className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:border-brandBlue hover:text-brandBlue disabled:cursor-not-allowed disabled:opacity-60" disabled={selectableVideos.length === 0} onClick={toggleSelectAll} type="button">
+              {allSelectableSelected ? "Clear Selection" : "Select All"}
+            </button>
+            <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isProcessing || selectedVideos.length === 0} onClick={onProcessSelected} type="button">
+              {isProcessing ? "Processing..." : `Process Selected${selectedVideos.length > 0 ? ` (${selectedVideos.length})` : ""}`}
             </button>
           </div>
         </div>
       </div>
-      {message && (
-        <div className={`mt-4 rounded-2xl border px-4 py-4 text-sm font-medium ${message.startsWith("\u2717") ? "border-red-200 bg-red-50 text-red-700" : "border-brandBlue/15 bg-brandBlue/[0.03] text-slate-700"}`}>
-          {message}
+      {fetchMessage && (
+        <div className={`mt-4 rounded-2xl border px-4 py-4 text-sm font-medium ${fetchMessage.startsWith("\u2717") ? "border-red-200 bg-red-50 text-red-700" : "border-brandBlue/15 bg-brandBlue/[0.03] text-slate-700"}`}>
+          {fetchMessage}
         </div>
       )}
-    </section>
-  );
-}
-
-function IntegrationVideoCard({ item, label }) {
-  return (
-    <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-panel">
-      <div className="aspect-video bg-slate-950">
-        {item.preview_url ? (
-          <video className="h-full w-full object-cover" controls muted playsInline preload="metadata" src={item.preview_url} />
+      {processMessage && (
+        <div className={`mt-4 rounded-2xl border px-4 py-4 text-sm font-medium ${processMessage.startsWith("\u2717") ? "border-red-200 bg-red-50 text-red-700" : "border-brandBlue/15 bg-brandBlue/[0.03] text-slate-700"}`}>
+          {processMessage}
+        </div>
+      )}
+      <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
+        {fetchedVideos.length === 0 ? (
+          <div className="bg-white px-4 py-10 text-center text-sm text-slate-500">
+            Fetch videos to list the current {useCaseLabel} inputs from MinIO.
+          </div>
         ) : (
-          <div className="flex h-full items-center justify-center text-sm text-slate-400">Preview unavailable</div>
+          <table className="min-w-full divide-y divide-slate-200 text-left">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Select</th>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Video</th>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Status</th>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Updated</th>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Size</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 bg-white">
+              {fetchedVideos.map((video) => {
+                const selectable = !["completed", "processing"].includes(video.status);
+                return (
+                  <tr key={video.object_key} className="hover:bg-slate-50">
+                    <td className="px-5 py-4">
+                      <input
+                        checked={selectedVideos.includes(video.object_key)}
+                        className="h-4 w-4 rounded border-slate-300 text-brandBlue focus:ring-brandBlue"
+                        disabled={!selectable}
+                        type="checkbox"
+                        onChange={() => toggleVideo(video.object_key)}
+                      />
+                    </td>
+                    <td className="px-5 py-4 text-sm text-slate-700">
+                      <div className="font-medium text-slate-800">{video.name}</div>
+                      <div className="mt-1 break-all text-xs text-slate-500">{video.object_key}</div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(video.status)}`}>
+                        {formatIntegrationStatus(video.status)}
+                      </span>
+                    </td>
+                    <td className="px-5 py-4 text-sm text-slate-500">{formatIntegrationTime(video.updated_at || video.last_modified)}</td>
+                    <td className="px-5 py-4 text-sm text-slate-500">{formatIntegrationBytes(video.size_bytes)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
       </div>
-      <div className="space-y-3 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-slate-900">{item.name}</div>
-            <div className="mt-1 break-all text-xs leading-5 text-slate-500">{item.object_key}</div>
-          </div>
-          <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(item.status)}`}>{formatIntegrationStatus(item.status)}</span>
-        </div>
-        <div className="grid grid-cols-2 gap-3 text-xs text-slate-500">
-          <div>
-            <div className="font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</div>
-            <div className="mt-1">{formatIntegrationTime(item.updated_at || item.last_modified)}</div>
-          </div>
-          <div>
-            <div className="font-semibold uppercase tracking-[0.16em] text-slate-400">Size</div>
-            <div className="mt-1">{formatIntegrationBytes(item.size_bytes)}</div>
-          </div>
-        </div>
-      </div>
-    </article>
+    </section>
   );
 }
 
@@ -1225,20 +1395,28 @@ function IntegrationTab({
   integrationOverview,
   integrationError,
   isConnectingIntegration,
-  isIntegrationUploading,
   integrationMode,
-  integrationUploadMessage,
+  integrationFetchCount,
+  integrationFetchedVideos,
+  selectedIntegrationVideos,
+  isFetchingIntegrationVideos,
+  isProcessingIntegrationVideos,
+  integrationFetchMessage,
+  integrationProcessMessage,
+  expandedRunId,
   onIntegrationFieldChange,
   onIntegrationConnect,
   onIntegrationModeChange,
-  onIntegrationUpload,
+  onIntegrationFetchCountChange,
+  onIntegrationFetchVideos,
+  onIntegrationSelectionChange,
+  onIntegrationProcessSelected,
+  onToggleRunAnalysis,
 }) {
   const supportedUseCase = integrationSupportedUseCases.has(activeUseCase.id);
   const useCaseLabel = activeUseCase.title;
   const connection = integrationOverview?.connection;
   const recentRuns = integrationOverview?.recent_runs ?? [];
-  const inputVideos = integrationOverview?.input_videos ?? [];
-  const outputVideos = integrationOverview?.output_videos ?? [];
   const activeMode = connection?.processing_mode ?? integrationMode;
   const isAutoMode = activeMode === "auto";
 
@@ -1283,7 +1461,7 @@ function IntegrationTab({
             <p className="mt-3 text-sm text-slate-500">
               {isAutoMode
                 ? `Auto mode continuously monitors the MinIO input prefix and processes new ${useCaseLabel} videos automatically.`
-                : `Manual mode uploads selected local videos into MinIO and processes only the queued ${useCaseLabel} uploads.`}
+                : `Manual mode fetches videos already present in the MinIO input prefix and processes only the ${useCaseLabel} videos you select.`}
             </p>
           </div>
 
@@ -1339,17 +1517,32 @@ function IntegrationTab({
       {isAutoMode ? (
         <IntegrationAutoPanel connection={connection} isConnected={integrationOverview.connected} isProcessing={integrationOverview.processing} useCaseLabel={useCaseLabel} />
       ) : (
-        <IntegrationUploadPanel connection={connection} disabled={!supportedUseCase || !integrationOverview.connected} isUploading={isIntegrationUploading} message={integrationUploadMessage} onUpload={onIntegrationUpload} useCaseLabel={useCaseLabel} />
+        <IntegrationManualPanel
+          connection={connection}
+          disabled={!supportedUseCase || !integrationOverview.connected}
+          fetchCount={integrationFetchCount}
+          fetchedVideos={integrationFetchedVideos}
+          isFetching={isFetchingIntegrationVideos}
+          isProcessing={isProcessingIntegrationVideos}
+          fetchMessage={integrationFetchMessage}
+          processMessage={integrationProcessMessage}
+          selectedVideos={selectedIntegrationVideos}
+          useCaseLabel={useCaseLabel}
+          onFetchCountChange={onIntegrationFetchCountChange}
+          onFetchVideos={onIntegrationFetchVideos}
+          onProcessSelected={onIntegrationProcessSelected}
+          onSelectionChange={onIntegrationSelectionChange}
+        />
       )}
 
       {/* Summary metrics */}
       <section className="grid gap-4 md:grid-cols-3">
         <IntegrationMetricCard
-          helper={isAutoMode ? "Videos discovered in the MinIO input prefix." : "Manual uploads visible in the configured input prefix."}
-          label="Input Videos"
-          value={integrationOverview.summary?.input_videos ?? inputVideos.length}
+          helper={isAutoMode ? "Videos discovered in the MinIO input prefix." : "Total videos currently available in the use-case-specific MinIO input prefix."}
+          label="Available Inputs"
+          value={integrationOverview.summary?.input_videos ?? 0}
         />
-        <IntegrationMetricCard helper="Processed objects available in the output prefix." label="Output Videos" value={integrationOverview.summary?.output_videos ?? outputVideos.length} />
+        <IntegrationMetricCard helper="Queued or in-flight runs for the current use case." label="Queued / Processing" value={integrationOverview.summary?.processing_runs ?? 0} />
         <IntegrationMetricCard
           helper={integrationOverview.processing ? "Pipeline is actively processing." : "Last batch complete or awaiting new inputs."}
           label="Recent Runs"
@@ -1370,7 +1563,7 @@ function IntegrationTab({
         </div>
         {recentRuns.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-            {integrationOverview.connected ? `No ${useCaseLabel} runs yet. Upload a video to start.` : "Connect to MinIO to see recent processing runs."}
+            {integrationOverview.connected ? `No ${useCaseLabel} runs yet. Fetch input videos or let Auto mode discover new ones.` : "Connect to MinIO to see recent processing runs."}
           </div>
         ) : (
           <div className="overflow-hidden rounded-2xl border border-slate-200">
@@ -1381,62 +1574,50 @@ function IntegrationTab({
                   <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Output Object</th>
                   <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Status</th>
                   <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Updated</th>
-                  <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Preview</th>
+                  <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 bg-white">
                 {recentRuns.map((run) => (
-                  <tr key={run.id} className="hover:bg-slate-50">
-                    <td className="px-5 py-4 text-sm text-slate-700">
-                      <div className="font-medium text-slate-800">{run.input_key.split("/").pop()}</div>
-                      <div className="mt-1 break-all text-xs text-slate-500">{run.input_key}</div>
-                    </td>
-                    <td className="px-5 py-4 text-sm text-slate-700">
-                      {run.output_key ? (
-                        <><div className="font-medium text-slate-800">{run.output_key.split("/").pop()}</div><div className="mt-1 break-all text-xs text-slate-500">{run.output_key}</div></>
-                      ) : <span className="text-slate-400">Pending</span>}
-                    </td>
-                    <td className="px-5 py-4">
-                      <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(run.status)}`}>{formatIntegrationStatus(run.status)}</span>
-                    </td>
-                    <td className="px-5 py-4 text-sm text-slate-500">{formatIntegrationTime(run.updated_at)}</td>
-                    <td className="px-5 py-4">
-                      {run.output_url ? <a className="text-sm font-semibold text-brandBlue hover:underline" href={run.output_url} rel="noreferrer" target="_blank">Open Output</a>
-                        : run.input_url ? <a className="text-sm font-semibold text-brandBlue hover:underline" href={run.input_url} rel="noreferrer" target="_blank">Open Input</a>
-                        : <span className="text-sm text-slate-400">Unavailable</span>}
-                    </td>
-                  </tr>
+                  <Fragment key={run.id}>
+                    <tr key={run.id} className="hover:bg-slate-50">
+                      <td className="px-5 py-4 text-sm text-slate-700">
+                        <div className="font-medium text-slate-800">{run.input_key.split("/").pop()}</div>
+                        <div className="mt-1 break-all text-xs text-slate-500">{run.input_key}</div>
+                      </td>
+                      <td className="px-5 py-4 text-sm text-slate-700">
+                        {run.output_key ? (
+                          <><div className="font-medium text-slate-800">{run.output_key.split("/").pop()}</div><div className="mt-1 break-all text-xs text-slate-500">{run.output_key}</div></>
+                        ) : <span className="text-slate-400">Pending</span>}
+                      </td>
+                      <td className="px-5 py-4">
+                        <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(run.status)}`}>{formatIntegrationStatus(run.status)}</span>
+                      </td>
+                      <td className="px-5 py-4 text-sm text-slate-500">{formatIntegrationTime(run.updated_at)}</td>
+                      <td className="px-5 py-4">
+                        <div className="flex flex-wrap gap-3">
+                          {run.output_url ? <a className="text-sm font-semibold text-brandBlue hover:underline" href={resolveBackendUrl(run.output_url)} onClick={() => console.log("Run output_url:", resolveBackendUrl(run.output_url))} rel="noreferrer" target="_blank">Open Output</a>
+                            : run.input_url ? <a className="text-sm font-semibold text-brandBlue hover:underline" href={resolveBackendUrl(run.input_url)} rel="noreferrer" target="_blank">Open Input</a>
+                            : <span className="text-sm text-slate-400">Unavailable</span>}
+                          <button className="text-sm font-semibold text-brandBlue hover:underline disabled:cursor-not-allowed disabled:text-slate-400" disabled={!run.metrics || Object.keys(run.metrics).length === 0} onClick={() => onToggleRunAnalysis(run.id)} type="button">
+                            Output Analysis
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expandedRunId === run.id && (
+                      <tr className="bg-slate-50/80">
+                        <td className="px-5 pb-5 pt-0" colSpan={5}>
+                          <RunAnalysisPanel run={run} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </section>
-
-      {/* Input / Output video cards */}
-      <section className="grid gap-6 xl:grid-cols-2">
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-slate-900">Input Videos</h3>
-            <p className="mt-1 text-sm text-slate-500">Latest {useCaseLabel} video objects in the MinIO input prefix.</p>
-          </div>
-          {inputVideos.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">No input videos available yet.</div>
-          ) : (
-            <div className="grid gap-4">{inputVideos.map((item) => <IntegrationVideoCard item={item} key={item.object_key} label="Discovered" />)}</div>
-          )}
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
-          <div className="mb-4">
-            <h3 className="text-lg font-semibold text-slate-900">Processed Outputs</h3>
-            <p className="mt-1 text-sm text-slate-500">Latest {useCaseLabel} outputs in the MinIO output prefix.</p>
-          </div>
-          {outputVideos.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">Processed outputs will appear here after the backend finishes.</div>
-          ) : (
-            <div className="grid gap-4">{outputVideos.map((item) => <IntegrationVideoCard item={item} key={item.object_key} label="Updated" />)}</div>
-          )}
-        </div>
       </section>
     </div>
   );

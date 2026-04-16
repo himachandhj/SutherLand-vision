@@ -30,7 +30,6 @@ import { DataTable } from "../ui/table";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
 import { PillCheckboxRow } from "../ui/pill-checkbox";
-import { usePPEData } from "../../src/hooks/usePPEData";
 import { useFireData } from "../../src/hooks/useFireData";
 import { average, byTimestamp, formatDate, formatDateTime, formatSeconds, groupBy, shiftFromTimestamp, sortRows, sum, toneForStatus, uniqueOptions } from "./helpers";
 
@@ -144,34 +143,36 @@ function asSingleFilterValue(value) {
   return String(value);
 }
 
-function mapPPECsvRowToDashboard(row, index) {
-  const rawDate = row.Date ?? row.date ?? new Date().toISOString();
-  const eventType = String(row.EventType ?? row.eventType ?? "Compliant");
-  const severity = String(row.Severity ?? row.severity ?? "Low").toLowerCase();
-  const normalizedStatus = eventType.toLowerCase() === "compliant" ? "Compliant" : "Violation";
-  const shift = (() => {
-    const h = new Date(rawDate).getHours();
-    if (h < 12) return "Morning";
-    if (h < 18) return "Afternoon";
-    return "Night";
-  })();
+function normalizePPERecord(row, index) {
+  const processedAt = row.processed_at || row.processedAt || row.timestamp || new Date().toISOString();
+  const shift = shiftFromTimestamp(processedAt);
+  const firstSeenSec = Number(row.first_seen_sec ?? row.firstSeenSec ?? 0);
+  const lastSeenSec = Number(row.last_seen_sec ?? row.lastSeenSec ?? firstSeenSec);
+  const durationSec = Math.max(0, lastSeenSec - firstSeenSec);
+  const rawStatus = String(row.status || "Resolved");
+  const status = rawStatus === "Active" ? "Active" : "Resolved";
+  const violationType = String(row.violation_type || row.violationType || "Compliant");
 
   return {
-    id: row.id || `CSV-PPE-${index + 1}`,
-    timestamp: rawDate,
-    location: row.Location || row.location || "Warehouse A",
-    zone: row.Zone || row.zone || "Receiving Bay",
-    cameraId: row.CameraID || row.cameraId || `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    outputId: row.output_id ?? row.outputId ?? index + 1,
+    inputId: row.input_id ?? row.inputId ?? "",
+    personId: row.person_id ?? row.personId ?? `WRK-${index + 1}`,
+    helmetWorn: Boolean(row.helmet_worn),
+    vestWorn: Boolean(row.vest_worn),
+    violationType,
+    confidenceScore: Number(row.confidence_score ?? row.confidenceScore ?? 0),
+    status,
+    firstSeenFrame: Number(row.first_seen_frame ?? row.firstSeenFrame ?? 0),
+    lastSeenFrame: Number(row.last_seen_frame ?? row.lastSeenFrame ?? 0),
+    firstSeenSec,
+    lastSeenSec,
+    processedAt,
+    notes: row.notes || "",
+    metadataJson: row.metadata_json ?? {},
+    timestamp: processedAt,
     shift,
-    personId: row.PersonID || row.personId || `CSV-WRK-${index + 1}`,
-    helmet: normalizedStatus === "Violation" && eventType.toLowerCase().includes("helmet") ? "No" : "Yes",
-    vest: normalizedStatus === "Violation" && eventType.toLowerCase().includes("vest") ? "No" : "Yes",
-    gloves: normalizedStatus === "Violation" && eventType.toLowerCase().includes("glove") ? "No" : "Yes",
-    boots: normalizedStatus === "Violation" && eventType.toLowerCase().includes("boot") ? "No" : "Yes",
-    violationType: eventType,
-    confidence: severity === "high" ? 0.9 : severity === "medium" ? 0.84 : 0.78,
-    status: normalizedStatus,
-    description: row.Description || row.description || "",
+    durationSec,
+    entryTime: processedAt,
   };
 }
 
@@ -228,6 +229,46 @@ function normalizeFireVideoSummary(row, index) {
     escalationNeeded,
     outputVideo: row.outputVideo || row.output_video || row.minio_video_link || "",
     firePriority: (escalationNeeded === "Yes" ? 1000 : 0) + (severity === "High" ? 300 : severity === "Medium" ? 100 : 0) + firstDetectionSec,
+  };
+}
+
+function normalizeSpeedRow(row, index) {
+  const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
+  const speedLimit = Number(row.speed_limit_kmh ?? row.speedLimitKmh ?? row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? 0);
+  const detectedSpeed = Number(row.detected_speed_kmh ?? row.detectedSpeedKmh ?? 0);
+  const excessSpeed = Number(row.excess_speed_kmh ?? row.excessSpeed ?? Math.max(detectedSpeed - speedLimit, 0));
+  const isOverspeeding = String(row.is_overspeeding ?? row.isOverspeeding ?? (excessSpeed > 0 ? "Yes" : "No"));
+  const severity =
+    excessSpeed > 7
+      ? "High"
+      : excessSpeed > 3
+        ? "Medium"
+        : excessSpeed > 0
+          ? "Low"
+          : "None";
+
+  return {
+    id: row.output_id ?? row.id ?? `SE-${index + 1}`,
+    inputId: row.input_id ?? row.inputId ?? "",
+    outputId: row.output_id ?? row.outputId ?? "",
+    timestamp,
+    simulatedTimestamp: row.simulated_timestamp ?? timestamp,
+    cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    location: row.location ?? "Warehouse A",
+    zone: row.zone ?? "Storage Bay",
+    zoneSpeedLimitKmh: Number(row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? speedLimit),
+    minioVideoLink: row.minio_video_link ?? "",
+    loadTimeSec: Number(row.load_time_sec ?? row.loadTimeSec ?? 0),
+    objectId: row.object_id ?? row.objectId ?? `TRK-${index + 1}`,
+    objectType: String(row.object_type ?? row.objectType ?? "car"),
+    detectedSpeedKmh: detectedSpeed,
+    speedLimitKmh: speedLimit,
+    isOverspeeding,
+    excessSpeedKmh: excessSpeed,
+    confidenceScore: Number(row.confidence_score ?? row.confidence ?? row.confidenceScore ?? 0),
+    status: row.status ?? (isOverspeeding === "Yes" ? "Violation" : "Normal"),
+    severity,
+    speedPriority: (severity === "High" ? 1000 : severity === "Medium" ? 500 : severity === "Low" ? 200 : 0) + excessSpeed * 10 + detectedSpeed,
   };
 }
 
@@ -303,6 +344,7 @@ function getInitialExtraFilters(slug, extraFilterDefs) {
 function initialSortStateFor(slug, columns) {
   if (slug === "region-alerts") return { key: "escalationPriority", direction: "desc" };
   if (slug === "fire-detection") return { key: "firePriority", direction: "desc" };
+  if (slug === "speed-estimation") return { key: "speedPriority", direction: "desc" };
   return { key: columns[0].key, direction: "asc" };
 }
 
@@ -392,7 +434,7 @@ function DonutChartCard({ title, description, data, showSlicePercent = false }) 
                   paddingAngle={3}
                   label={({ value }) => {
                     if (!value) return "";
-                    if (showSlicePercent) return `${Math.round((value / Math.max(total, 1)) * 100)}%`;
+                    if (showSlicePercent) return `${value} (${Math.round((value / Math.max(total, 1)) * 100)}%)`;
                     return value;
                   }}
                 >
@@ -672,47 +714,57 @@ function buildDashboardViews(slug, rows, granularity) {
       ];
     }
     case "speed-estimation": {
-      const byZoneCounts = aggregateBy(rows.filter((row) => row.isOverspeeding === "Yes"), "zone", () => 1, sum).map((item) => ({ label: item.label, value: item.value }));
+      const violationRows = rows.filter((row) => row.isOverspeeding === "Yes");
+      const byZoneCounts = aggregateBy(violationRows, "zone", () => 1, sum)
+        .map((item) => ({ label: item.label, value: item.value }))
+        .sort((a, b) => b.value - a.value);
       const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
         label,
-        speed: average(items.map((row) => row.detectedSpeedKmh)),
-        limit: average(items.map((row) => row.speedLimitKmh)),
-        violationRatio: items.length ? items.filter((row) => row.isOverspeeding === "Yes").length / items.length : 0,
+        detectedSpeed: Number(average(items.map((row) => row.detectedSpeedKmh)).toFixed(1)),
+        speedLimit: Number(average(items.map((row) => row.speedLimitKmh)).toFixed(1)),
+        violationCount: items.filter((row) => row.isOverspeeding === "Yes").length,
       }));
-      const refSpeedLimit = rows.length ? average(rows.map((row) => row.speedLimitKmh)) : 0;
-      const byType = aggregateBy(rows.filter((row) => row.isOverspeeding === "Yes"), "objectType", () => 1, sum).map((item, index) => ({
-        label: item.label,
-        value: item.value,
-        barFill: chartPalette[index % chartPalette.length],
-      }));
+      const byType = aggregateBy(violationRows, "objectType", () => 1, sum)
+        .map((item, index) => ({
+          label: item.label,
+          value: item.value,
+          barFill: chartPalette[index % chartPalette.length],
+        }))
+        .sort((a, b) => b.value - a.value);
       const donut = [
         { label: "Violation", value: rows.filter((row) => row.isOverspeeding === "Yes").length, color: "#DE1B54" },
-        { label: "Normal", value: rows.filter((row) => row.isOverspeeding === "No").length, color: SEMANTIC_GREEN },
+        { label: "Normal", value: rows.filter((row) => row.isOverspeeding !== "Yes").length, color: "#27235C" },
       ];
+      const severityData = ["High", "Medium", "Low"].map((label, index) => ({
+        label,
+        value: violationRows.filter((row) => row.severity === label).length,
+        color: [ "#DE1B54", "rgba(222, 27, 84, 0.6)", "#27235C" ][index],
+      }));
       return [
-        <BarChartCard key="1" title="Speed Violations by Zone" description="Zones with the highest count of speed violations." data={byZoneCounts} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Zone" yAxisLabel="Violations" />,
+        <BarChartCard key="1" title="Highest-Risk Zones by Speed Violations" description="Highlights the areas where movement most often exceeds configured safety limits." data={byZoneCounts} bars={[{ dataKey: "value", color: "#DE1B54", showLabels: true }]} xAxisLabel="Zone" yAxisLabel="Violation Count" showLegend={false} />,
         <LineChartCard
           key="2"
-          title="Speed Trend Over Time"
-          description="Detected speed against the configured limit; dots are red for violations and green for normal."
+          title="Detected Speed vs Zone Speed Limit Over Time"
+          description="Shows whether unsafe speed events are isolated or recurring across the monitoring period."
           data={trend}
           lines={[
             {
-              dataKey: "speed",
+              dataKey: "detectedSpeed",
               color: "#27235C",
               dot: (props) => {
                 const { cx, cy, payload } = props;
-                const fill = payload?.violationRatio > 0 ? "#DE1B54" : SEMANTIC_GREEN;
+                const fill = payload?.violationCount > 0 ? "#DE1B54" : "#27235C";
                 return <circle cx={cx} cy={cy} r={4} fill={fill} stroke="#fff" strokeWidth={1} />;
               },
             },
+            { dataKey: "speedLimit", color: "rgba(222, 27, 84, 0.6)" },
           ]}
           xAxisLabel="Timestamp"
           yAxisLabel="Detected Speed (kmh)"
-          referenceLines={[{ value: refSpeedLimit, color: "#DE1B54", label: "Speed Limit" }]}
         />,
-        <BarChartCard key="3" title="Violations by Object Type" description="Overspeeding count by object type." data={byType} bars={[{ dataKey: "value", color: "#27235C" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" />,
-        <DonutChartCard key="4" title="Violation vs Normal Distribution" description="Overall distribution of violation and normal detections." data={donut} />,
+        <BarChartCard key="3" title="Violations by Object Type" description="Reveals which moving object categories contribute most to unsafe speed behavior." data={byType} bars={[{ dataKey: "value", color: "#27235C" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
+        <DonutChartCard key="4" title="Violation vs Normal Distribution" description="Summarizes how much of total monitored movement is within safe limits versus violating limits." data={donut} showSlicePercent />,
+        <DonutChartCard key="5" title="Violation Severity Distribution" description="Shows how far above the configured speed limit violating detections are, using rule-based severity bands." data={severityData} showSlicePercent />,
       ];
     }
     case "fire-detection": {
@@ -833,18 +885,26 @@ function buildDashboardViews(slug, rows, granularity) {
       ];
     }
     case "ppe-detection": {
-      const byZoneData = Object.entries(groupBy(rows, "zone")).map(([label, items]) => ({ label, Compliant: items.filter((item) => item.status === "Compliant").length, Violation: items.filter((item) => item.status === "Violation").length }));
-      const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
+      const violationRows = rows.filter((row) => row.violationType !== "Compliant");
+      const shiftOrder = ["Morning Shift", "Swing Shift", "Night Shift"];
+      const byShift = shiftOrder.map((label) => ({
         label,
-        compliance: Number(((items.filter((item) => item.status === "Compliant").length / items.length) * 100 || 0).toFixed(1)),
+        value: violationRows.filter((row) => row.shift === label).length,
       }));
-      const donut = ["Missing Helmet", "Missing Vest", "Missing Gloves", "Missing Boots", "Compliant"].map((label, index) => ({ label, value: rows.filter((row) => row.violationType === label || (label === "Compliant" && row.status === "Compliant")).length, color: chartPalette[index] }));
-      const byShift = Object.entries(groupBy(rows.filter((row) => row.status === "Violation"), "shift")).map(([label, items]) => ({ label, value: items.length }));
+      const donut = [
+        { label: "Missing Helmet", value: rows.filter((row) => row.violationType === "Missing Helmet").length, color: "#DE1B54" },
+        { label: "Missing Vest", value: rows.filter((row) => row.violationType === "Missing Vest").length, color: "rgba(222, 27, 84, 0.6)" },
+        { label: "Missing Both", value: rows.filter((row) => row.violationType === "Missing Both").length, color: "#A01240" },
+      ];
+      const durationBuckets = [
+        { label: "Brief (<30s)", value: violationRows.filter((row) => row.durationSec < 30).length, color: "#27235C" },
+        { label: "Moderate (30s-2m)", value: violationRows.filter((row) => row.durationSec >= 30 && row.durationSec <= 120).length, color: "rgba(222, 27, 84, 0.6)" },
+        { label: "Prolonged (>2m)", value: violationRows.filter((row) => row.durationSec > 120).length, color: "#DE1B54" },
+      ];
       return [
-        <BarChartCard key="1" title="Compliance vs Violations by Zone" description="Compliant versus violation counts by zone." data={byZoneData} bars={[{ dataKey: "Compliant", color: SEMANTIC_GREEN }, { dataKey: "Violation", color: "#DE1B54" }]} xAxisLabel="Zone" yAxisLabel="Count" />,
-        <LineChartCard key="2" title="Compliance Rate % Over Time" description="Compliance rate trend over time." data={trend} lines={[{ dataKey: "compliance", color: "#27235C" }]} xAxisLabel="Timestamp" yAxisLabel="Compliance %" referenceLines={[{ value: 80, color: "#DE1B54", label: "80% Threshold" }]} />,
-        <DonutChartCard key="3" title="Violation Type Breakdown" description="Distribution of violation types and compliant detections." data={donut} />,
-        <BarChartCard key="4" title="Violations by Shift" description="Violation count by shift." data={byShift} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Shift" yAxisLabel="Violation Count" />,
+        <BarChartCard key="1" title="Violations by Shift" description="Shows which operating shift is generating the most helmet and vest violations." data={byShift} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Shift" yAxisLabel="Violation Count" showLegend={false} />,
+        <DonutChartCard key="2" title="Missing PPE Breakdown" description="Shows whether the site is missing helmets, vests, or both items at the point of detection." data={donut} showSlicePercent />,
+        <BarChartCard key="3" title="Exposure Duration Risk" description="Separates brief exposures from prolonged PPE risk so managers can prioritize persistent violations." data={durationBuckets} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Exposure Duration" yAxisLabel="Incident Count" cellFillForBar="value" showLegend={false} />,
       ];
     }
     default:
@@ -869,13 +929,13 @@ function getMultiSelectKeys(slug) {
     "object-counting": ["cameraId", "objectType"],
     "region-alerts": ["cameraId", "severity", "zoneType", "shift"],
     "queue-management": ["cameraId", "counterId"],
-    "speed-estimation": ["cameraId", "objectType", "speedLimitKmh"],
+    "speed-estimation": ["cameraId", "objectType", "speedLimitKmh", "severity"],
     "fire-detection": ["cameraId", "severity", "alertType", "shift"],
     "class-wise-counting": ["cameraId", "className"],
     "object-tracking": ["cameraId", "objectType"],
-    "ppe-detection": ["cameraId", "shift", "violationType"],
+    "ppe-detection": ["shift"],
   };
-  return [...baseKeys, ...(dashboardSpecific[slug] || [])];
+  return [...(slug === "ppe-detection" ? [] : baseKeys), ...(dashboardSpecific[slug] || [])];
 }
 
 export function DashboardPage({ slug, title, description, rows, metricDefs, columns, extraFilterDefs }) {
@@ -887,16 +947,6 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [timeGranularity, setTimeGranularity] = useState("Hourly");
 
-  const ppeFilters = useMemo(
-    () => ({
-      zone: asSingleFilterValue(filters.zone),
-      eventType: asSingleFilterValue(extraFilters.violationType),
-      dateFrom: filters.from,
-      dateTo: filters.to,
-    }),
-    [filters.zone, filters.from, filters.to, extraFilters.violationType],
-  );
-
   const fireFilters = useMemo(
     () => ({
       zone: asSingleFilterValue(filters.zone),
@@ -907,11 +957,11 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     [filters.zone, filters.from, filters.to, extraFilters.severity],
   );
 
-  const { data: ppeCsvData, loading: ppeCsvLoading, error: ppeCsvError } = usePPEData(ppeFilters, slug === "ppe-detection");
   const { data: fireCsvData, loading: fireCsvLoading, error: fireCsvError } = useFireData(fireFilters, slug === "fire-detection");
 
   const sourceRows = useMemo(() => {
-    if (slug === "ppe-detection") return ppeCsvData.map(mapPPECsvRowToDashboard);
+    if (slug === "ppe-detection") return rows.map(normalizePPERecord);
+    if (slug === "speed-estimation") return rows.map(normalizeSpeedRow);
     if (slug === "fire-detection") {
       return rows.map(normalizeFireVideoSummary);
     }
@@ -944,17 +994,19 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       }));
     }
     return rows;
-  }, [slug, ppeCsvData, fireCsvData, rows]);
+  }, [slug, fireCsvData, rows]);
 
-  const dataLoading = slug === "ppe-detection" ? ppeCsvLoading : false;
-  const dataError = slug === "ppe-detection" ? ppeCsvError : "";
+  const dataLoading = false;
+  const dataError = "";
 
-  const filterDefs = [
-    { key: "location", label: "Location" },
-    { key: "zone", label: "Zone" },
-    { key: "cameraId", label: "Camera ID" },
-    ...extraFilterDefs,
-  ];
+  const filterDefs = slug === "ppe-detection"
+    ? [...extraFilterDefs]
+    : [
+        { key: "location", label: "Location" },
+        { key: "zone", label: "Zone" },
+        { key: "cameraId", label: "Camera ID" },
+        ...extraFilterDefs,
+      ];
 
   const multiSelectKeys = getMultiSelectKeys(slug);
 
@@ -989,6 +1041,13 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     const values = uniqueOptions(sourceRows, key);
     const optionValues = values.map((value) => ({ label: String(value), value: String(value) }));
 
+    if (slug === "ppe-detection" && key === "status") {
+      const statusOptions = [
+        { label: "Open", value: "Active" },
+        { label: "Closed", value: "Resolved" },
+      ];
+      return includeAllOption ? [{ label: "All", value: "All" }, ...statusOptions] : statusOptions;
+    }
     if (key === "speedLimitKmh") {
       const speedOptions = values.map((value) => ({ label: `${value} kmh`, value: String(value) }));
       return includeAllOption ? [{ label: "All", value: "All" }, ...speedOptions] : speedOptions;
@@ -1124,25 +1183,31 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   onChange={setTimeGranularity}
                   options={TIME_GRANULARITIES.map((label) => ({ label, value: label }))}
                 />
-                <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
+                {slug !== "ppe-detection" ? (
+                  <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
+                ) : null}
               </div>
               <div className="space-y-3">
-                <div>
-                  <span className="block text-sm font-medium text-ink mb-2">Zone</span>
-                  <PillCheckboxRow
-                    options={optionsFor("zone", false)}
-                    selectedValues={filters.zone}
-                    onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
-                  />
-                </div>
-                <div>
-                  <span className="block text-sm font-medium text-ink mb-2">Camera ID</span>
-                  <PillCheckboxRow
-                    options={optionsFor("cameraId", false)}
-                    selectedValues={filters.cameraId}
-                    onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
-                  />
-                </div>
+                {slug !== "ppe-detection" ? (
+                  <>
+                    <div>
+                      <span className="block text-sm font-medium text-ink mb-2">Zone</span>
+                      <PillCheckboxRow
+                        options={optionsFor("zone", false)}
+                        selectedValues={filters.zone}
+                        onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
+                      />
+                    </div>
+                    <div>
+                      <span className="block text-sm font-medium text-ink mb-2">Camera ID</span>
+                      <PillCheckboxRow
+                        options={optionsFor("cameraId", false)}
+                        selectedValues={filters.cameraId}
+                        onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
+                      />
+                    </div>
+                  </>
+                ) : null}
                 {extraFilterDefs.map((def) => {
                   const isMultiSelect = multiSelectKeys.includes(def.key);
                   const currentValue = extraFilters[def.key];
@@ -1215,8 +1280,12 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 rows={sortedRows}
                 sortState={sortState}
                 rowClassName={
-                  slug === "region-alerts" || slug === "fire-detection"
+                  slug === "region-alerts"
                     ? (row) => (row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
+                    : slug === "fire-detection"
+                      ? (row) => (row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
+                      : slug === "speed-estimation"
+                        ? (row) => (row.status === "Violation" ? "bg-brand-red-tint/40" : "")
                     : undefined
                 }
                 onSort={(key) =>
@@ -1382,29 +1451,36 @@ export function buildDashboardDefinition(slug, rows, info) {
       ],
     },
     "speed-estimation": {
-      title: "Speed Estimation Dashboard",
+      title: "Industrial Movement Speed Risk Monitor",
       description: info,
       extraFilterDefs: [
         { key: "objectType", label: "Object Type" },
         { key: "status", label: "Status" },
         { key: "speedLimitKmh", label: "Speed Limit" },
+        { key: "severity", label: "Severity" },
       ],
       metricDefs: [
-        { label: "Total Detections", icon: LayoutDashboard, compute: (items) => items.length, format: String },
-        { label: "Speed Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.isOverspeeding === "Yes").length, format: String },
-        { label: "Avg Detected Speed", icon: Activity, compute: (items) => average(items.map((item) => item.detectedSpeedKmh)), format: (value) => `${Number(value || 0).toFixed(1)} kmh` },
-        { label: "Max Speed Recorded", icon: Activity, compute: (items) => (items.length ? Math.max(...items.map((item) => item.detectedSpeedKmh)) : 0), format: (value) => `${value} kmh` },
+        { label: "Total Detected Objects", icon: LayoutDashboard, compute: (items) => items.length, format: String, subtext: "All tracked movement detections in the selected period." },
+        { label: "Speed Violation Events", icon: AlertTriangle, compute: (items) => items.filter((item) => item.isOverspeeding === "Yes").length, format: String, subtext: "Detections traveling above the configured zone speed limit.", valueClassName: () => "text-brand-red" },
+        { label: "Violation Rate", icon: Activity, compute: (items) => (items.length ? (items.filter((item) => item.isOverspeeding === "Yes").length / items.length) * 100 : 0), format: (value) => `${Number(value || 0).toFixed(1)}%`, subtext: "Share of monitored movement occurring above safe speed." },
+        { label: "Average Detected Speed", icon: Activity, compute: (items) => average(items.map((item) => item.detectedSpeedKmh)), format: (value) => `${Number(value || 0).toFixed(1)} km/h`, subtext: "Average movement speed across all tracked objects." },
+        { label: "Maximum Speed Recorded", icon: Activity, compute: (items) => (items.length ? Math.max(...items.map((item) => item.detectedSpeedKmh)) : 0), format: (value) => `${value} km/h`, subtext: "Fastest object detected during the selected monitoring window.", valueClassName: () => "text-brand-red" },
+        { label: "Most Violated Zone", icon: AlertTriangle, compute: (items) => Object.entries(groupBy(items.filter((item) => item.isOverspeeding === "Yes"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String, subtext: "Area showing the most overspeed detections." },
+        { label: "Highest-Risk Object Type", icon: Route, compute: (items) => Object.entries(groupBy(items.filter((item) => item.isOverspeeding === "Yes"), "objectType")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String, subtext: "Object category most often exceeding safe speed." },
       ],
       columns: [
+        { key: "timestamp", label: "Timestamp", sortable: true, render: formatDateTime },
         { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "location", label: "Location", sortable: true },
         { key: "zone", label: "Zone", sortable: true },
         { key: "objectId", label: "Object ID", sortable: true },
         { key: "objectType", label: "Object Type", sortable: true },
-        { key: "detectedSpeedKmh", label: "Detected Speed", sortable: true },
-        { key: "speedLimitKmh", label: "Speed Limit", sortable: true },
+        { key: "detectedSpeedKmh", label: "Detected Speed (km/h)", sortable: true },
+        { key: "speedLimitKmh", label: "Speed Limit (km/h)", sortable: true },
         { key: "isOverspeeding", label: "Overspeeding", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Violation" : "Normal") },
-        { key: "excessSpeed", label: "Excess Speed", sortable: true },
-        { key: "confidence", label: "Confidence", sortable: true, render: (value) => `${(value * 100).toFixed(1)}%` },
+        { key: "excessSpeedKmh", label: "Excess Speed (km/h)", sortable: true },
+        { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "warning" : value === "Low" ? "alert" : "normal"}>{value}</Badge> },
+        { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
         { key: "status", label: "Status", sortable: true, render: badgeRender },
       ],
     },
@@ -1513,36 +1589,35 @@ export function buildDashboardDefinition(slug, rows, info) {
       ],
     },
     "ppe-detection": {
-      title: "PPE Detection Dashboard",
+      title: "PPE Compliance Monitor",
       description: info,
       extraFilterDefs: [
         { key: "shift", label: "Shift" },
-        { key: "violationType", label: "Violation Type" },
         { key: "status", label: "Status" },
       ],
       metricDefs: [
-        { label: "Total Workers Detected", icon: LayoutDashboard, compute: (items) => items.length, format: String },
-        { label: "Compliant Workers", icon: HardHat, compute: (items) => items.filter((item) => item.status === "Compliant").length, format: String },
-        { label: "Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.status === "Violation").length, format: String },
+        { label: "Total Workers Tracked", icon: LayoutDashboard, compute: (items) => new Set(items.map((item) => item.personId)).size, format: String },
+        { label: "Active PPE Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.status === "Active" && item.violationType !== "Compliant").length, format: String, valueClassName: () => "text-brand-red" },
         {
-          label: "Compliance Rate %",
-          icon: Activity,
-          compute: (items) => (items.length ? (items.filter((item) => item.status === "Compliant").length / items.length) * 100 : 0),
-          format: (value) => `${Number(value || 0).toFixed(1)}%`,
-          valueClassName: (value) => (Number(value) >= 80 ? "text-[#15803D]" : "text-brand-red"),
+          label: "Most Missing Item",
+          icon: HardHat,
+          compute: (items) => {
+            const helmetMissing = items.filter((item) => item.violationType === "Missing Helmet" || item.violationType === "Missing Both").length;
+            const vestMissing = items.filter((item) => item.violationType === "Missing Vest" || item.violationType === "Missing Both").length;
+            if (helmetMissing === 0 && vestMissing === 0) return "No active misses";
+            if (helmetMissing === vestMissing) return "Helmet / Vest tied";
+            return helmetMissing > vestMissing ? "Helmet" : "Vest";
+          },
+          format: String,
         },
+        { label: "Avg Exposure Duration", icon: Activity, compute: (items) => average(items.filter((item) => item.violationType !== "Compliant").map((item) => item.durationSec)), format: formatDurationLabel },
       ],
       columns: [
-        { key: "cameraId", label: "Camera ID", sortable: true },
-        { key: "zone", label: "Zone", sortable: true },
-        { key: "shift", label: "Shift", sortable: true },
         { key: "personId", label: "Person ID", sortable: true },
-        { key: "helmet", label: "Helmet", sortable: true },
-        { key: "vest", label: "Vest", sortable: true },
-        { key: "gloves", label: "Gloves", sortable: true },
-        { key: "boots", label: "Boots", sortable: true },
         { key: "violationType", label: "Violation Type", sortable: true },
-        { key: "confidence", label: "Confidence", sortable: true, render: (value) => `${(value * 100).toFixed(1)}%` },
+        { key: "entryTime", label: "Entry Time", sortable: true, render: formatDateTime },
+        { key: "durationSec", label: "Duration", sortable: true, render: formatDurationLabel },
+        { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
         { key: "status", label: "Status", sortable: true, render: badgeRender },
       ],
     },

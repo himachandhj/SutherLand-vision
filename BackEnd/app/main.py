@@ -8,13 +8,14 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from ultralytics import YOLO
@@ -54,12 +55,16 @@ from app.schemas.integration import (
     IntegrationVideoItem,
     MinioConnectRequest,
     MinioConnectionDetails,
+    MinioInputVideoListResponse,
     MinioIntegrationOverviewResponse,
+    MinioProcessSelectedRequest,
+    MinioProcessSelectedResponse,
     MinioUploadItem,
     MinioUploadResponse,
 )
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
+from use_cases.base import ensure_browser_playable_mp4, validate_output_video
 from use_cases.fire_smoke import detect_fire_smoke_hsv
 from use_cases.registry import USE_CASE_REGISTRY, get_processor, get_metadata, list_use_cases
 from use_cases.speed_estimation import process_video as speed_process_video
@@ -456,8 +461,8 @@ def _build_recent_run_item(run: dict[str, Any], client) -> IntegrationRunItem:
         metrics=run.get("metrics", {}) or {},
         created_at=str(run["created_at"]),
         updated_at=str(run["updated_at"]),
-        input_url=build_presigned_get_url(client, str(run["bucket"]), str(run["input_key"]), settings.minio_presigned_expiry_minutes),
-        output_url=build_presigned_get_url(client, str(run["bucket"]), str(run["output_key"]), settings.minio_presigned_expiry_minutes),
+        input_url=_build_integration_proxy_url(str(run["use_case_id"]), str(run["input_key"])),
+        output_url=_build_integration_proxy_url(str(run["use_case_id"]), str(run["output_key"])),
     )
 
 
@@ -490,6 +495,13 @@ def _build_minio_uri(bucket: str | None, object_key: str | None) -> str | None:
     if not bucket or not object_key:
         return None
     return f"minio://{bucket}/{object_key.lstrip('/')}"
+
+
+def _build_integration_proxy_url(use_case_id: str, object_key: str | None) -> str | None:
+    if not object_key:
+        return None
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    return f"/api/integrations/minio/object?use_case_id={quote(canonical_use_case_id)}&object_key={quote(object_key, safe='')}"
 
 
 def _derive_demo_source_metadata(source_ref: str, simulated_timestamp: str) -> dict[str, str]:
@@ -880,12 +892,8 @@ def _build_integration_overview(
                 size_bytes=int(item["size_bytes"]),
                 last_modified=item["last_modified"],
                 status=status,
-                preview_url=build_presigned_get_url(
-                    client,
-                    config.bucket,
-                    str(item["object_key"]),
-                    settings.minio_presigned_expiry_minutes,
-                ),
+                preview_url=_build_integration_proxy_url(canonical_use_case_id, str(item["object_key"])),
+                output_url=None,
                 output_key=str(run["output_key"]) if run else expected_output_key,
                 updated_at=updated_at,
             )
@@ -901,12 +909,8 @@ def _build_integration_overview(
                 size_bytes=int(item["size_bytes"]),
                 last_modified=item["last_modified"],
                 status=str(run["status"]) if run else "completed",
-                preview_url=build_presigned_get_url(
-                    client,
-                    config.bucket,
-                    str(item["object_key"]),
-                    settings.minio_presigned_expiry_minutes,
-                ),
+                preview_url=_build_integration_proxy_url(canonical_use_case_id, str(item["object_key"])),
+                output_url=_build_integration_proxy_url(canonical_use_case_id, str(item["object_key"])),
                 source_input_key=str(run["input_key"]) if run else None,
                 updated_at=str(run["updated_at"]) if run else item["last_modified"],
             )
@@ -924,6 +928,67 @@ def _build_integration_overview(
     if not overview.message and overview.connected:
         overview.message = f"{use_case_title} integration is scoped to {config.input_prefix} and {config.output_prefix}."
     return overview
+
+
+def _build_manual_input_video_items(
+    *,
+    use_case_id: str,
+    limit: int,
+) -> tuple[list[IntegrationVideoItem], int]:
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    snapshot = _get_integration_state(canonical_use_case_id)
+    config = snapshot.get("connection")
+
+    if not snapshot.get("connected") or config is None:
+        raise HTTPException(status_code=400, detail="Connect to MinIO before fetching input videos.")
+
+    try:
+        client = create_client(config)
+        validate_bucket_access(client, config.bucket)
+        input_objects = list_video_objects(client, config.bucket, config.input_prefix)
+        all_runs = list_integration_runs(
+            limit=500,
+            provider=INTEGRATION_PROVIDER,
+            use_case_id=canonical_use_case_id,
+            bucket=config.bucket,
+        )
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"Unable to load MinIO input videos: {error}") from error
+
+    run_by_input = {str(run["input_key"]): run for run in all_runs}
+    items: list[IntegrationVideoItem] = []
+
+    for item in input_objects[:limit]:
+        input_key = str(item["object_key"])
+        expected_output_key = build_output_object_key(
+            input_key,
+            config.input_prefix,
+            config.output_prefix,
+            use_case_suffix=_get_integration_output_suffix(canonical_use_case_id),
+        )
+        run = run_by_input.get(input_key)
+        has_output = object_exists(client, config.bucket, expected_output_key)
+        if run:
+            status = str(run.get("status") or "available")
+        elif has_output:
+            status = "completed"
+        else:
+            status = "available"
+
+        items.append(
+            IntegrationVideoItem(
+                object_key=input_key,
+                name=str(item["name"]),
+                size_bytes=int(item["size_bytes"]),
+                last_modified=item["last_modified"],
+                status=status,
+                preview_url=_build_integration_proxy_url(canonical_use_case_id, input_key),
+                output_key=str(run["output_key"]) if run else expected_output_key,
+                updated_at=str(run["updated_at"]) if run else item["last_modified"],
+            )
+        )
+
+    return items, len(input_objects)
 
 
 def _process_minio_inputs_worker(use_case_id: str) -> None:
@@ -1084,14 +1149,7 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                         show=False,
                     )
 
-                    actual_output = local_output
-                    if not actual_output.exists():
-                        fallback_output = Path(str(result.get("output_video", ""))) if isinstance(result, dict) else None
-                        if fallback_output and fallback_output.exists():
-                            actual_output = fallback_output
-
-                    if not actual_output.exists() or actual_output.stat().st_size == 0:
-                        raise RuntimeError("Processed video was not created.")
+                    actual_output = _resolve_completed_output_path(local_output, result)
 
                     client.fput_object(config.bucket, next_output_key, str(actual_output), content_type="video/mp4")
                     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
@@ -1681,6 +1739,7 @@ async def analyze_video(payload: AnalyzeVideoRequest) -> VideoJobResponse:
             device=auto_device(),
             show=False,
         )
+        actual_output = _resolve_completed_output_path(output_path, result)
 
         metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
         analytics_rows = _persist_use_case_analytics(
@@ -1688,7 +1747,7 @@ async def analyze_video(payload: AnalyzeVideoRequest) -> VideoJobResponse:
             result=result,
             filename=payload.filename,
             job_id=int(job["id"]),
-            output_video_link=f"/static/processed/{output_name}",
+            output_video_link=f"/static/processed/{actual_output.name}",
             run_status="completed",
         )
         if analytics_rows is not None:
@@ -1701,11 +1760,11 @@ async def analyze_video(payload: AnalyzeVideoRequest) -> VideoJobResponse:
         completed_job = update_job(
             job["id"],
             status="completed",
-            result_url=f"/static/processed/{output_name}",
+            result_url=f"/static/processed/{actual_output.name}",
             message="Video analysis completed successfully.",
             metrics=metrics,
         )
-        return VideoJobResponse(**completed_job)
+        return VideoJobResponse(**completed_job, output_url=f"/static/processed/{actual_output.name}")
     except Exception as error:
         failed_job = update_job(
             job["id"],
@@ -1785,6 +1844,7 @@ async def analyze_use_case(payload: AnalyzeUseCaseRequest) -> VideoJobResponse:
             device=auto_device(),
             show=False,
         )
+        actual_output = _resolve_completed_output_path(output_path, result)
 
         metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
         normalized_use_case_id = (
@@ -1798,7 +1858,7 @@ async def analyze_use_case(payload: AnalyzeUseCaseRequest) -> VideoJobResponse:
                 result=result,
                 filename=payload.filename,
                 job_id=int(job["id"]),
-                output_video_link=f"/static/processed/{output_name}",
+                output_video_link=f"/static/processed/{actual_output.name}",
                 run_status="completed",
             )
             if analytics_rows is not None:
@@ -1811,11 +1871,11 @@ async def analyze_use_case(payload: AnalyzeUseCaseRequest) -> VideoJobResponse:
         completed_job = update_job(
             job["id"],
             status="completed",
-            result_url=f"/static/processed/{output_name}",
+            result_url=f"/static/processed/{actual_output.name}",
             message=f"{meta['title']} analysis completed successfully.",
             metrics=metrics,
         )
-        return VideoJobResponse(**completed_job)
+        return VideoJobResponse(**completed_job, output_url=f"/static/processed/{actual_output.name}")
 
     except Exception as error:
         failed_job = update_job(
@@ -1833,7 +1893,7 @@ async def analyze_use_case(payload: AnalyzeUseCaseRequest) -> VideoJobResponse:
 def get_jobs(use_case_id: str | None = None) -> list[VideoJobResponse]:
     """List analysis jobs. Optionally filter by use_case_id."""
     jobs = list_jobs(use_case_id=use_case_id)
-    return [VideoJobResponse(**job) for job in jobs]
+    return [VideoJobResponse(**job, output_url=job.get("result_url")) for job in jobs]
 
 
 @app.get("/api/jobs/{job_id}", tags=["Jobs"], response_model=VideoJobResponse)
@@ -1842,7 +1902,7 @@ def get_job_by_id(job_id: int) -> VideoJobResponse:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
-    return VideoJobResponse(**job)
+    return VideoJobResponse(**job, output_url=job.get("result_url"))
 
 
 # ── Integration: MinIO PPE Demo ─────────────────────────────────────────
@@ -1898,9 +1958,194 @@ def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationO
             canonical_use_case_id,
             pending_rescan=False,
             processing=False,
-            message=f"Manual mode is ready. Upload videos from this tab to queue {use_case_title} processing.",
+            message=f"Manual mode is ready. Fetch videos from the MinIO input prefix and queue selected {use_case_title} inputs for processing.",
         )
     return _build_integration_overview(use_case_id=canonical_use_case_id)
+
+
+@app.get(
+    "/api/integrations/minio/input-videos",
+    tags=["Integration"],
+    response_model=MinioInputVideoListResponse,
+)
+def list_minio_input_videos(
+    use_case_id: str = INTEGRATION_USE_CASE_ID,
+    limit: int = 10,
+) -> MinioInputVideoListResponse:
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    safe_limit = max(1, min(int(limit), 100))
+    videos, total_available = _build_manual_input_video_items(
+        use_case_id=canonical_use_case_id,
+        limit=safe_limit,
+    )
+    return MinioInputVideoListResponse(
+        use_case_id=canonical_use_case_id,
+        fetched_count=len(videos),
+        total_available=total_available,
+        videos=videos,
+    )
+
+
+@app.post(
+    "/api/integrations/minio/process-selected",
+    tags=["Integration"],
+    response_model=MinioProcessSelectedResponse,
+)
+def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> MinioProcessSelectedResponse:
+    canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
+    snapshot = _get_integration_state(canonical_use_case_id)
+    config = snapshot.get("connection")
+
+    if not snapshot.get("connected") or config is None:
+        raise HTTPException(status_code=400, detail="Connect to MinIO before processing videos.")
+
+    requested_keys = [str(key).strip() for key in payload.object_keys if str(key).strip()]
+    if not requested_keys:
+        raise HTTPException(status_code=400, detail="Select at least one input video to process.")
+
+    unique_keys = list(dict.fromkeys(requested_keys))
+
+    try:
+        client = create_client(config)
+        validate_bucket_access(client, config.bucket)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"Unable to access the configured MinIO bucket: {error}") from error
+
+    queued_count = 0
+    skipped_count = 0
+    use_case_title = _get_integration_use_case_title(canonical_use_case_id)
+
+    for input_key in unique_keys:
+        normalized_input_prefix = normalize_prefix(config.input_prefix, "")
+        if normalized_input_prefix and not input_key.startswith(normalized_input_prefix):
+            skipped_count += 1
+            continue
+        if not object_exists(client, config.bucket, input_key):
+            skipped_count += 1
+            continue
+
+        output_key = build_output_object_key(
+            input_key,
+            config.input_prefix,
+            config.output_prefix,
+            use_case_suffix=_get_integration_output_suffix(canonical_use_case_id),
+        )
+        existing_run = get_integration_run(
+            provider=INTEGRATION_PROVIDER,
+            use_case_id=canonical_use_case_id,
+            bucket=config.bucket,
+            input_key=input_key,
+        )
+        existing_status = str(existing_run["status"]) if existing_run else ""
+        if object_exists(client, config.bucket, output_key) or existing_status in {"completed", "processing"}:
+            skipped_count += 1
+            continue
+
+        upsert_integration_run(
+            provider=INTEGRATION_PROVIDER,
+            use_case_id=canonical_use_case_id,
+            bucket=config.bucket,
+            input_key=input_key,
+            output_key=output_key,
+            status="queued",
+            message=f"Queued for manual {use_case_title} processing from MinIO input.",
+            metrics=existing_run.get("metrics", {}) if existing_run else {},
+        )
+        queued_count += 1
+
+    if queued_count > 0:
+        _set_integration_state(
+            canonical_use_case_id,
+            processing=True,
+            pending_rescan=False,
+            message=f"Queued {queued_count} {use_case_title} video{'s' if queued_count != 1 else ''} for processing.",
+        )
+        _start_integration_processing(canonical_use_case_id)
+    else:
+        _set_integration_state(
+            canonical_use_case_id,
+            processing=False,
+            message="No new videos were queued. Completed or currently processing videos were skipped.",
+        )
+
+    overview = _build_integration_overview(use_case_id=canonical_use_case_id)
+    message = (
+        f"Queued {queued_count} video{'s' if queued_count != 1 else ''} for {use_case_title}."
+        if queued_count > 0
+        else "Nothing was queued. The selected videos were already completed, in progress, or unavailable."
+    )
+    return MinioProcessSelectedResponse(
+        queued_count=queued_count,
+        skipped_count=skipped_count,
+        message=message,
+        overview=overview,
+    )
+
+
+@app.get("/api/integrations/minio/object", tags=["Integration"])
+def stream_minio_integration_object(request: Request, use_case_id: str, object_key: str):
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    snapshot = _get_integration_state(canonical_use_case_id)
+    config = snapshot.get("connection")
+    if not snapshot.get("connected") or config is None:
+        raise HTTPException(status_code=400, detail="Connect to MinIO before requesting videos.")
+
+    try:
+        client = create_client(config)
+        validate_bucket_access(client, config.bucket)
+        stat = client.stat_object(config.bucket, object_key)
+    except Exception as error:
+        raise HTTPException(status_code=404, detail=f"Unable to locate MinIO object: {error}") from error
+
+    total_size = int(getattr(stat, "size", 0) or 0)
+    range_header = request.headers.get("range")
+    start = 0
+    end = max(total_size - 1, 0)
+    status_code = 200
+
+    if range_header and total_size > 0:
+        try:
+            units, value = range_header.strip().split("=", 1)
+            if units != "bytes":
+                raise ValueError("Unsupported range unit")
+            start_text, end_text = value.split("-", 1)
+            if start_text:
+                start = int(start_text)
+            if end_text:
+                end = int(end_text)
+            else:
+                end = total_size - 1
+            start = max(0, min(start, total_size - 1))
+            end = max(start, min(end, total_size - 1))
+            status_code = 206
+        except Exception as error:
+            raise HTTPException(status_code=416, detail=f"Invalid range request: {error}") from error
+
+    length = max(end - start + 1, 0)
+
+    try:
+        response = client.get_object(config.bucket, object_key, offset=start, length=length if total_size > 0 else None)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to read MinIO object: {error}") from error
+
+    def iter_chunks():
+        try:
+            for chunk in response.stream(1024 * 1024):
+                yield chunk
+        finally:
+            response.close()
+            response.release_conn()
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": "video/mp4",
+    }
+    if total_size > 0:
+        headers["Content-Length"] = str(length if status_code == 206 else total_size)
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total_size}"
+
+    return StreamingResponse(iter_chunks(), status_code=status_code, headers=headers, media_type="video/mp4")
 
 
 @app.post(
@@ -2104,3 +2349,13 @@ def get_video_preview(filename: str) -> Response:
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+def _resolve_completed_output_path(expected_output: Path, result: Any) -> Path:
+    actual_output = expected_output
+    if not actual_output.exists():
+        fallback_output = Path(str(result.get("output_video", ""))) if isinstance(result, dict) else None
+        if fallback_output and fallback_output.exists():
+            actual_output = fallback_output
+    validate_output_video(str(actual_output))
+    ensure_browser_playable_mp4(str(actual_output))
+    validate_output_video(str(actual_output))
+    return actual_output

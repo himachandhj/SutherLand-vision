@@ -12,6 +12,7 @@ class VideoJobResponse(BaseModel):
     message: str
     estimated_time: str
     result_url: str
+    output_url: str | None = None
     metrics: dict[str, Any] = {}
     created_at: str
 

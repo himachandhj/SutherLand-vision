@@ -33,6 +33,7 @@ class IntegrationVideoItem(BaseModel):
     last_modified: str | None = None
     status: str = "available"
     preview_url: str | None = None
+    output_url: str | None = None
     output_key: str | None = None
     source_input_key: str | None = None
     updated_at: str | None = None
@@ -64,6 +65,25 @@ class MinioIntegrationOverviewResponse(BaseModel):
     input_videos: list[IntegrationVideoItem] = Field(default_factory=list)
     output_videos: list[IntegrationVideoItem] = Field(default_factory=list)
     summary: dict[str, int] = Field(default_factory=dict)
+
+
+class MinioInputVideoListResponse(BaseModel):
+    use_case_id: str
+    fetched_count: int = 0
+    total_available: int = 0
+    videos: list[IntegrationVideoItem] = Field(default_factory=list)
+
+
+class MinioProcessSelectedRequest(BaseModel):
+    use_case_id: str = "ppe-detection"
+    object_keys: list[str] = Field(default_factory=list)
+
+
+class MinioProcessSelectedResponse(BaseModel):
+    queued_count: int = 0
+    skipped_count: int = 0
+    message: str = ""
+    overview: MinioIntegrationOverviewResponse
 
 
 class MinioUploadItem(BaseModel):

@@ -3,6 +3,8 @@ Shared utilities for all use case video processors.
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import time
 import warnings
@@ -38,14 +40,107 @@ def open_video(path: str) -> cv2.VideoCapture:
 
 
 def create_writer(path: str, fps: float, w: int, h: int) -> cv2.VideoWriter:
-    """Create an MP4 video writer."""
+    """Create an MP4 video writer using OpenCV's mp4v codec."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    for cc in ("avc1", "h264", "H264", "mp4v"):
-        wr = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*cc), fps, (w, h))
-        if wr.isOpened():
-            return wr
-        wr.release()
-    raise RuntimeError("No MP4 codec available.")
+    width = int(w)
+    height = int(h)
+    safe_fps = float(fps) if fps and fps > 0 else 30.0
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Invalid video dimensions for output writer: width={width}, height={height}")
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
+    if not writer.isOpened():
+        writer.release()
+        raise RuntimeError(f"Unable to open MP4 writer for {path}")
+    return writer
+
+
+def validate_output_video(path: str) -> int:
+    """Validate that a finalized output video exists and is non-empty."""
+    output_path = os.path.abspath(path)
+    if not os.path.isfile(output_path):
+        raise RuntimeError(f"Output missing: {output_path}")
+    size = os.path.getsize(output_path)
+    print("Output:", output_path)
+    print("Size:", size)
+    if size <= 0:
+        raise RuntimeError(f"Output is empty: {output_path}")
+    return size
+
+
+def probe_video_codec(path: str) -> str | None:
+    """Return the codec name for the first video stream, if ffprobe is available."""
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    codec = result.stdout.strip()
+    return codec or None
+
+
+def ensure_browser_playable_mp4(path: str) -> str:
+    """
+    Transcode MP4 files to H.264 if the current codec is not browser-friendly.
+    Keeps the final filename stable and only replaces the file after success.
+    """
+    output_path = os.path.abspath(path)
+    codec = probe_video_codec(output_path)
+    if codec in {None, "h264"}:
+        return output_path
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        return output_path
+
+    temp_path = output_path + ".transcoded.mp4"
+    try:
+        subprocess.run(
+            [
+                ffmpeg_path,
+                "-y",
+                "-i",
+                output_path,
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                temp_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        validate_output_video(temp_path)
+        os.replace(temp_path, output_path)
+        print("Transcoded codec:", codec, "-> h264")
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    return output_path
 
 
 def build_output_path(input_path: str, output_path: str | None, suffix: str = "_processed") -> str:
