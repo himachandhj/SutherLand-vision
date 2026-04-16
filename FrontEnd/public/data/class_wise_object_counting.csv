@@ -1,0 +1,61 @@
+output_id,input_id,class_name,class_count,expected_count,count_difference,total_objects_in_frame,class_percentage,confidence_score,status,camera_id,location,zone,minio_video_link,load_time_sec,simulated_timestamp
+1,1,Pallet,7,9,-2,39,17.9%,0.87,Under Count,CAM_010,Warehouse A,Receiving Bay,minio://warehouse/classcount/cam_010_1.mp4,2.3,2025-04-10 06:35:00
+2,1,Forklift,15,16,-1,39,38.5%,0.93,Under Count,CAM_010,Warehouse A,Receiving Bay,minio://warehouse/classcount/cam_010_1.mp4,2.3,2025-04-10 06:35:00
+3,1,Truck,17,14,3,39,43.6%,0.87,Over Count,CAM_010,Warehouse A,Receiving Bay,minio://warehouse/classcount/cam_010_1.mp4,2.3,2025-04-10 06:35:00
+4,2,Truck,6,6,0,36,16.7%,0.97,Normal,CAM_001,Warehouse C,Dispatch Area,minio://warehouse/classcount/cam_001_2.mp4,2.4,2025-04-10 10:29:00
+5,2,Box,13,10,3,36,36.1%,0.96,Over Count,CAM_001,Warehouse C,Dispatch Area,minio://warehouse/classcount/cam_001_2.mp4,2.4,2025-04-10 10:29:00
+6,2,Bike,17,18,-1,36,47.2%,0.97,Under Count,CAM_001,Warehouse C,Dispatch Area,minio://warehouse/classcount/cam_001_2.mp4,2.4,2025-04-10 10:29:00
+7,3,Bike,14,12,2,26,53.8%,0.98,Over Count,CAM_012,Warehouse C,Loading Dock,minio://warehouse/classcount/cam_012_3.mp4,1.3,2025-04-10 06:04:00
+8,3,Truck,9,10,-1,26,34.6%,0.95,Under Count,CAM_012,Warehouse C,Loading Dock,minio://warehouse/classcount/cam_012_3.mp4,1.3,2025-04-10 06:04:00
+9,3,Forklift,3,6,-3,26,11.5%,0.93,Under Count,CAM_012,Warehouse C,Loading Dock,minio://warehouse/classcount/cam_012_3.mp4,1.3,2025-04-10 06:04:00
+10,4,Pallet,9,11,-2,32,28.1%,0.91,Under Count,CAM_014,Warehouse B,Loading Dock,minio://warehouse/classcount/cam_014_4.mp4,2.5,2025-04-10 12:09:00
+11,4,Truck,13,12,1,32,40.6%,0.88,Over Count,CAM_014,Warehouse B,Loading Dock,minio://warehouse/classcount/cam_014_4.mp4,2.5,2025-04-10 12:09:00
+12,4,Bike,10,8,2,32,31.2%,0.88,Over Count,CAM_014,Warehouse B,Loading Dock,minio://warehouse/classcount/cam_014_4.mp4,2.5,2025-04-10 12:09:00
+13,5,Bike,15,17,-2,28,53.6%,0.94,Under Count,CAM_014,Warehouse C,Forklift Bay,minio://warehouse/classcount/cam_014_5.mp4,2.6,2025-04-10 08:23:00
+14,5,Pallet,10,8,2,28,35.7%,0.87,Over Count,CAM_014,Warehouse C,Forklift Bay,minio://warehouse/classcount/cam_014_5.mp4,2.6,2025-04-10 08:23:00
+15,5,Truck,3,3,0,28,10.7%,0.95,Normal,CAM_014,Warehouse C,Forklift Bay,minio://warehouse/classcount/cam_014_5.mp4,2.6,2025-04-10 08:23:00
+16,6,Box,10,7,3,18,55.6%,0.99,Over Count,CAM_006,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_006_6.mp4,1.9,2025-04-10 13:30:00
+17,6,Forklift,5,3,2,18,27.8%,0.85,Over Count,CAM_006,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_006_6.mp4,1.9,2025-04-10 13:30:00
+18,6,Bike,3,0,3,18,16.7%,0.93,Over Count,CAM_006,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_006_6.mp4,1.9,2025-04-10 13:30:00
+19,7,Pallet,7,7,0,18,38.9%,0.87,Normal,CAM_013,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_013_7.mp4,2.4,2025-04-10 12:54:00
+20,7,Box,5,6,-1,18,27.8%,0.88,Under Count,CAM_013,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_013_7.mp4,2.4,2025-04-10 12:54:00
+21,7,Bike,6,4,2,18,33.3%,0.91,Over Count,CAM_013,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_013_7.mp4,2.4,2025-04-10 12:54:00
+22,8,Bike,8,5,3,29,27.6%,0.92,Over Count,CAM_003,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_003_8.mp4,2.5,2025-04-10 09:41:00
+23,8,Forklift,17,18,-1,29,58.6%,0.98,Under Count,CAM_003,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_003_8.mp4,2.5,2025-04-10 09:41:00
+24,8,Truck,4,5,-1,29,13.8%,0.9,Under Count,CAM_003,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_003_8.mp4,2.5,2025-04-10 09:41:00
+25,9,Truck,7,7,0,37,18.9%,0.89,Normal,CAM_001,Warehouse C,Packaging Zone,minio://warehouse/classcount/cam_001_9.mp4,1.7,2025-04-10 12:44:00
+26,9,Bike,17,15,2,37,45.9%,0.91,Over Count,CAM_001,Warehouse C,Packaging Zone,minio://warehouse/classcount/cam_001_9.mp4,1.7,2025-04-10 12:44:00
+27,9,Pallet,13,16,-3,37,35.1%,0.98,Under Count,CAM_001,Warehouse C,Packaging Zone,minio://warehouse/classcount/cam_001_9.mp4,1.7,2025-04-10 12:44:00
+28,10,Truck,18,15,3,36,50.0%,0.96,Over Count,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_10.mp4,1.3,2025-04-10 13:13:00
+29,10,Box,4,7,-3,36,11.1%,0.89,Under Count,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_10.mp4,1.3,2025-04-10 13:13:00
+30,10,Pallet,14,15,-1,36,38.9%,0.96,Under Count,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_10.mp4,1.3,2025-04-10 13:13:00
+31,11,Bike,7,8,-1,33,21.2%,0.94,Under Count,CAM_007,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_007_11.mp4,2.2,2025-04-10 13:10:00
+32,11,Forklift,11,13,-2,33,33.3%,0.91,Under Count,CAM_007,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_007_11.mp4,2.2,2025-04-10 13:10:00
+33,11,Pallet,15,14,1,33,45.5%,0.96,Over Count,CAM_007,Warehouse A,Loading Dock,minio://warehouse/classcount/cam_007_11.mp4,2.2,2025-04-10 13:10:00
+34,12,Truck,4,7,-3,37,10.8%,0.9,Under Count,CAM_007,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_007_12.mp4,1.4,2025-04-10 08:04:00
+35,12,Pallet,15,16,-1,37,40.5%,0.88,Under Count,CAM_007,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_007_12.mp4,1.4,2025-04-10 08:04:00
+36,12,Forklift,18,21,-3,37,48.6%,0.93,Under Count,CAM_007,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_007_12.mp4,1.4,2025-04-10 08:04:00
+37,13,Forklift,4,1,3,27,14.8%,0.9,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_13.mp4,1.3,2025-04-10 10:49:00
+38,13,Truck,17,15,2,27,63.0%,0.91,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_13.mp4,1.3,2025-04-10 10:49:00
+39,13,Box,6,5,1,27,22.2%,0.91,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_13.mp4,1.3,2025-04-10 10:49:00
+40,14,Pallet,13,11,2,43,30.2%,0.98,Over Count,CAM_002,Warehouse C,Storage Bay,minio://warehouse/classcount/cam_002_14.mp4,2.2,2025-04-10 11:31:00
+41,14,Box,17,17,0,43,39.5%,0.87,Normal,CAM_002,Warehouse C,Storage Bay,minio://warehouse/classcount/cam_002_14.mp4,2.2,2025-04-10 11:31:00
+42,14,Forklift,13,16,-3,43,30.2%,0.88,Under Count,CAM_002,Warehouse C,Storage Bay,minio://warehouse/classcount/cam_002_14.mp4,2.2,2025-04-10 11:31:00
+43,15,Forklift,9,7,2,25,36.0%,0.93,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_15.mp4,1.6,2025-04-10 09:44:00
+44,15,Truck,3,0,3,25,12.0%,0.88,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_15.mp4,1.6,2025-04-10 09:44:00
+45,15,Pallet,13,10,3,25,52.0%,0.87,Over Count,CAM_001,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_001_15.mp4,1.6,2025-04-10 09:44:00
+46,16,Pallet,14,12,2,31,45.2%,0.9,Over Count,CAM_007,Warehouse C,Receiving Bay,minio://warehouse/classcount/cam_007_16.mp4,2.6,2025-04-10 09:40:00
+47,16,Forklift,8,7,1,31,25.8%,0.93,Over Count,CAM_007,Warehouse C,Receiving Bay,minio://warehouse/classcount/cam_007_16.mp4,2.6,2025-04-10 09:40:00
+48,16,Bike,9,12,-3,31,29.0%,0.96,Under Count,CAM_007,Warehouse C,Receiving Bay,minio://warehouse/classcount/cam_007_16.mp4,2.6,2025-04-10 09:40:00
+49,17,Forklift,17,16,1,39,43.6%,0.88,Over Count,CAM_006,Warehouse B,Forklift Bay,minio://warehouse/classcount/cam_006_17.mp4,2.2,2025-04-10 11:17:00
+50,17,Pallet,19,18,1,39,48.7%,0.89,Over Count,CAM_006,Warehouse B,Forklift Bay,minio://warehouse/classcount/cam_006_17.mp4,2.2,2025-04-10 11:17:00
+51,17,Truck,3,3,0,39,7.7%,0.86,Normal,CAM_006,Warehouse B,Forklift Bay,minio://warehouse/classcount/cam_006_17.mp4,2.2,2025-04-10 11:17:00
+52,18,Pallet,10,7,3,36,27.8%,0.87,Over Count,CAM_009,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_009_18.mp4,2.6,2025-04-10 08:00:00
+53,18,Forklift,9,11,-2,36,25.0%,0.86,Under Count,CAM_009,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_009_18.mp4,2.6,2025-04-10 08:00:00
+54,18,Truck,17,16,1,36,47.2%,0.93,Over Count,CAM_009,Warehouse B,Packaging Zone,minio://warehouse/classcount/cam_009_18.mp4,2.6,2025-04-10 08:00:00
+55,19,Forklift,11,11,0,43,25.6%,0.98,Normal,CAM_007,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_007_19.mp4,1.5,2025-04-10 12:20:00
+56,19,Bike,20,22,-2,43,46.5%,0.94,Under Count,CAM_007,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_007_19.mp4,1.5,2025-04-10 12:20:00
+57,19,Pallet,12,9,3,43,27.9%,0.93,Over Count,CAM_007,Warehouse B,Storage Bay,minio://warehouse/classcount/cam_007_19.mp4,1.5,2025-04-10 12:20:00
+58,20,Truck,19,21,-2,36,52.8%,0.96,Under Count,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_20.mp4,2.5,2025-04-10 10:09:00
+59,20,Bike,13,13,0,36,36.1%,0.88,Normal,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_20.mp4,2.5,2025-04-10 10:09:00
+60,20,Forklift,4,4,0,36,11.1%,0.91,Normal,CAM_008,Warehouse A,Storage Bay,minio://warehouse/classcount/cam_008_20.mp4,2.5,2025-04-10 10:09:00

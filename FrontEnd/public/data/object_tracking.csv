@@ -1,0 +1,21 @@
+output_id,input_id,object_id,object_type,entry_time,exit_time,duration_in_zone_sec,next_zone,path_sequence,is_anomaly,confidence_score,status,camera_id,location,zone,minio_video_link,load_time_sec,simulated_timestamp
+1,1,OBJ_056,Forklift,09:04:00,09:38:47,2087,Storage Bay,Receiving → Storage Bay,No,0.86,Normal,CAM_012,Warehouse B,Loading Dock,minio://warehouse/track/cam_012_1.mp4,2.5,2025-04-10 08:35:00
+2,2,OBJ_023,Pallet,13:28:00,13:31:58,238,Dispatch Area,Receiving → Packaging Zone → Dispatch Area,No,0.9,Normal,CAM_005,Warehouse A,Loading Dock,minio://warehouse/track/cam_005_2.mp4,2.3,2025-04-10 13:13:00
+3,3,OBJ_065,Pallet,08:14:00,08:54:03,2403,Stuck,Receiving → Stuck,Yes,0.89,Alert,CAM_015,Warehouse A,Forklift Bay,minio://warehouse/track/cam_015_3.mp4,1.4,2025-04-10 09:01:00
+4,4,OBJ_080,Pallet,11:23:00,12:05:09,2529,Dispatch Area,Storage Bay → Dispatch Area,Yes,0.97,Alert,CAM_002,Warehouse A,Loading Dock,minio://warehouse/track/cam_002_4.mp4,2.3,2025-04-10 10:58:00
+5,5,OBJ_056,Forklift,10:50:00,10:51:52,112,Dispatch Area,Storage Bay → Dispatch Area,No,0.91,Normal,CAM_001,Warehouse A,Receiving Bay,minio://warehouse/track/cam_001_5.mp4,1.9,2025-04-10 12:52:00
+6,6,OBJ_064,Truck,11:30:00,11:50:17,1217,Stuck,Receiving → Stuck,Yes,0.93,Alert,CAM_006,Warehouse A,Dispatch Area,minio://warehouse/track/cam_006_6.mp4,2.9,2025-04-10 11:37:00
+7,7,OBJ_020,Truck,10:06:00,10:16:21,621,Dispatch Area,Storage Bay → Dispatch Area,No,0.89,Normal,CAM_014,Warehouse A,Packaging Zone,minio://warehouse/track/cam_014_7.mp4,2.7,2025-04-10 09:35:00
+8,8,OBJ_009,Pallet,10:23:00,11:07:51,2691,Storage Bay,Receiving → Storage Bay,Yes,0.97,Alert,CAM_005,Warehouse C,Receiving Bay,minio://warehouse/track/cam_005_8.mp4,1.8,2025-04-10 07:51:00
+9,9,OBJ_057,Pallet,09:18:00,09:32:45,885,Stuck,Receiving → Stuck,Yes,0.95,Alert,CAM_007,Warehouse A,Packaging Zone,minio://warehouse/track/cam_007_9.mp4,1.4,2025-04-10 11:47:00
+10,10,OBJ_015,Pallet,07:51:00,08:22:07,1867,Dispatch Area,Storage Bay → Dispatch Area,No,0.91,Normal,CAM_005,Warehouse A,Packaging Zone,minio://warehouse/track/cam_005_10.mp4,1.8,2025-04-10 06:42:00
+11,11,OBJ_048,Forklift,13:11:00,13:15:32,272,Stuck,Receiving → Stuck,Yes,0.9,Alert,CAM_015,Warehouse A,Storage Bay,minio://warehouse/track/cam_015_11.mp4,1.9,2025-04-10 06:37:00
+12,12,OBJ_020,Box,09:35:00,10:23:45,2925,Dispatch Area,Storage Bay → Dispatch Area,Yes,0.96,Alert,CAM_004,Warehouse A,Storage Bay,minio://warehouse/track/cam_004_12.mp4,2.2,2025-04-10 06:35:00
+13,13,OBJ_092,Truck,13:31:00,14:01:45,1845,Stuck,Receiving → Stuck,Yes,0.97,Alert,CAM_003,Warehouse C,Packaging Zone,minio://warehouse/track/cam_003_13.mp4,1.2,2025-04-10 07:19:00
+14,14,OBJ_039,Pallet,11:58:00,12:43:59,2759,Dispatch Area,Receiving → Packaging Zone → Dispatch Area,Yes,0.9,Alert,CAM_004,Warehouse B,Loading Dock,minio://warehouse/track/cam_004_14.mp4,2.6,2025-04-10 08:44:00
+15,15,OBJ_044,Pallet,09:08:00,09:24:25,985,Stuck,Receiving → Stuck,Yes,0.85,Alert,CAM_001,Warehouse A,Loading Dock,minio://warehouse/track/cam_001_15.mp4,2.6,2025-04-10 13:42:00
+16,16,OBJ_006,Box,13:39:00,13:58:29,1169,Stuck,Receiving → Stuck,Yes,0.86,Alert,CAM_007,Warehouse B,Loading Dock,minio://warehouse/track/cam_007_16.mp4,1.8,2025-04-10 09:03:00
+17,17,OBJ_051,Box,06:34:00,07:07:35,2015,Stuck,Receiving → Stuck,Yes,0.95,Alert,CAM_012,Warehouse A,Receiving Bay,minio://warehouse/track/cam_012_17.mp4,2.1,2025-04-10 13:14:00
+18,18,OBJ_077,Pallet,08:15:00,08:37:36,1356,Dispatch Area,Storage Bay → Dispatch Area,No,0.95,Normal,CAM_006,Warehouse B,Storage Bay,minio://warehouse/track/cam_006_18.mp4,2.4,2025-04-10 12:08:00
+19,19,OBJ_037,Truck,11:48:00,11:49:17,77,Stuck,Receiving → Stuck,Yes,0.9,Alert,CAM_015,Warehouse C,Receiving Bay,minio://warehouse/track/cam_015_19.mp4,1.4,2025-04-10 08:30:00
+20,20,OBJ_022,Truck,10:29:00,10:57:08,1688,Dispatch Area,Storage Bay → Dispatch Area,No,0.96,Normal,CAM_012,Warehouse C,Receiving Bay,minio://warehouse/track/cam_012_20.mp4,2.6,2025-04-10 09:19:00

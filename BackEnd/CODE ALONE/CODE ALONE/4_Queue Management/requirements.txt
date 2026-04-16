@@ -1,0 +1,18 @@
+# Queue Management - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core ML framework
+ultralytics>=8.4.0
+
+# Computer Vision
+opencv-python>=4.8.0
+
+# Deep Learning backend (PyTorch)
+# - CPU-only: pip install torch torchvision
+# - CUDA GPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# - Apple Silicon (MPS): pip install torch torchvision (default macOS install)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Tracking dependency (required by ultralytics for object tracking)
+lap>=0.5.12

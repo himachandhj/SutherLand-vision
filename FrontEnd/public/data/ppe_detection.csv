@@ -1,0 +1,39 @@
+output_id,input_id,person_id,helmet_worn,vest_worn,gloves_worn,boots_worn,violation_type,confidence_score,status,camera_id,location,zone,shift,minio_video_link,load_time_sec,simulated_timestamp
+1,1,P_077,No,Yes,Yes,No,Missing Helmet & Boots,0.95,Violation,CAM_015,Warehouse B,Storage Bay,Night,minio://warehouse/ppe/cam_015_1.mp4,2.7,2025-04-10 06:35:00
+2,1,P_032,No,Yes,Yes,Yes,Missing Helmet,0.95,Violation,CAM_015,Warehouse B,Storage Bay,Night,minio://warehouse/ppe/cam_015_1.mp4,2.7,2025-04-10 06:35:00
+3,2,P_035,No,Yes,No,Yes,Missing Helmet & Gloves,0.97,Violation,CAM_010,Warehouse A,Packaging Zone,Afternoon,minio://warehouse/ppe/cam_010_2.mp4,2.9,2025-04-10 08:18:00
+4,2,P_090,Yes,Yes,No,Yes,Missing Gloves,0.97,Violation,CAM_010,Warehouse A,Packaging Zone,Afternoon,minio://warehouse/ppe/cam_010_2.mp4,2.9,2025-04-10 08:18:00
+5,2,P_091,Yes,No,Yes,Yes,Missing Vest,0.86,Violation,CAM_010,Warehouse A,Packaging Zone,Afternoon,minio://warehouse/ppe/cam_010_2.mp4,2.9,2025-04-10 08:18:00
+6,3,P_099,Yes,Yes,No,Yes,Missing Gloves,0.9,Violation,CAM_012,Warehouse A,Loading Dock,Night,minio://warehouse/ppe/cam_012_3.mp4,2.8,2025-04-10 06:38:00
+7,3,P_056,Yes,Yes,No,Yes,Missing Gloves,0.89,Violation,CAM_012,Warehouse A,Loading Dock,Night,minio://warehouse/ppe/cam_012_3.mp4,2.8,2025-04-10 06:38:00
+8,4,P_037,Yes,Yes,No,No,Missing Gloves & Boots,0.97,Violation,CAM_007,Warehouse A,Dispatch Area,Morning,minio://warehouse/ppe/cam_007_4.mp4,2.1,2025-04-10 13:22:00
+9,4,P_045,Yes,Yes,No,Yes,Missing Gloves,0.98,Violation,CAM_007,Warehouse A,Dispatch Area,Morning,minio://warehouse/ppe/cam_007_4.mp4,2.1,2025-04-10 13:22:00
+10,4,P_088,Yes,Yes,No,Yes,Missing Gloves,0.92,Violation,CAM_007,Warehouse A,Dispatch Area,Morning,minio://warehouse/ppe/cam_007_4.mp4,2.1,2025-04-10 13:22:00
+11,5,P_060,Yes,No,Yes,No,Missing Vest & Boots,0.9,Violation,CAM_003,Warehouse B,Loading Dock,Afternoon,minio://warehouse/ppe/cam_003_5.mp4,2.7,2025-04-10 07:11:00
+12,5,P_060,Yes,Yes,Yes,Yes,Compliant,0.97,Compliant,CAM_003,Warehouse B,Loading Dock,Afternoon,minio://warehouse/ppe/cam_003_5.mp4,2.7,2025-04-10 07:11:00
+13,6,P_016,No,No,Yes,Yes,Missing Helmet & Vest,0.88,Violation,CAM_003,Warehouse B,Receiving Bay,Morning,minio://warehouse/ppe/cam_003_6.mp4,3,2025-04-10 13:41:00
+14,6,P_003,Yes,Yes,Yes,No,Missing Boots,0.9,Violation,CAM_003,Warehouse B,Receiving Bay,Morning,minio://warehouse/ppe/cam_003_6.mp4,3,2025-04-10 13:41:00
+15,6,P_015,No,Yes,No,Yes,Missing Helmet & Gloves,0.92,Violation,CAM_003,Warehouse B,Receiving Bay,Morning,minio://warehouse/ppe/cam_003_6.mp4,3,2025-04-10 13:41:00
+16,7,P_020,No,Yes,No,No,Missing Helmet & Gloves & Boots,0.87,Violation,CAM_004,Warehouse A,Receiving Bay,Night,minio://warehouse/ppe/cam_004_7.mp4,1.8,2025-04-10 08:53:00
+17,8,P_031,Yes,No,Yes,Yes,Missing Vest,0.96,Violation,CAM_001,Warehouse B,Packaging Zone,Night,minio://warehouse/ppe/cam_001_8.mp4,1.4,2025-04-10 06:30:00
+18,9,P_003,Yes,No,No,Yes,Missing Vest & Gloves,0.86,Violation,CAM_003,Warehouse B,Loading Dock,Morning,minio://warehouse/ppe/cam_003_9.mp4,2.4,2025-04-10 07:00:00
+19,10,P_082,Yes,Yes,Yes,No,Missing Boots,0.93,Violation,CAM_013,Warehouse C,Packaging Zone,Night,minio://warehouse/ppe/cam_013_10.mp4,1.9,2025-04-10 10:23:00
+20,10,P_048,No,Yes,No,Yes,Missing Helmet & Gloves,0.92,Violation,CAM_013,Warehouse C,Packaging Zone,Night,minio://warehouse/ppe/cam_013_10.mp4,1.9,2025-04-10 10:23:00
+21,11,P_007,Yes,Yes,No,No,Missing Gloves & Boots,0.9,Violation,CAM_008,Warehouse C,Dispatch Area,Night,minio://warehouse/ppe/cam_008_11.mp4,2.4,2025-04-10 10:54:00
+22,11,P_099,No,Yes,No,Yes,Missing Helmet & Gloves,0.93,Violation,CAM_008,Warehouse C,Dispatch Area,Night,minio://warehouse/ppe/cam_008_11.mp4,2.4,2025-04-10 10:54:00
+23,12,P_048,Yes,No,No,Yes,Missing Vest & Gloves,0.93,Violation,CAM_003,Warehouse C,Dispatch Area,Night,minio://warehouse/ppe/cam_003_12.mp4,1.4,2025-04-10 06:45:00
+24,13,P_093,Yes,Yes,No,Yes,Missing Gloves,0.93,Violation,CAM_007,Warehouse B,Dispatch Area,Afternoon,minio://warehouse/ppe/cam_007_13.mp4,1.8,2025-04-10 12:26:00
+25,13,P_041,Yes,Yes,No,No,Missing Gloves & Boots,0.94,Violation,CAM_007,Warehouse B,Dispatch Area,Afternoon,minio://warehouse/ppe/cam_007_13.mp4,1.8,2025-04-10 12:26:00
+26,13,P_095,Yes,No,No,No,Missing Vest & Gloves & Boots,0.92,Violation,CAM_007,Warehouse B,Dispatch Area,Afternoon,minio://warehouse/ppe/cam_007_13.mp4,1.8,2025-04-10 12:26:00
+27,14,P_033,Yes,No,No,Yes,Missing Vest & Gloves,0.85,Violation,CAM_006,Warehouse C,Storage Bay,Afternoon,minio://warehouse/ppe/cam_006_14.mp4,2.5,2025-04-10 11:19:00
+28,14,P_020,Yes,Yes,No,No,Missing Gloves & Boots,0.91,Violation,CAM_006,Warehouse C,Storage Bay,Afternoon,minio://warehouse/ppe/cam_006_14.mp4,2.5,2025-04-10 11:19:00
+29,15,P_090,Yes,Yes,Yes,Yes,Compliant,0.92,Compliant,CAM_004,Warehouse B,Loading Dock,Morning,minio://warehouse/ppe/cam_004_15.mp4,2.5,2025-04-10 08:23:00
+30,16,P_087,No,Yes,Yes,Yes,Missing Helmet,0.88,Violation,CAM_011,Warehouse C,Storage Bay,Night,minio://warehouse/ppe/cam_011_16.mp4,1.6,2025-04-10 06:05:00
+31,16,P_072,Yes,Yes,Yes,No,Missing Boots,0.88,Violation,CAM_011,Warehouse C,Storage Bay,Night,minio://warehouse/ppe/cam_011_16.mp4,1.6,2025-04-10 06:05:00
+32,17,P_040,Yes,Yes,Yes,Yes,Compliant,0.94,Compliant,CAM_015,Warehouse B,Receiving Bay,Morning,minio://warehouse/ppe/cam_015_17.mp4,1.6,2025-04-10 07:06:00
+33,17,P_059,No,Yes,Yes,Yes,Missing Helmet,0.86,Violation,CAM_015,Warehouse B,Receiving Bay,Morning,minio://warehouse/ppe/cam_015_17.mp4,1.6,2025-04-10 07:06:00
+34,18,P_087,Yes,No,No,Yes,Missing Vest & Gloves,0.92,Violation,CAM_010,Warehouse A,Forklift Bay,Night,minio://warehouse/ppe/cam_010_18.mp4,2.8,2025-04-10 08:57:00
+35,18,P_048,Yes,Yes,No,Yes,Missing Gloves,0.9,Violation,CAM_010,Warehouse A,Forklift Bay,Night,minio://warehouse/ppe/cam_010_18.mp4,2.8,2025-04-10 08:57:00
+36,19,P_049,Yes,Yes,No,No,Missing Gloves & Boots,0.96,Violation,CAM_012,Warehouse A,Loading Dock,Afternoon,minio://warehouse/ppe/cam_012_19.mp4,2.9,2025-04-10 06:58:00
+37,19,P_063,Yes,Yes,Yes,Yes,Compliant,0.92,Compliant,CAM_012,Warehouse A,Loading Dock,Afternoon,minio://warehouse/ppe/cam_012_19.mp4,2.9,2025-04-10 06:58:00
+38,20,P_009,Yes,Yes,Yes,Yes,Compliant,0.91,Compliant,CAM_002,Warehouse A,Storage Bay,Afternoon,minio://warehouse/ppe/cam_002_20.mp4,1.6,2025-04-10 10:27:00

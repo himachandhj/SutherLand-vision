@@ -1,0 +1,17 @@
+# Downloaded files (auto-downloaded on first run)
+solutions-ci-demo.mp4
+*.pt
+
+# Output
+security_output.avi
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# macOS
+.DS_Store
