@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
-const API_URL = `${API_BASE_URL}/api/fire/metrics`;
+const API_URL = `${API_BASE_URL}/api/region-alerts/metrics`;
 const POLL_INTERVAL_MS = 15000;
 
 function appendFilterValues(params, key, value) {
@@ -16,7 +16,7 @@ function appendFilterValues(params, key, value) {
   }
 }
 
-export function useFireData(filters = {}, enabled = true) {
+export function useRegionAlertsData(filters = {}, enabled = true) {
   const [data, setData] = useState([]);
   const [metrics, setMetrics] = useState({});
   const [loading, setLoading] = useState(Boolean(enabled));
@@ -48,19 +48,20 @@ export function useFireData(filters = {}, enabled = true) {
         if (filters.from) params.append("date_from", filters.from);
         if (filters.to) params.append("date_to", filters.to);
         if (filters.location && filters.location !== "All") params.append("location", filters.location);
-        if (filters.facility && filters.facility !== "All") params.append("facility", filters.facility);
         appendFilterValues(params, "zone", filters.zone);
         appendFilterValues(params, "camera_id", filters.cameraId);
+        appendFilterValues(params, "zone_type", filters.zoneType);
+        appendFilterValues(params, "object_type", filters.objectType);
         appendFilterValues(params, "shift", filters.shift);
-        appendFilterValues(params, "alert_type", filters.alertType);
         appendFilterValues(params, "severity", filters.severity);
+        if (filters.status && filters.status !== "All") params.append("status", filters.status);
 
         const response = await fetch(`${API_URL}?${params.toString()}`, {
           signal: controller.signal,
           cache: "no-store",
         });
         if (!response.ok) {
-          throw new Error(`Fire metrics request failed: ${response.status}`);
+          throw new Error(`Region metrics request failed: ${response.status}`);
         }
 
         const payload = await response.json();
@@ -69,7 +70,7 @@ export function useFireData(filters = {}, enabled = true) {
         setMetrics(payload.summary ?? {});
       } catch (fetchError) {
         if (!active || fetchError?.name === "AbortError") return;
-        setError(fetchError.message || "Unable to load Fire dashboard data.");
+        setError(fetchError.message || "Unable to load Region Alerts dashboard data.");
       } finally {
         if (active && !silent) setLoading(false);
       }
@@ -90,12 +91,13 @@ export function useFireData(filters = {}, enabled = true) {
     filters.from,
     filters.to,
     filters.location,
-    filters.facility,
     JSON.stringify(filters.zone ?? []),
     JSON.stringify(filters.cameraId ?? []),
+    JSON.stringify(filters.zoneType ?? []),
+    JSON.stringify(filters.objectType ?? []),
     JSON.stringify(filters.shift ?? []),
-    JSON.stringify(filters.alertType ?? []),
     JSON.stringify(filters.severity ?? []),
+    filters.status,
   ]);
 
   return { data, metrics, loading, error };

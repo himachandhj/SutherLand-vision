@@ -31,6 +31,8 @@ import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
 import { PillCheckboxRow } from "../ui/pill-checkbox";
 import { useFireData } from "../../src/hooks/useFireData";
+import { usePPEData } from "../../src/hooks/usePPEData";
+import { useRegionAlertsData } from "../../src/hooks/useRegionAlertsData";
 import { average, byTimestamp, formatDate, formatDateTime, formatSeconds, groupBy, shiftFromTimestamp, sortRows, sum, toneForStatus, uniqueOptions } from "./helpers";
 
 const chartPalette = ["#27235C", "#DE1B54", "#3D3880", "#F04E7A", "#6B6B8A", "#C8C6E8"];
@@ -38,9 +40,21 @@ const SEMANTIC_GREEN = "#27235C";
 const SEMANTIC_YELLOW = "rgba(222, 27, 84, 0.6)";
 const SEVERITY_COLORS = {
   High: "#DE1B54",
-  Medium: "rgba(222, 27, 84, 0.6)",
+  Medium: "#F06A8F",
   Low: "#27235C",
 };
+const SHIFT_ORDER = ["Morning Shift", "Swing Shift", "Night Shift"];
+const SEVERITY_ORDER = ["High", "Medium", "Low", "None"];
+
+function sortByPreferredOrder(values, preferredOrder) {
+  const ranking = new Map(preferredOrder.map((value, index) => [String(value), index]));
+  return [...values].sort((left, right) => {
+    const leftRank = ranking.has(String(left)) ? ranking.get(String(left)) : Number.MAX_SAFE_INTEGER;
+    const rightRank = ranking.has(String(right)) ? ranking.get(String(right)) : Number.MAX_SAFE_INTEGER;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return String(left).localeCompare(String(right));
+  });
+}
 
 const TIME_GRANULARITIES = /** @type {const} */ (["Hourly", "Daily", "Weekly", "Monthly"]);
 
@@ -131,48 +145,137 @@ function regionEscalationScore(row) {
   );
 }
 
+function normalizeRegionAlertRow(row, index) {
+  const entryTime = row.entryTime || row.entry_time;
+  const durationSec = Number(row.durationSec ?? row.duration_sec ?? 0);
+  const explicitStatus = String(row.status || "").toLowerCase();
+  const status =
+    explicitStatus === "open" || explicitStatus === "active"
+      ? "Open"
+      : explicitStatus === "past" || explicitStatus === "resolved" || explicitStatus === "closed"
+        ? "Past"
+        : !row.exitTime && !row.exit_time
+          ? "Open"
+          : "Past";
+  const exitTime =
+    row.exitTime ||
+    row.exit_time ||
+    (status === "Open" ? "" : new Date(new Date(entryTime).getTime() + durationSec * 1000).toISOString());
+
+  const normalized = {
+    id: row.id || row.incident_id,
+    timestamp: row.timestamp || entryTime,
+    location: row.location || ["Warehouse A", "Warehouse B", "Warehouse C"][index % 3],
+    cameraId: row.cameraId || row.camera_id,
+    zone: row.zone,
+    zoneType: row.zoneType || row.zone_type,
+    shift: row.shift || getBusinessShift(row),
+    objectType: row.objectType || row.object_type || "Person",
+    trackedObjectId: row.trackedObjectId || row.tracked_object_id || `TRK-${String(7000 + index).padStart(4, "0")}`,
+    entryTime,
+    exitTime,
+    durationSec,
+    alertType: row.alertType || row.alert_type,
+    severity: row.severity,
+    status,
+    confidenceScore: row.confidenceScore ?? row.confidence_score ?? Number((0.84 + ((index % 7) * 0.018)).toFixed(2)),
+    assignedTo: row.assignedTo ?? ["Ops Supervisor", "Security Desk", "Safety Lead", "Floor Manager"][index % 4],
+    escalationNeeded: row.escalationNeeded ?? (row.severity === "High" || status === "Open" ? "Yes" : "No"),
+    snapshotUrl: row.snapshotUrl ?? row.output_reference ?? `/dashboard/snapshots/region-alerts/${row.id || row.incident_id}`,
+    inputReference: row.inputReference ?? row.input_reference ?? "",
+    outputReference: row.outputReference ?? row.output_reference ?? "",
+    isLatestDemoIncident: Boolean(row.isLatestDemoIncident ?? row.is_latest_demo_incident),
+    escalationPriority: 0,
+  };
+
+  return {
+    ...normalized,
+    escalationPriority: regionEscalationScore(normalized),
+  };
+}
+
+function applyRegionChartFilters(rows, selections, granularity, excludeKeys = []) {
+  return rows.filter((row) => {
+    if (!excludeKeys.includes("timeBucket") && selections.timeBucket) {
+      const rowBucket = bucketLabelForKey(bucketKeyForTimestamp(row.timestamp, granularity), granularity);
+      if (rowBucket !== selections.timeBucket) return false;
+    }
+    if (!excludeKeys.includes("zone") && selections.zone && row.zone !== selections.zone) return false;
+    if (!excludeKeys.includes("alertType") && selections.alertType && row.alertType !== selections.alertType) return false;
+    if (!excludeKeys.includes("severity") && selections.severity && row.severity !== selections.severity) return false;
+    return true;
+  });
+}
+
+function applyFireChartFilters(rows, selections, excludeKeys = []) {
+  return rows.filter((row) => {
+    if (!excludeKeys.includes("alertType") && selections.alertType && row.alertType !== selections.alertType) return false;
+    if (!excludeKeys.includes("zone") && selections.zone && row.zone !== selections.zone) return false;
+    if (!excludeKeys.includes("cameraId") && selections.cameraId && row.cameraId !== selections.cameraId) return false;
+    if (!excludeKeys.includes("severity") && selections.severity && row.severity !== selections.severity) return false;
+    return true;
+  });
+}
+
 function formatDurationLabel(seconds) {
   const total = Math.round(Number(seconds) || 0);
   if (total >= 60) return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, "0")}s`;
   return `${total}s`;
 }
 
-function asSingleFilterValue(value) {
-  if (Array.isArray(value)) return value[0] ?? "";
-  if (value === "All" || value === undefined || value === null) return "";
-  return String(value);
-}
-
 function normalizePPERecord(row, index) {
   const processedAt = row.processed_at || row.processedAt || row.timestamp || new Date().toISOString();
-  const shift = shiftFromTimestamp(processedAt);
+  const deriveShift = (value) => {
+    const hour = new Date(value).getHours();
+    if (hour >= 6 && hour < 14) return "Morning";
+    if (hour >= 14 && hour < 22) return "Evening";
+    return "Night";
+  };
+  const toItemState = (value) => {
+    if (value === true) return "OK";
+    if (value === false) return "MISSING";
+    const normalized = String(value ?? "UNKNOWN").toUpperCase();
+    if (normalized === "TRUE") return "OK";
+    if (normalized === "FALSE") return "MISSING";
+    if (normalized === "OK" || normalized === "MISSING" || normalized === "UNKNOWN") return normalized;
+    return "UNKNOWN";
+  };
+
+  const helmet = row.helmet ? String(row.helmet).toUpperCase() : toItemState(row.helmet_worn);
+  const vest = row.vest ? String(row.vest).toUpperCase() : toItemState(row.vest_worn);
+  const shoes = row.shoes ? String(row.shoes).toUpperCase() : toItemState(row.shoes_worn);
   const firstSeenSec = Number(row.first_seen_sec ?? row.firstSeenSec ?? 0);
   const lastSeenSec = Number(row.last_seen_sec ?? row.lastSeenSec ?? firstSeenSec);
-  const durationSec = Math.max(0, lastSeenSec - firstSeenSec);
-  const rawStatus = String(row.status || "Resolved");
-  const status = rawStatus === "Active" ? "Active" : "Resolved";
-  const violationType = String(row.violation_type || row.violationType || "Compliant");
+  const durationSec = Number(row.duration_sec ?? row.durationSec ?? Math.max(0, lastSeenSec - firstSeenSec));
+  const missingItems = Array.isArray(row.missing_items)
+    ? row.missing_items
+    : [
+        helmet === "MISSING" ? "Helmet" : null,
+        vest === "MISSING" ? "Vest" : null,
+        shoes === "MISSING" ? "Shoes" : null,
+      ].filter(Boolean);
+  const complianceStatus = String(row.compliance_status ?? row.complianceStatus ?? (missingItems.length > 0 ? "FAIL" : "PASS")).toUpperCase() === "FAIL" ? "FAIL" : "PASS";
 
   return {
-    outputId: row.output_id ?? row.outputId ?? index + 1,
     inputId: row.input_id ?? row.inputId ?? "",
-    personId: row.person_id ?? row.personId ?? `WRK-${index + 1}`,
-    helmetWorn: Boolean(row.helmet_worn),
-    vestWorn: Boolean(row.vest_worn),
-    violationType,
-    confidenceScore: Number(row.confidence_score ?? row.confidenceScore ?? 0),
-    status,
-    firstSeenFrame: Number(row.first_seen_frame ?? row.firstSeenFrame ?? 0),
-    lastSeenFrame: Number(row.last_seen_frame ?? row.lastSeenFrame ?? 0),
+    cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    location: row.location ?? "Warehouse A",
+    zone: row.zone ?? "Storage Bay",
+    shift: row.shift ?? deriveShift(processedAt),
+    trackedWorkerId: row.tracked_worker_id ?? row.trackedWorkerId ?? row.person_id ?? row.personId ?? `TID-${index + 1}`,
+    helmet,
+    vest,
+    shoes,
+    complianceStatus,
+    missingItems,
+    framesObserved: Number(row.frames_observed ?? row.framesObserved ?? 0),
     firstSeenSec,
     lastSeenSec,
-    processedAt,
-    notes: row.notes || "",
-    metadataJson: row.metadata_json ?? {},
-    timestamp: processedAt,
-    shift,
     durationSec,
-    entryTime: processedAt,
+    outputVideoUrl: row.output_video_url ?? row.outputVideoUrl ?? "",
+    processedAt,
+    timestamp: processedAt,
+    confidenceScore: Number(row.confidence_score ?? row.confidenceScore ?? 0.88),
   };
 }
 
@@ -207,6 +310,7 @@ function normalizeFireVideoSummary(row, index) {
   const fireFramePct = Number(row.fireFramePct ?? row.fire_frame_pct ?? (fireDetected === "Yes" ? 8 + (index % 6) * 3 : 0));
   const smokeFramePct = Number(row.smokeFramePct ?? row.smoke_frame_pct ?? (smokeDetected === "Yes" ? 12 + (index % 7) * 4 : 0));
   const escalationNeeded = severity === "High" || alertType === "Fire + Smoke" ? "Yes" : "No";
+  const timestampWeight = new Date(timestamp).getTime() / 1_000_000_000;
 
   return {
     id: row.id || row.output_id || `FD-${index + 1}`,
@@ -226,9 +330,12 @@ function normalizeFireVideoSummary(row, index) {
     firstDetectionSec,
     fireFramePct,
     smokeFramePct,
+    totalFireEvents: Number(row.totalFireEvents ?? row.total_fire_events ?? 0),
+    totalSmokeEvents: Number(row.totalSmokeEvents ?? row.total_smoke_events ?? 0),
     escalationNeeded,
-    outputVideo: row.outputVideo || row.output_video || row.minio_video_link || "",
-    firePriority: (escalationNeeded === "Yes" ? 1000 : 0) + (severity === "High" ? 300 : severity === "Medium" ? 100 : 0) + firstDetectionSec,
+    outputVideo: row.outputVideo || row.output_video || row.output_video_url || row.minio_video_link || "",
+    isLatestDemoAlert: Boolean(row.isLatestDemoAlert ?? row.is_latest_demo_alert),
+    firePriority: (severity === "High" ? 1000 : severity === "Medium" ? 400 : severity === "Low" ? 150 : 0) + (alertType === "Fire + Smoke" ? 220 : alertType === "Fire Only" ? 160 : alertType === "Smoke Only" ? 90 : 0) + timestampWeight,
   };
 }
 
@@ -273,7 +380,6 @@ function normalizeSpeedRow(row, index) {
 }
 
 const icons = {
-  "object-counting": LayoutDashboard,
   "region-alerts": ShieldAlert,
   "queue-management": Activity,
   "speed-estimation": Route,
@@ -312,7 +418,7 @@ function getGlobalFilters(rows, slug) {
     zone: [],
     cameraId: [],
   };
-  if ((slug === "region-alerts" || slug === "fire-detection") && rows.length) {
+  if ((slug === "region-alerts" || slug === "fire-detection" || slug === "ppe-detection" || slug === "speed-estimation") && rows.length) {
     const latest = [...rows]
       .sort((a, b) => new Date(a.timestamp || a.entry_time || a.entryTime) - new Date(b.timestamp || b.entry_time || b.entryTime))
       .at(-1);
@@ -320,7 +426,11 @@ function getGlobalFilters(rows, slug) {
     if (latestTimestamp) {
       const to = new Date(latestTimestamp);
       const from = new Date(to);
-      from.setDate(to.getDate() - 6);
+      if (slug === "ppe-detection" || slug === "speed-estimation") {
+        from.setDate(to.getDate() - 1);
+      } else {
+        from.setDate(to.getDate() - 6);
+      }
       filters.from = from.toISOString().slice(0, 10);
       filters.to = to.toISOString().slice(0, 10);
     }
@@ -328,12 +438,17 @@ function getGlobalFilters(rows, slug) {
   return filters;
 }
 
-function getInitialExtraFilters(slug, extraFilterDefs) {
+function getInitialExtraFilters(slug, extraFilterDefs, rows = []) {
   const multiSelectKeys = getMultiSelectKeys(slug);
   const initial = {};
   for (const def of extraFilterDefs) {
-    if (slug === "region-alerts" && def.key === "severity") {
-      initial[def.key] = ["High", "Medium"];
+    if (slug === "speed-estimation" && def.key === "status") {
+      initial[def.key] = "Violation";
+    } else if (slug === "ppe-detection" && def.key === "shift" && rows.length) {
+      const latest = [...rows]
+        .sort((a, b) => new Date(a.processed_at || a.timestamp || 0) - new Date(b.processed_at || b.timestamp || 0))
+        .at(-1);
+      initial[def.key] = latest?.shift || "Evening";
     } else {
       initial[def.key] = multiSelectKeys.includes(def.key) ? [] : "All";
     }
@@ -375,11 +490,11 @@ function applyFilters(rows, filters, filterDefs) {
   });
 }
 
-function KpiGrid({ items }) {
+function KpiGrid({ items, className = "" }) {
   return (
-    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <section className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${className}`}>
       {items.map((item) => (
-        <Card key={item.label}>
+        <Card key={item.label} className={item.cardClassName ?? ""}>
           <CardContent className="p-5">
             <div className="flex items-start justify-between">
               <div>
@@ -398,6 +513,43 @@ function KpiGrid({ items }) {
   );
 }
 
+function CrossFilterSummary({ selections, onClear, onClearOne }) {
+  const labels = [
+    selections.timeBucket ? { key: "timeBucket", label: `Time: ${selections.timeBucket}` } : null,
+    selections.zone ? { key: "zone", label: `Zone: ${selections.zone}` } : null,
+    selections.alertType ? { key: "alertType", label: `Violation: ${selections.alertType}` } : null,
+    selections.severity ? { key: "severity", label: `Severity: ${selections.severity}` } : null,
+  ].filter(Boolean);
+
+  if (!labels.length) return null;
+
+  return (
+    <Card className="border-brand-red/20 bg-brand-red-tint/30">
+      <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-brand-blue">Cross-filtering is active</p>
+          <p className="text-xs text-muted">Chart selections are narrowing the incident story across cards, charts, and the table.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {labels.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => onClearOne(item.key)}
+              className="rounded-full border border-brand-blue bg-white px-3 py-1.5 text-xs font-semibold text-brand-blue transition hover:bg-brand-blue-tint"
+            >
+              {item.label} <span aria-hidden="true">×</span>
+            </button>
+          ))}
+          <Button variant="outline" className="border-brand-red text-brand-red hover:bg-brand-red-tint" onClick={onClear}>
+            Clear selections
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function ChartSkeleton() {
   return (
     <Card>
@@ -412,7 +564,7 @@ function ChartSkeleton() {
   );
 }
 
-function DonutChartCard({ title, description, data, showSlicePercent = false }) {
+function DonutChartCard({ title, description, data, showSlicePercent = false, onSliceClick, activeLabel }) {
   const total = sum(data.map((item) => item.value));
   return (
     <Card>
@@ -439,7 +591,15 @@ function DonutChartCard({ title, description, data, showSlicePercent = false }) 
                   }}
                 >
                   {data.map((entry, index) => (
-                    <Cell key={entry.label} fill={entry.color ?? chartPalette[index % chartPalette.length]} />
+                    <Cell
+                      key={entry.label}
+                      fill={entry.color ?? chartPalette[index % chartPalette.length]}
+                      fillOpacity={activeLabel && activeLabel !== entry.label ? 0.28 : 1}
+                      stroke={activeLabel === entry.label ? "#27235C" : "transparent"}
+                      strokeWidth={activeLabel === entry.label ? 2 : 0}
+                      onClick={() => onSliceClick?.(entry.label)}
+                      style={onSliceClick ? { cursor: "pointer" } : undefined}
+                    />
                   ))}
                 </Pie>
                 <Tooltip formatter={chartTooltip} />
@@ -450,7 +610,12 @@ function DonutChartCard({ title, description, data, showSlicePercent = false }) 
             {data.map((item, index) => {
               const pct = total ? Math.round((item.value / total) * 100) : 0;
               return (
-                <div key={item.label} className="flex items-center justify-between gap-3 rounded-xl border border-borderSoft bg-white px-3 py-2 text-sm">
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => onSliceClick?.(item.label)}
+                  className={`flex w-full items-center justify-between gap-3 rounded-xl border bg-white px-3 py-2 text-sm text-left transition ${activeLabel === item.label ? "border-brand-red shadow-card" : "border-borderSoft hover:border-brand-blue/40"}`}
+                >
                   <span className="flex items-center gap-2 text-ink">
                     <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color ?? chartPalette[index % chartPalette.length] }} />
                     {item.label}
@@ -458,7 +623,7 @@ function DonutChartCard({ title, description, data, showSlicePercent = false }) 
                   <span className="font-semibold text-brand-blue">
                     {item.value} ({pct}%)
                   </span>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -468,7 +633,22 @@ function DonutChartCard({ title, description, data, showSlicePercent = false }) 
   );
 }
 
-function BarChartCard({ title, description, data, bars, xAxisLabel, yAxisLabel, layout = "vertical", stacked = false, cellFillForBar, showLegend = true, margin, totalLabelKey }) {
+function BarChartCard({
+  title,
+  description,
+  data,
+  bars,
+  xAxisLabel,
+  yAxisLabel,
+  layout = "vertical",
+  stacked = false,
+  cellFillForBar,
+  showLegend = true,
+  margin,
+  totalLabelKey,
+  onBarClick,
+  activeLabel,
+}) {
   const isHorizontal = layout === "horizontal";
   return (
     <Card>
@@ -485,9 +665,25 @@ function BarChartCard({ title, description, data, bars, xAxisLabel, yAxisLabel, 
             <Tooltip formatter={chartTooltip} />
             {showLegend ? <Legend /> : null}
             {bars.map((bar) => (
-              <Bar key={bar.dataKey} dataKey={bar.dataKey} stackId={stacked ? "stack" : undefined} fill={bar.color} radius={[6, 6, 0, 0]}>
-                {cellFillForBar === bar.dataKey &&
-                  data.map((entry, index) => <Cell key={`${bar.dataKey}-${index}`} fill={entry.barFill ?? entry.color ?? bar.color} />)}
+              <Bar
+                key={bar.dataKey}
+                dataKey={bar.dataKey}
+                stackId={stacked ? "stack" : undefined}
+                fill={bar.color}
+                radius={[6, 6, 0, 0]}
+                onClick={(payload) => onBarClick?.(payload, bar.dataKey)}
+              >
+                {(cellFillForBar === bar.dataKey || onBarClick || activeLabel) &&
+                  data.map((entry, index) => (
+                    <Cell
+                      key={`${bar.dataKey}-${index}`}
+                      fill={entry.barFill ?? entry.color ?? bar.color}
+                      fillOpacity={activeLabel && entry.label !== activeLabel ? 0.28 : 1}
+                      stroke={activeLabel === entry.label ? "#27235C" : "transparent"}
+                      strokeWidth={activeLabel === entry.label ? 1.5 : 0}
+                      style={onBarClick ? { cursor: "pointer" } : undefined}
+                    />
+                  ))}
                 {bar.showLabels ? <LabelList dataKey={bar.dataKey} position={layout === "horizontal" ? "right" : "top"} fill="#27235C" fontSize={11} /> : null}
               </Bar>
             ))}
@@ -562,7 +758,7 @@ function ScatterChartCard({ title, description, data, xAxisLabel, yAxisLabel }) 
   );
 }
 
-function buildDashboardViews(slug, rows, granularity) {
+function buildDashboardViews(slug, rows, granularity, interactive = {}) {
   switch (slug) {
     case "object-counting": {
       const byZone = groupBy(rows, "zone");
@@ -597,7 +793,14 @@ function buildDashboardViews(slug, rows, granularity) {
     }
     case "region-alerts": {
       const alertRows = rows.filter(isRegionIncident);
-      const byZoneGroups = groupBy(alertRows, "zone");
+      const selections = interactive.selections ?? {};
+      const trendRows = applyRegionChartFilters(alertRows, selections, granularity, ["timeBucket"]);
+      const zoneRows = applyRegionChartFilters(alertRows, selections, granularity, ["zone"]);
+      const typeRows = applyRegionChartFilters(alertRows, selections, granularity, ["alertType"]);
+      const durationRows = applyRegionChartFilters(alertRows, selections, granularity);
+      const cameraRows = applyRegionChartFilters(alertRows, selections, granularity);
+
+      const byZoneGroups = groupBy(zoneRows, "zone");
       const byZoneCounts = Object.entries(byZoneGroups).map(([label, items]) => ({
         label,
         High: items.filter((row) => row.severity === "High").length,
@@ -605,7 +808,7 @@ function buildDashboardViews(slug, rows, granularity) {
         Low: items.filter((row) => row.severity === "Low").length,
         total: items.length,
       })).sort((a, b) => b.total - a.total);
-      const trendData = groupRowsByGranularity(alertRows, granularity)
+      const trendData = groupRowsByGranularity(trendRows, granularity)
         .sort((a, b) => (granularity === "Weekly" ? String(a.bucketKey).localeCompare(String(b.bucketKey)) : new Date(a.bucketKey) - new Date(b.bucketKey)))
         .map(({ label, items }) => ({
           label,
@@ -615,21 +818,24 @@ function buildDashboardViews(slug, rows, granularity) {
         }));
       const alertTypeColors = {
         "Unauthorized Entry": "#DE1B54",
-        Loitering: "rgba(222, 27, 84, 0.6)",
+        Loitering: "#F06A8F",
         "Hazard Zone Breach": "#A01240",
-        "After-Hours Entry": "#3D3880",
-        "Repeated Intrusion": "#27235C",
-        "Crowding in Restricted Zone": "#F04E7A",
+        "After-Hours Entry": "#6E67B1",
+        "Repeated Intrusion": "#3D3880",
+        "Crowding in Restricted Zone": "#C73867",
+        "Zone Intrusion": "#27235C",
+        "Hazardous Area Intrusion": "#A01240",
+        "Prolonged Presence": "#9E96D9",
       };
-      const donut = Object.entries(groupBy(alertRows, "alertType"))
+      const donut = Object.entries(groupBy(typeRows, "alertType"))
         .map(([label, items]) => ({ label, value: items.length, color: alertTypeColors[label] ?? chartPalette[0] }))
         .sort((a, b) => b.value - a.value);
       const durationBuckets = [
-        { label: "Brief crossing (0-60s)", value: alertRows.filter((row) => row.durationSec <= 60).length, color: "#27235C" },
-        { label: "Suspicious presence (61-180s)", value: alertRows.filter((row) => row.durationSec > 60 && row.durationSec <= 180).length, color: "rgba(222, 27, 84, 0.6)" },
-        { label: "High-risk intrusion (180s+)", value: alertRows.filter((row) => row.durationSec > 180).length, color: "#DE1B54" },
+        { label: "Brief crossing (0-60s)", value: durationRows.filter((row) => row.durationSec <= 60).length, color: "#27235C" },
+        { label: "Suspicious presence (61-180s)", value: durationRows.filter((row) => row.durationSec > 60 && row.durationSec <= 180).length, color: "rgba(222, 27, 84, 0.6)" },
+        { label: "High-risk intrusion (180s+)", value: durationRows.filter((row) => row.durationSec > 180).length, color: "#DE1B54" },
       ];
-      const cameraShift = Object.entries(groupBy(alertRows, "cameraId"))
+      const cameraShift = Object.entries(groupBy(cameraRows, "cameraId"))
         .map(([label, items]) => ({
           label,
           "Morning Shift": items.filter((row) => getBusinessShift(row) === "Morning Shift").length,
@@ -637,7 +843,7 @@ function buildDashboardViews(slug, rows, granularity) {
           "Night Shift": items.filter((row) => getBusinessShift(row) === "Night Shift").length,
           total: items.length,
         }))
-        .sort((a, b) => b.total - a.total)
+        .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }))
         .slice(0, 8);
       return [
         <BarChartCard
@@ -649,6 +855,8 @@ function buildDashboardViews(slug, rows, granularity) {
           xAxisLabel={granularity}
           yAxisLabel="Incident Count"
           stacked
+          onBarClick={(payload) => interactive.onSelectTimeBucket?.(payload?.label)}
+          activeLabel={selections.timeBucket}
         />,
         <BarChartCard
           key="2"
@@ -660,8 +868,18 @@ function buildDashboardViews(slug, rows, granularity) {
           yAxisLabel="Restricted / Hazardous Zone"
           layout="horizontal"
           stacked
+          totalLabelKey="total"
+          onBarClick={(payload) => interactive.onSelectZone?.(payload?.label)}
+          activeLabel={selections.zone}
         />,
-        <DonutChartCard key="3" title="Violation Type Breakdown" description="Shows exactly what kind of restricted-zone rule is being broken, with count and percentage." data={donut} />,
+        <DonutChartCard
+          key="3"
+          title="Violation Type Breakdown"
+          description="Shows exactly what kind of restricted-zone rule is being broken, with count and percentage."
+          data={donut}
+          onSliceClick={interactive.onSelectAlertType}
+          activeLabel={selections.alertType}
+        />,
         <BarChartCard
           key="4"
           title="Duration Risk Interpretation"
@@ -728,7 +946,7 @@ function buildDashboardViews(slug, rows, granularity) {
         .map((item, index) => ({
           label: item.label,
           value: item.value,
-          barFill: chartPalette[index % chartPalette.length],
+          barFill: ["#DE1B54", "rgba(222, 27, 84, 0.8)", "rgba(222, 27, 84, 0.65)", "rgba(222, 27, 84, 0.5)", "#27235C"][index % 5],
         }))
         .sort((a, b) => b.value - a.value);
       const donut = [
@@ -760,15 +978,27 @@ function buildDashboardViews(slug, rows, granularity) {
             { dataKey: "speedLimit", color: "rgba(222, 27, 84, 0.6)" },
           ]}
           xAxisLabel="Timestamp"
-          yAxisLabel="Detected Speed (kmh)"
+          yAxisLabel="Detected Speed (km/h)"
         />,
-        <BarChartCard key="3" title="Violations by Object Type" description="Reveals which moving object categories contribute most to unsafe speed behavior." data={byType} bars={[{ dataKey: "value", color: "#27235C" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
+        <BarChartCard key="3" title="Violations by Object Type" description="Reveals which moving object categories contribute most to unsafe speed behavior." data={byType} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
         <DonutChartCard key="4" title="Violation vs Normal Distribution" description="Summarizes how much of total monitored movement is within safe limits versus violating limits." data={donut} showSlicePercent />,
         <DonutChartCard key="5" title="Violation Severity Distribution" description="Shows how far above the configured speed limit violating detections are, using rule-based severity bands." data={severityData} showSlicePercent />,
       ];
     }
     case "fire-detection": {
-      const zoneRisk = Object.entries(groupBy(rows, "zone"))
+      const selections = interactive.fireSelections ?? {};
+      const alertTypeRows = applyFireChartFilters(rows, selections, ["alertType", "zone", "cameraId"]);
+      const zoneRows = applyFireChartFilters(rows, selections, ["zone", "cameraId"]);
+      const cameraRows = applyFireChartFilters(rows, selections, ["cameraId"]);
+      const severityRows = applyFireChartFilters(rows, selections, ["severity"]);
+
+      const alertTypeDonut = ["Fire + Smoke", "Fire Only", "Smoke Only", "Clear / No Alert"].map((label) => ({
+        label,
+        value: alertTypeRows.filter((row) => row.alertType === label).length,
+        color: label === "Fire + Smoke" ? "#DE1B54" : label === "Fire Only" ? "#F04E7A" : label === "Smoke Only" ? "#F0718F" : "#27235C",
+      }));
+
+      const zoneRisk = Object.entries(groupBy(zoneRows.filter((row) => row.alertType !== "Clear / No Alert"), "zone"))
         .map(([label, items]) => ({
           label,
           "Smoke Only": items.filter((item) => item.alertType === "Smoke Only").length,
@@ -777,55 +1007,59 @@ function buildDashboardViews(slug, rows, granularity) {
           totalRisk: items.filter((item) => item.alertType !== "Clear / No Alert").length,
         }))
         .sort((a, b) => b.totalRisk - a.totalRisk);
-      const donut = ["Fire + Smoke", "Fire Only", "Smoke Only", "Clear / No Alert"].map((label) => ({
-        label,
-        value: rows.filter((row) => row.alertType === label).length,
-        color: label === "Fire + Smoke" ? "#DE1B54" : label === "Fire Only" ? "#DE1B54" : label === "Smoke Only" ? "#F0718F" : "#27235C",
-      }));
-      const firstDetectionByZone = Object.entries(groupBy(rows.filter((row) => row.firstDetectionSec > 0), "zone"))
-        .map(([label, items]) => {
-          const v = Math.round(average(items.map((item) => item.firstDetectionSec)));
-          return { label, value: v };
-        })
-        .sort((a, b) => b.value - a.value);
-      const cameraAlerts = Object.entries(groupBy(rows.filter((row) => row.alertType !== "Clear / No Alert"), "cameraId"))
+      const cameraAlerts = Object.entries(groupBy(cameraRows.filter((row) => row.alertType !== "Clear / No Alert"), "cameraId"))
         .map(([label, items]) => ({ label, value: items.length }))
         .sort((a, b) => b.value - a.value)
         .slice(0, 8);
+      const severityData = ["High", "Medium", "Low", "None"].map((label) => ({
+        label,
+        value: severityRows.filter((row) => row.severity === label).length,
+        color: label === "High" ? "#DE1B54" : label === "Medium" ? "rgba(222, 27, 84, 0.6)" : label === "Low" ? "#F04E7A" : "#27235C",
+      }));
       return [
-        <BarChartCard
+        <DonutChartCard
           key="1"
+          title="Alert Type Distribution"
+          description="Shows whether current fire and smoke risk is driven by smoke warnings, confirmed fire signals, or both together."
+          data={alertTypeDonut}
+          showSlicePercent
+          onSliceClick={interactive.onSelectFireAlertType}
+          activeLabel={selections.alertType}
+        />,
+        <BarChartCard
+          key="2"
           title="Highest-Risk Zones by Alert Volume"
-          description="Shows where safety alerts are concentrated so emergency planning can focus on the right areas."
+          description="Shows which operational zones are generating the most fire and smoke alerts for the current selection."
           data={zoneRisk}
-          bars={[{ dataKey: "Smoke Only", color: "#F0718F" }, { dataKey: "Fire Only", color: "#DE1B54" }, { dataKey: "Fire + Smoke", color: "#DE1B54", showLabels: true }]}
+          bars={[{ dataKey: "Smoke Only", color: "#F0718F" }, { dataKey: "Fire Only", color: "#F04E7A" }, { dataKey: "Fire + Smoke", color: "#DE1B54", showLabels: true }]}
           xAxisLabel="Zone"
           yAxisLabel="Count"
           stacked
           totalLabelKey="totalRisk"
+          onBarClick={(payload) => interactive.onSelectFireZone?.(payload?.label)}
+          activeLabel={selections.zone}
         />,
-        <DonutChartCard key="2" title="Alert Type Distribution" description="Shows whether site activity is mostly clear, smoke-related, or critical fire and smoke." data={donut} showSlicePercent />,
         <BarChartCard
           key="3"
-          title="Average Time to First Detection by Zone"
-          description="Shows how quickly each zone typically surfaces a safety hazard."
-          data={firstDetectionByZone}
-          bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]}
-          xAxisLabel="Zone"
-          yAxisLabel="Seconds"
-          showLegend={false}
-          margin={{ left: 28, right: 18, bottom: 8 }}
-        />,
-        <BarChartCard
-          key="4"
           title="Most Triggered Cameras"
-          description="Highlights cameras with the highest number of safety alerts."
+          description="Shows which cameras are producing the most alerts for the currently selected alert type and zone."
           data={cameraAlerts}
           bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]}
           xAxisLabel="Alert Count"
           yAxisLabel="Camera ID"
           layout="horizontal"
           showLegend={false}
+          onBarClick={(payload) => interactive.onSelectFireCamera?.(payload?.label)}
+          activeLabel={selections.cameraId}
+        />,
+        <DonutChartCard
+          key="4"
+          title="Severity Distribution"
+          description="Shows how serious the currently filtered fire and smoke alerts are, helping teams prioritize the highest-risk cases first."
+          data={severityData}
+          showSlicePercent
+          onSliceClick={interactive.onSelectFireSeverity}
+          activeLabel={selections.severity}
         />,
       ];
     }
@@ -885,26 +1119,34 @@ function buildDashboardViews(slug, rows, granularity) {
       ];
     }
     case "ppe-detection": {
-      const violationRows = rows.filter((row) => row.violationType !== "Compliant");
-      const shiftOrder = ["Morning Shift", "Swing Shift", "Night Shift"];
+      const failedRows = rows.filter((row) => row.complianceStatus === "FAIL");
+      const byZone = Object.entries(groupBy(failedRows, "zone"))
+        .map(([label, items]) => ({ label, value: items.length, barFill: items.length >= 6 ? "#DE1B54" : "#27235C" }))
+        .sort((a, b) => b.value - a.value);
+      const donut = [
+        { label: "Missing Helmet", value: rows.filter((row) => row.helmet === "MISSING").length, color: "#DE1B54" },
+        { label: "Missing Vest", value: rows.filter((row) => row.vest === "MISSING").length, color: "rgba(222, 27, 84, 0.6)" },
+        { label: "Missing Shoes", value: rows.filter((row) => row.shoes === "MISSING").length, color: "#27235C" },
+        { label: "Compliant", value: rows.filter((row) => row.complianceStatus === "PASS").length, color: "#27235C" },
+      ];
+      const shiftOrder = ["Morning", "Evening", "Night"];
       const byShift = shiftOrder.map((label) => ({
         label,
-        value: violationRows.filter((row) => row.shift === label).length,
+        value: failedRows.filter((row) => row.shift === label).length,
       }));
-      const donut = [
-        { label: "Missing Helmet", value: rows.filter((row) => row.violationType === "Missing Helmet").length, color: "#DE1B54" },
-        { label: "Missing Vest", value: rows.filter((row) => row.violationType === "Missing Vest").length, color: "rgba(222, 27, 84, 0.6)" },
-        { label: "Missing Both", value: rows.filter((row) => row.violationType === "Missing Both").length, color: "#A01240" },
-      ];
-      const durationBuckets = [
-        { label: "Brief (<30s)", value: violationRows.filter((row) => row.durationSec < 30).length, color: "#27235C" },
-        { label: "Moderate (30s-2m)", value: violationRows.filter((row) => row.durationSec >= 30 && row.durationSec <= 120).length, color: "rgba(222, 27, 84, 0.6)" },
-        { label: "Prolonged (>2m)", value: violationRows.filter((row) => row.durationSec > 120).length, color: "#DE1B54" },
-      ];
+      const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
+        label,
+        complianceRate: Number(((items.filter((item) => item.complianceStatus === "PASS").length / Math.max(items.length, 1)) * 100).toFixed(1)),
+      }));
+      const byCamera = Object.entries(groupBy(failedRows, "cameraId"))
+        .map(([label, items]) => ({ label, value: items.length }))
+        .sort((a, b) => b.value - a.value);
       return [
-        <BarChartCard key="1" title="Violations by Shift" description="Shows which operating shift is generating the most helmet and vest violations." data={byShift} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Shift" yAxisLabel="Violation Count" showLegend={false} />,
-        <DonutChartCard key="2" title="Missing PPE Breakdown" description="Shows whether the site is missing helmets, vests, or both items at the point of detection." data={donut} showSlicePercent />,
-        <BarChartCard key="3" title="Exposure Duration Risk" description="Separates brief exposures from prolonged PPE risk so managers can prioritize persistent violations." data={durationBuckets} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Exposure Duration" yAxisLabel="Incident Count" cellFillForBar="value" showLegend={false} />,
+        <BarChartCard key="1" title="Top Zones with PPE Violations" description="Highlights zones where workers most frequently violate PPE rules." data={byZone} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Zone" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
+        <DonutChartCard key="2" title="PPE Violation Breakdown" description="Shows which PPE items are most frequently missing across workers." data={donut} showSlicePercent />,
+        <BarChartCard key="3" title="Violations by Shift" description="Identifies shifts where worker safety compliance is weakest." data={byShift} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Shift" yAxisLabel="Violation Count" showLegend={false} />,
+        <LineChartCard key="4" title="Compliance Rate Over Time" description="Tracks whether PPE compliance is improving or declining." data={trend} lines={[{ dataKey: "complianceRate", color: "#27235C" }]} xAxisLabel="Time" yAxisLabel="Compliance %" referenceLines={[{ value: 90, color: "#DE1B54", label: "90% Threshold" }]} />,
+        <BarChartCard key="5" title="Violations by Camera" description="Shows which cameras are capturing the highest concentration of non-compliant workers." data={byCamera} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Camera ID" yAxisLabel="Violation Count" showLegend={false} />,
       ];
     }
     default:
@@ -913,7 +1155,6 @@ function buildDashboardViews(slug, rows, granularity) {
 }
 
 const DASHBOARD_NAV = [
-  ["object-counting", "Object Counting"],
   ["region-alerts", "Region Alerts"],
   ["queue-management", "Queue Management"],
   ["speed-estimation", "Speed Estimation"],
@@ -926,125 +1167,203 @@ const DASHBOARD_NAV = [
 function getMultiSelectKeys(slug) {
   const baseKeys = ["zone"];
   const dashboardSpecific = {
-    "object-counting": ["cameraId", "objectType"],
     "region-alerts": ["cameraId", "severity", "zoneType", "shift"],
     "queue-management": ["cameraId", "counterId"],
     "speed-estimation": ["cameraId", "objectType", "speedLimitKmh", "severity"],
     "fire-detection": ["cameraId", "severity", "alertType", "shift"],
     "class-wise-counting": ["cameraId", "className"],
     "object-tracking": ["cameraId", "objectType"],
-    "ppe-detection": ["shift"],
+    "ppe-detection": ["cameraId", "shift"],
   };
-  return [...(slug === "ppe-detection" ? [] : baseKeys), ...(dashboardSpecific[slug] || [])];
+  return [...baseKeys, ...(dashboardSpecific[slug] || [])];
 }
 
 export function DashboardPage({ slug, title, description, rows, metricDefs, columns, extraFilterDefs }) {
+  const resolvedDefinition = useMemo(() => {
+    if (metricDefs && columns && extraFilterDefs) {
+      return {
+        title,
+        description,
+        metricDefs,
+        columns,
+        extraFilterDefs,
+      };
+    }
+    return buildDashboardDefinition(slug, rows, description);
+  }, [slug, rows, title, description, metricDefs, columns, extraFilterDefs]);
+
+  const resolvedTitle = resolvedDefinition.title;
+  const resolvedDescription = resolvedDefinition.description;
+  const resolvedMetricDefs = resolvedDefinition.metricDefs;
+  const resolvedColumns = resolvedDefinition.columns;
+  const resolvedExtraFilterDefs = resolvedDefinition.extraFilterDefs;
   const Icon = icons[slug] ?? LayoutDashboard;
-  const loading = useLoadingSkeleton();
-  const [filters, setFilters] = useState(() => getGlobalFilters(rows, slug));
-  const [extraFilters, setExtraFilters] = useState(() => getInitialExtraFilters(slug, extraFilterDefs));
-  const [sortState, setSortState] = useState(() => initialSortStateFor(slug, columns));
+  const skeletonLoading = useLoadingSkeleton();
+  const usesLiveDashboardData = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts";
+  const initialRows = usesLiveDashboardData ? [] : rows;
+  const [filters, setFilters] = useState(() => getGlobalFilters(initialRows, slug));
+  const [extraFilters, setExtraFilters] = useState(() => getInitialExtraFilters(slug, resolvedExtraFilterDefs, initialRows));
+  const [sortState, setSortState] = useState(() => initialSortStateFor(slug, resolvedColumns));
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [timeGranularity, setTimeGranularity] = useState("Hourly");
+  const [regionChartSelections, setRegionChartSelections] = useState({ timeBucket: "", zone: "", alertType: "", severity: "" });
+  const [regionDemoIncidentCount, setRegionDemoIncidentCount] = useState(0);
+  const [fireChartSelections, setFireChartSelections] = useState({ alertType: "", zone: "", cameraId: "", severity: "" });
+  const [fireDemoAlertCount, setFireDemoAlertCount] = useState(0);
+  const [liveFiltersInitialized, setLiveFiltersInitialized] = useState(!usesLiveDashboardData);
 
-  const fireFilters = useMemo(
-    () => ({
-      zone: asSingleFilterValue(filters.zone),
-      severity: asSingleFilterValue(extraFilters.severity),
-      dateFrom: filters.from,
-      dateTo: filters.to,
-    }),
-    [filters.zone, filters.from, filters.to, extraFilters.severity],
-  );
-
-  const { data: fireCsvData, loading: fireCsvLoading, error: fireCsvError } = useFireData(fireFilters, slug === "fire-detection");
+  const { data: fireApiData, loading: fireApiLoading, error: fireApiError } = useFireData({}, slug === "fire-detection");
+  const { data: ppeApiData, loading: ppeApiLoading, error: ppeApiError } = usePPEData({}, slug === "ppe-detection");
+  const { data: regionApiData, loading: regionApiLoading, error: regionApiError } = useRegionAlertsData({}, slug === "region-alerts");
 
   const sourceRows = useMemo(() => {
-    if (slug === "ppe-detection") return rows.map(normalizePPERecord);
+    if (slug === "ppe-detection") return ppeApiData.map(normalizePPERecord);
     if (slug === "speed-estimation") return rows.map(normalizeSpeedRow);
     if (slug === "fire-detection") {
-      return rows.map(normalizeFireVideoSummary);
+      return fireApiData.map(normalizeFireVideoSummary);
     }
     if (slug === "region-alerts") {
-      return rows.map((row, index) => ({
-        id: row.id,
-        timestamp: row.timestamp || row.entry_time || row.entryTime,
-        location: row.location || ["Warehouse A", "Warehouse B", "Warehouse C"][index % 3],
-        cameraId: row.cameraId || row.camera_id,
-        zone: row.zone,
-        zoneType: row.zoneType || row.zone_type,
-        entryTime: row.entryTime || row.entry_time,
-        exitTime:
-          row.exitTime ||
-          row.exit_time ||
-          (index % 8 === 0 ? "" : new Date(new Date(row.entry_time || row.entryTime).getTime() + Number(row.duration_sec || row.durationSec || 0) * 1000).toISOString()),
-        shift: getBusinessShift(row),
-        durationSec: row.durationSec ?? row.duration_sec,
-        alertType: row.alertType || row.alert_type,
-        severity: row.severity,
-        status: row.status || (index % 8 === 0 || row.severity === "High" && index % 5 === 0 ? "Open" : "Resolved"),
-        confidenceScore: row.confidenceScore ?? Number((0.84 + ((index % 7) * 0.018)).toFixed(2)),
-        assignedTo: row.assignedTo ?? ["Ops Supervisor", "Security Desk", "Safety Lead", "Floor Manager"][index % 4],
-        escalationNeeded: row.escalationNeeded ?? (row.severity === "High" || index % 8 === 0 ? "Yes" : "No"),
-        snapshotUrl: row.snapshotUrl ?? `/dashboard/snapshots/region-alerts/${row.id}`,
-        escalationPriority: 0,
-      })).map((row) => ({
-        ...row,
-        escalationPriority: regionEscalationScore(row),
-      }));
+      return regionApiData.map(normalizeRegionAlertRow);
     }
     return rows;
-  }, [slug, fireCsvData, rows]);
+  }, [slug, fireApiData, ppeApiData, regionApiData, rows]);
 
-  const dataLoading = false;
-  const dataError = "";
+  const effectiveSourceRows = useMemo(() => {
+    if (slug !== "region-alerts" || usesLiveDashboardData) return sourceRows;
+    const baselineRows = sourceRows.filter((row) => !row.isLatestDemoIncident);
+    const demoRows = byTimestamp(sourceRows.filter((row) => row.isLatestDemoIncident));
+    return [...baselineRows, ...demoRows.slice(0, regionDemoIncidentCount)];
+  }, [slug, sourceRows, regionDemoIncidentCount, usesLiveDashboardData]);
 
-  const filterDefs = slug === "ppe-detection"
-    ? [...extraFilterDefs]
-    : [
-        { key: "location", label: "Location" },
-        { key: "zone", label: "Zone" },
-        { key: "cameraId", label: "Camera ID" },
-        ...extraFilterDefs,
-      ];
+  const effectiveFireRows = useMemo(() => {
+    if (slug !== "fire-detection") return effectiveSourceRows;
+    const baselineRows = effectiveSourceRows.filter((row) => !row.isLatestDemoAlert);
+    const demoRows = byTimestamp(effectiveSourceRows.filter((row) => row.isLatestDemoAlert));
+    return [...baselineRows, ...demoRows.slice(0, fireDemoAlertCount)];
+  }, [slug, effectiveSourceRows, fireDemoAlertCount]);
+
+  useEffect(() => {
+    if (slug !== "region-alerts") return;
+    setRegionChartSelections({ timeBucket: "", zone: "", alertType: "", severity: "" });
+    setRegionDemoIncidentCount(0);
+  }, [slug]);
+
+  useEffect(() => {
+    if (slug !== "fire-detection") return;
+    setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" });
+    setFireDemoAlertCount(0);
+  }, [slug, rows]);
+
+  useEffect(() => {
+    setLiveFiltersInitialized(!usesLiveDashboardData);
+  }, [slug, usesLiveDashboardData]);
+
+  useEffect(() => {
+    if (!usesLiveDashboardData || liveFiltersInitialized) return;
+    const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : ppeApiLoading;
+    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : ppeApiData;
+    if (liveLoading || liveRows.length === 0) return;
+    setFilters(getGlobalFilters(liveRows, slug));
+    setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, liveRows));
+    setSortState(initialSortStateFor(slug, resolvedColumns));
+    setLiveFiltersInitialized(true);
+  }, [
+    slug,
+    usesLiveDashboardData,
+    liveFiltersInitialized,
+    fireApiLoading,
+    ppeApiLoading,
+    regionApiLoading,
+    fireApiData,
+    ppeApiData,
+    regionApiData,
+    resolvedExtraFilterDefs,
+    resolvedColumns,
+  ]);
+
+  const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : ppeApiLoading) : false;
+  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : ppeApiError) : "";
+  const loading = skeletonLoading || dataLoading;
+
+  const filterDefs = [
+    { key: "location", label: "Location" },
+    { key: "zone", label: "Zone" },
+    { key: "cameraId", label: "Camera ID" },
+    ...resolvedExtraFilterDefs,
+  ];
 
   const multiSelectKeys = getMultiSelectKeys(slug);
 
   const filteredRows = useMemo(() => {
     const merged = filterDefs.map((def) => ({ ...def }));
     const allFilters = { ...filters, ...extraFilters };
-    return applyFilters(sourceRows, allFilters, merged);
-  }, [sourceRows, filters, extraFilters, extraFilterDefs]);
+    return applyFilters(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows, allFilters, merged);
+  }, [slug, effectiveFireRows, effectiveSourceRows, filters, extraFilters, resolvedExtraFilterDefs]);
 
-  const sortedRows = useMemo(() => sortRows(filteredRows, sortState), [filteredRows, sortState]);
+  const chartFilteredRows = useMemo(() => {
+    if (slug !== "region-alerts") return filteredRows;
+    return applyRegionChartFilters(filteredRows, regionChartSelections, timeGranularity);
+  }, [slug, filteredRows, regionChartSelections, timeGranularity]);
+
+  const fullyFilteredRows = useMemo(() => {
+    if (slug === "region-alerts") return chartFilteredRows;
+    if (slug === "fire-detection") return applyFireChartFilters(filteredRows, fireChartSelections);
+    return filteredRows;
+  }, [slug, chartFilteredRows, filteredRows, fireChartSelections]);
+
+  const sortedRows = useMemo(() => sortRows(fullyFilteredRows, sortState), [fullyFilteredRows, sortState]);
+  const showLiveEmptyState = usesLiveDashboardData && !dataLoading && !dataError && sourceRows.length === 0;
   const kpis = useMemo(
     () =>
-      metricDefs.map((metric) => {
-        const computed = metric.compute(filteredRows);
+      resolvedMetricDefs.map((metric) => {
+        const computed = metric.compute(fullyFilteredRows);
         return {
           label: metric.label,
           icon: metric.icon,
-          value: metric.format(computed, filteredRows),
-          valueClassName: metric.valueClassName?.(computed, filteredRows),
-          subtext: typeof metric.subtext === "function" ? metric.subtext(computed, filteredRows) : metric.subtext,
+          value: metric.format(computed, fullyFilteredRows),
+          valueClassName: metric.valueClassName?.(computed, fullyFilteredRows),
+          subtext: typeof metric.subtext === "function" ? metric.subtext(computed, fullyFilteredRows) : metric.subtext,
+          group: metric.group,
+          cardClassName: metric.cardClassName?.(computed, fullyFilteredRows),
         };
       }),
-    [filteredRows, metricDefs],
+    [fullyFilteredRows, resolvedMetricDefs],
   );
-  const charts = useMemo(() => buildDashboardViews(slug, filteredRows, timeGranularity), [slug, filteredRows, timeGranularity]);
+  const charts = useMemo(
+    () =>
+      buildDashboardViews(slug, filteredRows, timeGranularity, {
+        selections: regionChartSelections,
+        onSelectTimeBucket: (label) =>
+          setRegionChartSelections((prev) => ({ ...prev, timeBucket: prev.timeBucket === label ? "" : label || "" })),
+        onSelectZone: (label) =>
+          setRegionChartSelections((prev) => ({ ...prev, zone: prev.zone === label ? "" : label || "" })),
+        onSelectAlertType: (label) =>
+          setRegionChartSelections((prev) => ({ ...prev, alertType: prev.alertType === label ? "" : label || "" })),
+        fireSelections: fireChartSelections,
+        onSelectFireAlertType: (label) =>
+          setFireChartSelections((prev) => ({ ...prev, alertType: prev.alertType === label ? "" : label || "", zone: "", cameraId: "" })),
+        onSelectFireZone: (label) =>
+          setFireChartSelections((prev) => ({ ...prev, zone: prev.zone === label ? "" : label || "", cameraId: "" })),
+        onSelectFireCamera: (label) =>
+          setFireChartSelections((prev) => ({ ...prev, cameraId: prev.cameraId === label ? "" : label || "" })),
+        onSelectFireSeverity: (label) =>
+          setFireChartSelections((prev) => ({ ...prev, severity: prev.severity === label ? "" : label || "" })),
+      }),
+    [slug, filteredRows, timeGranularity, regionChartSelections, fireChartSelections],
+  );
   const lastUpdated = useMemo(() => {
-    const latest = byTimestamp(sourceRows).at(-1)?.timestamp;
+    const latest = byTimestamp(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows).at(-1)?.timestamp;
     return latest ? formatDateTime(latest) : "N/A";
-  }, [sourceRows]);
+  }, [slug, effectiveSourceRows, effectiveFireRows]);
 
   const optionsFor = (key, includeAllOption = true) => {
-    const values = uniqueOptions(sourceRows, key);
+    const values = uniqueOptions(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows, key);
     const optionValues = values.map((value) => ({ label: String(value), value: String(value) }));
 
-    if (slug === "ppe-detection" && key === "status") {
+    if (slug === "ppe-detection" && key === "complianceStatus") {
       const statusOptions = [
-        { label: "Open", value: "Active" },
-        { label: "Closed", value: "Resolved" },
+        { label: "PASS", value: "PASS" },
+        { label: "FAIL", value: "FAIL" },
       ];
       return includeAllOption ? [{ label: "All", value: "All" }, ...statusOptions] : statusOptions;
     }
@@ -1059,18 +1378,36 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       }));
       return includeAllOption ? [{ label: "All", value: "All" }, ...breachedOptions] : breachedOptions;
     }
+    if (slug === "region-alerts" && key === "status") {
+      const statusOptions = [
+        { label: "Open", value: "Open" },
+        { label: "Past", value: "Past" },
+      ];
+      return includeAllOption ? [{ label: "All", value: "All" }, ...statusOptions] : statusOptions;
+    }
+    if (slug === "region-alerts" && key === "shift") {
+      const shiftOptions = sortByPreferredOrder(values, SHIFT_ORDER).map((value) => ({ label: String(value), value: String(value) }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...shiftOptions] : shiftOptions;
+    }
+    if (slug === "region-alerts" && key === "severity") {
+      const severityOptions = sortByPreferredOrder(values, SEVERITY_ORDER).map((value) => ({ label: String(value), value: String(value) }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...severityOptions] : severityOptions;
+    }
     return includeAllOption ? [{ label: "All", value: "All" }, ...optionValues] : optionValues;
   };
 
   const resetFilters = () => {
-    setFilters(getGlobalFilters(rows, slug));
-    setExtraFilters(getInitialExtraFilters(slug, extraFilterDefs));
+    const resetRows = usesLiveDashboardData ? sourceRows : rows;
+    setFilters(getGlobalFilters(resetRows, slug));
+    setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, resetRows));
     setTimeGranularity("Hourly");
-    setSortState(initialSortStateFor(slug, columns));
+    setSortState(initialSortStateFor(slug, resolvedColumns));
+    setRegionChartSelections({ timeBucket: "", zone: "", alertType: "", severity: "" });
+    setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" });
   };
 
   return (
-    <div className="flex min-h-screen bg-surface text-ink">
+    <div className={`flex min-h-screen text-ink ${slug === "speed-estimation" ? "bg-white" : "bg-surface"}`}>
       <aside className="hidden w-72 shrink-0 bg-brand-blue px-5 py-6 text-white lg:block">
         <div className="mb-8 flex items-center gap-3">
           <div className="rounded-xl bg-brand-red p-3">
@@ -1107,12 +1444,12 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 <Menu className="h-5 w-5" />
               </button>
               <div>
-                <h1 className="text-2xl font-semibold">{title}</h1>
+                <h1 className="text-2xl font-semibold">{resolvedTitle}</h1>
                 <p className="mt-1 text-sm text-brand-blue-tint">Last updated: {lastUpdated}</p>
               </div>
             </div>
             <div className="rounded-xl bg-brand-blue-light px-4 py-2 text-sm font-medium">
-              Showing {filteredRows.length} of {sourceRows.length} records
+              Showing {fullyFilteredRows.length} of {(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows).length} records
             </div>
           </div>
           {mobileNavOpen ? (
@@ -1150,7 +1487,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               </div>
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.2em] text-brand-blue">Use Case Overview</p>
-                <p className="mt-2 text-sm leading-6 text-muted">{description}</p>
+                  <p className="mt-2 text-sm leading-6 text-muted">{resolvedDescription}</p>
               </div>
             </CardContent>
           </Card>
@@ -1183,32 +1520,26 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   onChange={setTimeGranularity}
                   options={TIME_GRANULARITIES.map((label) => ({ label, value: label }))}
                 />
-                {slug !== "ppe-detection" ? (
-                  <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
-                ) : null}
+                <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
               </div>
               <div className="space-y-3">
-                {slug !== "ppe-detection" ? (
-                  <>
-                    <div>
-                      <span className="block text-sm font-medium text-ink mb-2">Zone</span>
-                      <PillCheckboxRow
-                        options={optionsFor("zone", false)}
-                        selectedValues={filters.zone}
-                        onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
-                      />
-                    </div>
-                    <div>
-                      <span className="block text-sm font-medium text-ink mb-2">Camera ID</span>
-                      <PillCheckboxRow
-                        options={optionsFor("cameraId", false)}
-                        selectedValues={filters.cameraId}
-                        onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
-                      />
-                    </div>
-                  </>
-                ) : null}
-                {extraFilterDefs.map((def) => {
+                <div>
+                  <span className="block text-sm font-medium text-ink mb-2">Zone</span>
+                  <PillCheckboxRow
+                    options={optionsFor("zone", false)}
+                    selectedValues={filters.zone}
+                    onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
+                  />
+                </div>
+                <div>
+                  <span className="block text-sm font-medium text-ink mb-2">Camera ID</span>
+                  <PillCheckboxRow
+                    options={optionsFor("cameraId", false)}
+                    selectedValues={filters.cameraId}
+                    onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
+                  />
+                </div>
+                {resolvedExtraFilterDefs.map((def) => {
                   const isMultiSelect = multiSelectKeys.includes(def.key);
                   const currentValue = extraFilters[def.key];
                   if (isMultiSelect) {
@@ -1231,10 +1562,22 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 })}
               </div>
               <div className="flex justify-end">
-                <Button variant="default" className="gap-2 shadow-card" onClick={resetFilters}>
-                  <TimerReset className="h-4 w-4" />
-                  Reset Filters
-                </Button>
+                <div className="flex flex-wrap justify-end gap-3">
+                  {slug === "region-alerts" && !usesLiveDashboardData && regionDemoIncidentCount < sourceRows.filter((row) => row.isLatestDemoIncident).length ? (
+                    <Button variant="outline" className="border-brand-red text-brand-red hover:bg-brand-red-tint" onClick={() => setRegionDemoIncidentCount((count) => count + 1)}>
+                      Simulate Latest Incident
+                    </Button>
+                  ) : null}
+                  {slug === "fire-detection" && fireDemoAlertCount < sourceRows.filter((row) => row.isLatestDemoAlert).length ? (
+                    <Button variant="outline" className="border-brand-red text-brand-red hover:bg-brand-red-tint" onClick={() => setFireDemoAlertCount((count) => count + 1)}>
+                      Simulate Latest Alert
+                    </Button>
+                  ) : null}
+                  <Button variant="default" className="gap-2 shadow-card" onClick={resetFilters}>
+                    <TimerReset className="h-4 w-4" />
+                    Reset Filters
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1256,7 +1599,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
             <>
               {dataLoading ? (
                 <div className="rounded-xl border border-brand-blue/20 bg-brand-blue-tint/30 px-4 py-3 text-sm text-brand-blue">
-                  Loading CSV data...
+                  Loading live dashboard data...
                 </div>
               ) : null}
               {dataError ? (
@@ -1264,11 +1607,140 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   {dataError}
                 </div>
               ) : null}
-              <KpiGrid items={kpis} />
-              <section className="grid gap-6 xl:grid-cols-2">{charts}</section>
+              {showLiveEmptyState ? (
+                <Card className="border-brand-blue/10">
+                  <CardContent className="p-8">
+                    <p className="text-lg font-semibold text-brand-blue">
+                      {slug === "ppe-detection" ? "No PPE records available yet" : slug === "region-alerts" ? "No Region Alerts records available yet" : "No fire or smoke alerts available yet"}
+                    </p>
+                    <p className="mt-2 text-sm text-muted">
+                      {slug === "ppe-detection"
+                        ? "Process a PPE video to populate the database. The dashboard will refresh automatically every 5 seconds."
+                        : slug === "region-alerts"
+                          ? "Process a Region Alerts video to populate the database. The dashboard will refresh automatically every 5 seconds."
+                        : "Process a fire or smoke video to populate the database. The dashboard will refresh automatically every 5 seconds."}
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : null}
+              {slug === "region-alerts" && !usesLiveDashboardData && regionDemoIncidentCount > 0 ? (
+                <Card className="border-brand-red/20 bg-brand-red-tint/20">
+                  <CardContent className="flex flex-col gap-2 p-4 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-brand-blue">Latest sample incident added to the monitoring story</p>
+                      <p className="text-xs text-muted">The dashboard now includes the newest restricted-zone event from the demo sample so supervisors can see cards, charts, and the table update together.</p>
+                    </div>
+                    <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-brand-red">
+                      {regionDemoIncidentCount} demo incident{regionDemoIncidentCount > 1 ? "s" : ""} applied
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
+              {slug === "fire-detection" && fireDemoAlertCount > 0 ? (
+                <Card className="border-brand-red/20 bg-brand-red-tint/20">
+                  <CardContent className="flex flex-col gap-2 p-4 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-brand-blue">Latest fire/smoke sample alert added to the dashboard story</p>
+                      <p className="text-xs text-muted">The newest sample alert is now included so the cards, drill-down charts, and table reflect the latest safety event together.</p>
+                    </div>
+                    <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-brand-red">
+                      {fireDemoAlertCount} demo alert{fireDemoAlertCount > 1 ? "s" : ""} applied
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
+              {!showLiveEmptyState && (slug === "region-alerts" ? (
+                <>
+                  <section className="space-y-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">Total Incident Story</p>
+                      <p className="mt-1 text-sm text-muted">A quick view of the overall restricted-zone risk pattern across the selected monitoring period.</p>
+                    </div>
+                    <KpiGrid items={kpis.filter((item) => item.group === "total")} className="xl:grid-cols-5" />
+                  </section>
+                  <section className="space-y-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">Open Incident Story</p>
+                      <p className="mt-1 text-sm text-muted">Focuses the team on intrusions that still need attention right now.</p>
+                    </div>
+                    <KpiGrid items={kpis.filter((item) => item.group === "open")} className="xl:grid-cols-5" />
+                  </section>
+                  <Card className="border-brand-blue/10">
+                    <CardContent className="flex flex-col gap-4 p-4 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-brand-blue">Severity Focus</p>
+                        <p className="text-xs text-muted">Click a severity category to focus all Region Alerts visuals on the same risk tier.</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          { label: "High", color: SEVERITY_COLORS.High },
+                          { label: "Medium", color: SEVERITY_COLORS.Medium },
+                          { label: "Low", color: SEVERITY_COLORS.Low },
+                        ].map((item) => (
+                          <button
+                            key={item.label}
+                            type="button"
+                            onClick={() => setRegionChartSelections((prev) => ({ ...prev, severity: prev.severity === item.label ? "" : item.label }))}
+                            className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                              regionChartSelections.severity === item.label
+                                ? "border-transparent text-white shadow-card"
+                                : "border-brand-blue bg-white text-brand-blue hover:bg-brand-blue-tint"
+                            }`}
+                            style={regionChartSelections.severity === item.label ? { backgroundColor: item.color } : undefined}
+                          >
+                            {item.label} Severity
+                          </button>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <CrossFilterSummary
+                    selections={regionChartSelections}
+                    onClear={() => setRegionChartSelections({ timeBucket: "", zone: "", alertType: "", severity: "" })}
+                    onClearOne={(key) => setRegionChartSelections((prev) => ({ ...prev, [key]: "" }))}
+                  />
+                </>
+              ) : slug === "fire-detection" ? (
+                <>
+                  <CrossFilterSummary
+                    selections={{ timeBucket: "", zone: fireChartSelections.zone, alertType: fireChartSelections.alertType, severity: fireChartSelections.severity }}
+                    onClear={() => setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" })}
+                    onClearOne={(key) =>
+                      setFireChartSelections((prev) => ({
+                        ...prev,
+                        [key === "alertType" ? "alertType" : key === "zone" ? "zone" : key === "severity" ? "severity" : key]: "",
+                        ...(key === "alertType" ? { zone: "", cameraId: "" } : {}),
+                        ...(key === "zone" ? { cameraId: "" } : {}),
+                      }))
+                    }
+                  />
+                  {fireChartSelections.cameraId ? (
+                    <Card className="border-brand-red/20 bg-brand-red-tint/20">
+                      <CardContent className="flex items-center justify-between gap-4 p-4">
+                        <div>
+                          <p className="text-sm font-semibold text-brand-blue">Camera drill-down is active</p>
+                          <p className="text-xs text-muted">The table is currently focused on alerts from {fireChartSelections.cameraId}.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setFireChartSelections((prev) => ({ ...prev, cameraId: "" }))}
+                          className="rounded-full border border-brand-blue bg-white px-3 py-1.5 text-xs font-semibold text-brand-blue hover:bg-brand-blue-tint"
+                        >
+                          Clear camera
+                        </button>
+                      </CardContent>
+                    </Card>
+                  ) : null}
+                  <KpiGrid items={kpis} />
+                </>
+              ) : (
+                <KpiGrid items={kpis} />
+              ))}
+              {!showLiveEmptyState ? <section className="grid gap-6 xl:grid-cols-2">{charts}</section> : null}
             </>
           )}
 
+          {!showLiveEmptyState ? (
           <Card>
             <CardHeader>
               <CardTitle>Filtered Records</CardTitle>
@@ -1276,16 +1748,18 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
             </CardHeader>
             <CardContent>
               <DataTable
-                columns={columns}
+                columns={resolvedColumns}
                 rows={sortedRows}
                 sortState={sortState}
                 rowClassName={
                   slug === "region-alerts"
-                    ? (row) => (row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
+                    ? (row) => (row.isLatestDemoIncident ? "bg-brand-red-tint/90" : row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
                     : slug === "fire-detection"
-                      ? (row) => (row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
+                      ? (row) => (row.isLatestDemoAlert ? "bg-brand-red-tint/90" : row.severity === "High" ? "bg-brand-red-tint/60" : "")
                       : slug === "speed-estimation"
                         ? (row) => (row.status === "Violation" ? "bg-brand-red-tint/40" : "")
+                        : slug === "ppe-detection"
+                          ? (row) => (row.complianceStatus === "FAIL" ? "bg-brand-red-tint/35" : "")
                     : undefined
                 }
                 onSort={(key) =>
@@ -1297,6 +1771,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               />
             </CardContent>
           </Card>
+          ) : null}
         </div>
       </main>
     </div>
@@ -1341,86 +1816,118 @@ export function buildDashboardDefinition(slug, rows, info) {
       title: "Warehouse Pedestrian Safety & Intrusion Monitor",
       description: info,
       extraFilterDefs: [
+        { key: "objectType", label: "Object Type" },
         { key: "zoneType", label: "Zone Type" },
         { key: "shift", label: "Shift" },
         { key: "severity", label: "Severity" },
-        { key: "status", label: "Status" },
+        { key: "status", label: "Global Status Filter" },
       ],
       metricDefs: [
         {
-          label: "Total Region Alert Events",
+          label: "Total Restricted-Zone Incidents",
           icon: ShieldAlert,
           compute: (items) => items.filter(isRegionIncident).length,
           format: (value) => value.toLocaleString(),
-          subtext: "True intrusion events, excluding normal frames.",
+          subtext: "All restricted-area and hazardous-zone intrusions in the selected window.",
           valueClassName: () => "text-brand-blue",
+          group: "total",
         },
         {
-          label: "Open Intrusion Incidents",
-          icon: AlertTriangle,
-          compute: (items) => items.filter((item) => isRegionIncident(item) && item.status === "Open").length,
-          format: String,
-          subtext: "Incidents still requiring closure.",
-          valueClassName: (value) => (value > 0 ? "text-brand-red" : "text-brand-blue"),
-        },
-        {
-          label: "Critical Hazard Breaches",
+          label: "Total Critical Hazard Breaches",
           icon: AlertTriangle,
           compute: (items) => items.filter((item) => isRegionIncident(item) && item.severity === "High").length,
           format: String,
-          subtext: "High-risk entries into restricted or hazardous areas.",
+          subtext: "High-risk hazardous-area intrusions that could disrupt safe movement.",
           valueClassName: () => "text-brand-red",
-        },
-        {
-          label: "Average Time Inside Restricted Zone",
-          icon: Activity,
-          compute: (items) => average(items.filter(isRegionIncident).map((item) => item.durationSec)),
-          format: formatDurationLabel,
-          subtext: "Average incident dwell time.",
-          valueClassName: () => "text-brand-blue",
-        },
-        {
-          label: "Longest Open Incident",
-          icon: Activity,
-          compute: (items) => Math.max(0, ...items.filter((item) => isRegionIncident(item) && item.status === "Open").map((item) => item.durationSec)),
-          format: formatDurationLabel,
-          subtext: "Longest unresolved dwell time.",
-          valueClassName: (value) => (value >= 180 ? "text-brand-red" : "text-brand-blue"),
+          group: "total",
         },
         {
           label: "Most Violated Zone",
           icon: ShieldAlert,
           compute: (items) => Object.entries(groupBy(items.filter(isRegionIncident), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No incidents",
           format: String,
-          subtext: "Top recurring intrusion location.",
+          subtext: "Zone risk hotspot demanding the most supervisor attention.",
           valueClassName: () => "text-brand-blue",
+          group: "total",
         },
         {
           label: "Most Triggered Camera",
           icon: ShieldAlert,
           compute: (items) => Object.entries(groupBy(items.filter(isRegionIncident), "cameraId")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No incidents",
           format: String,
-          subtext: "Camera producing the most region alerts.",
+          subtext: "Camera contributing the highest number of breach detections.",
           valueClassName: () => "text-brand-blue",
+          group: "total",
+        },
+        {
+          label: "Average Intrusion Duration",
+          icon: Activity,
+          compute: (items) => average(items.filter(isRegionIncident).map((item) => item.durationSec)),
+          format: formatDurationLabel,
+          subtext: "Average time a tracked worker remains inside a restricted or hazardous area.",
+          valueClassName: () => "text-brand-blue",
+          group: "total",
+        },
+        {
+          label: "Open Intrusion Incidents",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => isRegionIncident(item) && item.status === "Open").length,
+          format: String,
+          subtext: "Incidents still needing attention from safety or security.",
+          valueClassName: (value) => (value > 0 ? "text-brand-red" : "text-brand-blue"),
+          group: "open",
+        },
+        {
+          label: "Open High-Severity Incidents",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => isRegionIncident(item) && item.status === "Open" && item.severity === "High").length,
+          format: String,
+          subtext: "Open incidents in the highest risk category.",
+          valueClassName: (value) => (value > 0 ? "text-brand-red" : "text-brand-blue"),
+          group: "open",
+        },
+        {
+          label: "Longest Open Incident",
+          icon: Activity,
+          compute: (items) => Math.max(0, ...items.filter((item) => isRegionIncident(item) && item.status === "Open").map((item) => item.durationSec)),
+          format: formatDurationLabel,
+          subtext: "Longest ongoing dwell time inside a restricted area.",
+          valueClassName: (value) => (value >= 180 ? "text-brand-red" : "text-brand-blue"),
+          group: "open",
+        },
+        {
+          label: "Open Incidents in Hazardous Zones",
+          icon: ShieldAlert,
+          compute: (items) => items.filter((item) => isRegionIncident(item) && item.status === "Open" && item.zoneType === "Hazardous").length,
+          format: String,
+          subtext: "Open breaches still active inside the most dangerous zones.",
+          valueClassName: (value) => (value > 0 ? "text-brand-red" : "text-brand-blue"),
+          group: "open",
+        },
+        {
+          label: "Latest Triggered Zone",
+          icon: ShieldAlert,
+          compute: (items) => byTimestamp(items.filter(isRegionIncident)).at(-1)?.zone ?? "No incidents",
+          format: String,
+          subtext: "Most recent zone that generated a breach or intrusion.",
+          valueClassName: () => "text-brand-blue",
+          group: "open",
         },
       ],
       columns: [
         { key: "id", label: "Incident ID", sortable: true },
         { key: "cameraId", label: "Camera ID", sortable: true },
-        { key: "location", label: "Location", sortable: true },
         { key: "zone", label: "Zone", sortable: true },
         { key: "zoneType", label: "Zone Type", sortable: true },
         { key: "shift", label: "Shift", sortable: true },
+        { key: "objectType", label: "Object Type", sortable: true },
         { key: "entryTime", label: "Entry Time", sortable: true, render: formatDateTime },
-        { key: "exitTime", label: "Exit Time", sortable: true, render: (value) => (value ? formatDateTime(value) : "Open") },
+        { key: "exitTime", label: "Exit Time", sortable: true, render: (value) => (value ? formatDateTime(value) : "Still Open") },
         { key: "durationSec", label: "Duration (sec)", sortable: true },
         { key: "alertType", label: "Alert Type", sortable: true },
         { key: "severity", label: "Severity", sortable: true, render: badgeRender },
         { key: "status", label: "Status", sortable: true, render: badgeRender },
         { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
-        { key: "assignedTo", label: "Assigned To", sortable: true },
-        { key: "escalationNeeded", label: "Escalation Needed", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Needed" : "Normal") },
-        { key: "snapshotUrl", label: "Snapshot / Output", sortable: false, render: (value) => (value ? <span className="font-semibold text-brand-blue">View output</span> : "N/A") },
       ],
     },
     "queue-management": {
@@ -1488,50 +1995,74 @@ export function buildDashboardDefinition(slug, rows, info) {
       title: "Warehouse Fire & Smoke Safety Center",
       description: info,
       extraFilterDefs: [
-        { key: "status", label: "Status" },
+        { key: "facility", label: "Facility" },
+        { key: "shift", label: "Shift" },
+        { key: "alertType", label: "Alert Type" },
+        { key: "severity", label: "Severity" },
       ],
       metricDefs: [
         {
-          label: "Total Camera Feeds Analyzed",
-          icon: Flame,
-          compute: (items) => items.length,
-          format: (value) => value.toLocaleString(),
-          subtext: "Total camera feeds analyzed during this period.",
-          valueClassName: () => "text-brand-blue",
-        },
-        {
-          label: "Total Fire/Smoke Alert Videos",
+          label: "Total Fire/Smoke Alerts",
           icon: Flame,
           compute: (items) => items.filter((item) => item.alertType !== "Clear / No Alert").length,
           format: String,
-          subtext: "Videos containing confirmed fire or smoke.",
+          subtext: "All video summaries with confirmed fire or smoke activity.",
           valueClassName: () => "text-brand-red",
         },
         {
-          label: "Critical Fire/Smoke Events",
+          label: "Critical Alerts",
           icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.severity === "High" || item.alertType === "Fire + Smoke").length,
+          compute: (items) => items.filter((item) => item.severity === "High").length,
           format: String,
-          subtext: "High severity incidents requiring immediate review.",
+          subtext: "Confirmed high-severity alerts that safety teams should review first.",
           valueClassName: () => "text-brand-red",
         },
         {
-          label: "Average Time to First Detection",
-          icon: Activity,
-          compute: (items) => average(items.filter((item) => item.firstDetectionSec > 0).map((item) => item.firstDetectionSec)),
-          format: (value) => `${Math.round(Number(value) || 0)} sec`,
-          subtext: "Average seconds until the first hazard is detected.",
+          label: "Fire + Smoke Confirmed Alerts",
+          icon: Flame,
+          compute: (items) => items.filter((item) => item.alertType === "Fire + Smoke").length,
+          format: String,
+          subtext: "Alerts showing both smoke and direct fire signal in the same clip.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Smoke-Only Warnings",
+          icon: Flame,
+          compute: (items) => items.filter((item) => item.alertType === "Smoke Only").length,
+          format: String,
+          subtext: "Warnings that may indicate early smoke or exhaust-like activity needing verification.",
+          valueClassName: () => "text-brand-blue",
+        },
+        {
+          label: "Most Affected Zone",
+          icon: Flame,
+          compute: (items) => Object.entries(groupBy(items.filter((item) => item.alertType !== "Clear / No Alert"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
+          format: String,
+          subtext: "Zone accumulating the highest number of fire or smoke alerts.",
+          valueClassName: () => "text-brand-blue",
+        },
+        {
+          label: "Most Triggered Camera",
+          icon: Flame,
+          compute: (items) => Object.entries(groupBy(items.filter((item) => item.alertType !== "Clear / No Alert"), "cameraId")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
+          format: String,
+          subtext: "Camera that most often captures potential fire or smoke events.",
           valueClassName: () => "text-brand-blue",
         },
       ],
       columns: [
-        { key: "timestamp", label: "Date/Time", sortable: true, render: formatDateTime },
         { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "location", label: "Location", sortable: true },
         { key: "zone", label: "Zone", sortable: true },
+        { key: "facility", label: "Facility", sortable: true },
+        { key: "shift", label: "Shift", sortable: true },
         { key: "alertType", label: "Alert Type", sortable: true },
         { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "medium" : "normal"}>{value}</Badge> },
-        { key: "firstDetectionSec", label: "First Detection Time (sec)", sortable: true },
-        { key: "status", label: "Status", sortable: true, render: (value) => <Badge tone={value === "Alert" ? "alert" : "normal"}>{value}</Badge> },
+        { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "fireDetected", label: "Fire Detected", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Yes" : "No") },
+        { key: "smokeDetected", label: "Smoke Detected", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Yes" : "No") },
+        { key: "outputVideo", label: "Output Video", sortable: false, render: (value) => (value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">Open output</a> : "N/A") },
+        { key: "timestamp", label: "Timestamp", sortable: true, render: formatDateTime },
       ],
     },
     "class-wise-counting": {
@@ -1593,32 +2124,29 @@ export function buildDashboardDefinition(slug, rows, info) {
       description: info,
       extraFilterDefs: [
         { key: "shift", label: "Shift" },
-        { key: "status", label: "Status" },
+        { key: "complianceStatus", label: "Compliance Status" },
       ],
       metricDefs: [
-        { label: "Total Workers Tracked", icon: LayoutDashboard, compute: (items) => new Set(items.map((item) => item.personId)).size, format: String },
-        { label: "Active PPE Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.status === "Active" && item.violationType !== "Compliant").length, format: String, valueClassName: () => "text-brand-red" },
-        {
-          label: "Most Missing Item",
-          icon: HardHat,
-          compute: (items) => {
-            const helmetMissing = items.filter((item) => item.violationType === "Missing Helmet" || item.violationType === "Missing Both").length;
-            const vestMissing = items.filter((item) => item.violationType === "Missing Vest" || item.violationType === "Missing Both").length;
-            if (helmetMissing === 0 && vestMissing === 0) return "No active misses";
-            if (helmetMissing === vestMissing) return "Helmet / Vest tied";
-            return helmetMissing > vestMissing ? "Helmet" : "Vest";
-          },
-          format: String,
-        },
-        { label: "Avg Exposure Duration", icon: Activity, compute: (items) => average(items.filter((item) => item.violationType !== "Compliant").map((item) => item.durationSec)), format: formatDurationLabel },
+        { label: "Total Workers Checked", icon: LayoutDashboard, compute: (items) => new Set(items.map((item) => `${item.inputId}:${item.trackedWorkerId}`)).size, format: String },
+        { label: "Workers with PPE Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.complianceStatus === "FAIL").length, format: String, valueClassName: () => "text-brand-red" },
+        { label: "PPE Compliance Rate (%)", icon: Activity, compute: (items) => (items.length ? (items.filter((item) => item.complianceStatus === "PASS").length / items.length) * 100 : 0), format: (value) => `${Number(value || 0).toFixed(1)}%` },
+        { label: "Missing Helmet Cases", icon: HardHat, compute: (items) => items.filter((item) => item.helmet === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
+        { label: "Missing Vest Cases", icon: HardHat, compute: (items) => items.filter((item) => item.vest === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
+        { label: "Missing Shoe Cases", icon: HardHat, compute: (items) => items.filter((item) => item.shoes === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
+        { label: "Most Affected Zone", icon: AlertTriangle, compute: (items) => Object.entries(groupBy(items.filter((item) => item.complianceStatus === "FAIL"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String },
       ],
       columns: [
-        { key: "personId", label: "Person ID", sortable: true },
-        { key: "violationType", label: "Violation Type", sortable: true },
-        { key: "entryTime", label: "Entry Time", sortable: true, render: formatDateTime },
-        { key: "durationSec", label: "Duration", sortable: true, render: formatDurationLabel },
-        { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
-        { key: "status", label: "Status", sortable: true, render: badgeRender },
+        { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "zone", label: "Zone", sortable: true },
+        { key: "shift", label: "Shift", sortable: true },
+        { key: "trackedWorkerId", label: "Worker ID", sortable: true },
+        { key: "helmet", label: "Helmet", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
+        { key: "vest", label: "Vest", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
+        { key: "shoes", label: "Shoes", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
+        { key: "missingItems", label: "Missing Items", sortable: true, render: (value) => Array.isArray(value) && value.length ? value.join(", ") : "None" },
+        { key: "complianceStatus", label: "Compliance Status", sortable: true, render: (value) => <Badge tone={value === "FAIL" ? "alert" : "normal"}>{value}</Badge> },
+        { key: "durationSec", label: "Duration (sec)", sortable: true },
+        { key: "outputVideoUrl", label: "Output Video", sortable: false, render: (value) => (value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">Open video</a> : "N/A") },
       ],
     },
   };

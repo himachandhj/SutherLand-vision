@@ -1,11 +1,15 @@
 import asyncio
 import base64
+import math
 import hashlib
 import io
+import json
+import random
 import tempfile
 import shutil
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -13,7 +17,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +27,7 @@ from ultralytics import YOLO
 from app.core.config import settings
 from app.core.database import (
     create_job,
+    get_connection,
     get_integration_run,
     get_job,
     init_db,
@@ -118,6 +123,9 @@ INTEGRATION_OVERVIEW_LIMIT = 5
 INTEGRATION_STATE_LOCK = threading.Lock()
 INTEGRATION_THREADS: dict[str, threading.Thread | None] = {}
 INTEGRATION_STATES: dict[str, dict[str, Any]] = {}
+REGION_SYNTHETIC_SOURCE_PREFIX = "synthetic-region-demo"
+REGION_SYNTHETIC_METADATA_KEY = "synthetic_demo"
+REGION_SYNTHETIC_MIN_OUTPUTS = 180
 
 
 app = FastAPI(
@@ -1382,6 +1390,45 @@ def run_region_alerts_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[
     return annotated, detections
 
 
+def run_region_alerts_video_preview(video_path: Path, source_name: str | None = None) -> dict[str, Any]:
+    processor = get_processor("region-alerts")
+    if processor is None:
+        raise HTTPException(status_code=500, detail="Region Alerts processor is not available.")
+
+    source_stem = Path(source_name or video_path.name).stem or f"region_preview_{uuid4().hex[:8]}"
+    safe_stem = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in source_stem).strip("_") or "region_preview"
+    output_path = PROCESSED_DIR / f"{safe_stem}_region_alerts_preview.mp4"
+
+    result = processor(
+        input_path=str(video_path),
+        output_path=str(output_path),
+        model_path=resolve_default_model_path(),
+        device=auto_device(),
+        show=False,
+    )
+    actual_output = _resolve_completed_output_path(output_path, result)
+    preview_frame = extract_preview_frame(actual_output)
+
+    analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
+    intrusion_summaries = analytics.get("intrusion_summaries", []) if isinstance(analytics.get("intrusion_summaries"), list) else []
+    detections = [
+        {
+            "class": str(event.get("alert_type", "zone_intrusion")).replace("_", " "),
+            "confidence": round(float(event.get("confidence_score") or 0), 4),
+            "severity": str(event.get("severity", "low")),
+            "zone_status": "inside",
+            "tracked_object_id": str((event.get("metadata") or {}).get("tracked_object_id", "")),
+        }
+        for event in intrusion_summaries
+    ]
+
+    return {
+        "preview_image_base64": image_to_base64(preview_frame),
+        "detections": detections,
+        "output_video_url": f"/static/processed/{actual_output.name}",
+    }
+
+
 def run_fire_detection_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     annotated = frame.copy()
     fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
@@ -1530,6 +1577,8 @@ def build_playground_preview_response(
     file_kind: str,
     frame: np.ndarray,
     temp_path: Path | None = None,
+    cleanup_temp_path: bool = True,
+    source_name: str | None = None,
 ) -> dict[str, object]:
     try:
         if use_case_id == "ppe-detection":
@@ -1542,8 +1591,15 @@ def build_playground_preview_response(
             annotated_image, detections = run_classwise_counting_preview(frame)
             model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "region-alerts":
-            annotated_image, detections = run_region_alerts_preview(frame)
-            model_source = YOLO_MODEL_SOURCE
+            if file_kind == "video" and temp_path is not None:
+                region_video_preview = run_region_alerts_video_preview(temp_path, source_name=source_name)
+                annotated_image = None
+                detections = region_video_preview["detections"]
+                model_source = "use_cases.zone_intrusion"
+            else:
+                annotated_image, detections = run_region_alerts_preview(frame)
+                region_video_preview = None
+                model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "fire-detection":
             annotated_image, detections = run_fire_detection_preview(frame)
             model_source = "fire-smoke-hsv-preview"
@@ -1559,17 +1615,816 @@ def build_playground_preview_response(
             annotated_image, detections = run_yolo_inference(frame)
             model_source = YOLO_MODEL_SOURCE
     finally:
-        if temp_path is not None:
+        if cleanup_temp_path and temp_path is not None:
             temp_path.unlink(missing_ok=True)
 
-    return {
+    response = {
         "status": "success",
         "use_case_id": use_case_id,
         "use_case_title": meta["title"],
         "file_kind": file_kind,
         "detections": detections,
-        "image_base64": image_to_base64(annotated_image),
         "model_source": model_source,
+    }
+    if use_case_id == "region-alerts" and file_kind == "video" and temp_path is not None and region_video_preview is not None:
+        response["image_base64"] = region_video_preview["preview_image_base64"]
+        response["output_video_url"] = region_video_preview["output_video_url"]
+    else:
+        response["image_base64"] = image_to_base64(annotated_image)
+    return response
+
+
+def _parse_json_blob(raw_value: Any) -> dict[str, Any]:
+    if not raw_value:
+        return {}
+    if isinstance(raw_value, dict):
+        return raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _serialize_region_demo_timestamp(day_offset: int, hour: int, minute: int, second: int = 0) -> str:
+    base = datetime.now(timezone.utc) - timedelta(days=day_offset)
+    stamped = base.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    return stamped.isoformat()
+
+
+def _count_region_records_by_origin() -> tuple[int, int]:
+    query = """
+        SELECT
+            SUM(
+                CASE
+                    WHEN i.source_ref LIKE ? OR json_extract(i.metadata_json, '$.synthetic_demo') = 1 THEN 1
+                    ELSE 0
+                END
+            ) AS synthetic_count,
+            SUM(
+                CASE
+                    WHEN i.source_ref LIKE ? OR json_extract(i.metadata_json, '$.synthetic_demo') = 1 THEN 0
+                    ELSE 1
+                END
+            ) AS real_count
+        FROM region_alert_outputs o
+        JOIN region_alert_inputs i ON i.input_id = o.input_id
+    """
+    with get_connection() as connection:
+        row = connection.execute(
+            query,
+            (f"{REGION_SYNTHETIC_SOURCE_PREFIX}:%", f"{REGION_SYNTHETIC_SOURCE_PREFIX}:%"),
+        ).fetchone()
+
+    synthetic_count = int(row["synthetic_count"] or 0) if row else 0
+    real_count = int(row["real_count"] or 0) if row else 0
+    return synthetic_count, real_count
+
+
+def _next_region_synthetic_seed_index() -> int:
+    query = """
+        SELECT COUNT(*) AS total
+        FROM region_alert_inputs
+        WHERE source_ref LIKE ?
+    """
+    with get_connection() as connection:
+        row = connection.execute(query, (f"{REGION_SYNTHETIC_SOURCE_PREFIX}:%",)).fetchone()
+    return int(row["total"] or 0) if row else 0
+
+
+def _build_region_synthetic_input(seed_index: int) -> dict[str, Any]:
+    rng = random.Random(20260417 + seed_index)
+    scenario_catalog = [
+        {
+            "location": "Warehouse A",
+            "zone": "Forklift Bay",
+            "zone_type": "hazardous",
+            "cameras": ["CAM-03", "CAM-04"],
+            "shift_weights": [("Swing Shift", 0.45), ("Night Shift", 0.35), ("Morning Shift", 0.20)],
+            "alerts": [
+                ("hazardous_area_intrusion", 0.34),
+                ("prolonged_presence", 0.28),
+                ("unauthorized_entry", 0.18),
+                ("repeated_intrusion", 0.12),
+                ("zone_intrusion", 0.08),
+            ],
+        },
+        {
+            "location": "Warehouse A",
+            "zone": "Loading Dock",
+            "zone_type": "restricted",
+            "cameras": ["CAM-05", "CAM-06"],
+            "shift_weights": [("Morning Shift", 0.40), ("Swing Shift", 0.35), ("Night Shift", 0.25)],
+            "alerts": [
+                ("unauthorized_entry", 0.36),
+                ("repeated_intrusion", 0.22),
+                ("zone_intrusion", 0.18),
+                ("after_hours_entry", 0.14),
+                ("prolonged_presence", 0.10),
+            ],
+        },
+        {
+            "location": "Warehouse B",
+            "zone": "Dispatch Corridor",
+            "zone_type": "restricted",
+            "cameras": ["CAM-07", "CAM-08"],
+            "shift_weights": [("Night Shift", 0.46), ("Swing Shift", 0.34), ("Morning Shift", 0.20)],
+            "alerts": [
+                ("after_hours_entry", 0.34),
+                ("unauthorized_entry", 0.26),
+                ("repeated_intrusion", 0.18),
+                ("zone_intrusion", 0.12),
+                ("prolonged_presence", 0.10),
+            ],
+        },
+        {
+            "location": "Warehouse C",
+            "zone": "Storage Bay",
+            "zone_type": "restricted",
+            "cameras": ["CAM-01", "CAM-02"],
+            "shift_weights": [("Morning Shift", 0.44), ("Swing Shift", 0.33), ("Night Shift", 0.23)],
+            "alerts": [
+                ("unauthorized_entry", 0.30),
+                ("zone_intrusion", 0.28),
+                ("repeated_intrusion", 0.16),
+                ("after_hours_entry", 0.14),
+                ("prolonged_presence", 0.12),
+            ],
+        },
+        {
+            "location": "Warehouse B",
+            "zone": "Chemical Room Access",
+            "zone_type": "hazardous",
+            "cameras": ["CAM-09", "CAM-10"],
+            "shift_weights": [("Morning Shift", 0.18), ("Swing Shift", 0.37), ("Night Shift", 0.45)],
+            "alerts": [
+                ("hazardous_area_intrusion", 0.42),
+                ("after_hours_entry", 0.20),
+                ("prolonged_presence", 0.18),
+                ("unauthorized_entry", 0.12),
+                ("repeated_intrusion", 0.08),
+            ],
+        },
+    ]
+    scenario = scenario_catalog[seed_index % len(scenario_catalog)]
+
+    shift = rng.choices(
+        [label for label, _ in scenario["shift_weights"]],
+        weights=[weight for _, weight in scenario["shift_weights"]],
+        k=1,
+    )[0]
+    if shift == "Morning Shift":
+        hour = rng.randint(6, 13)
+    elif shift == "Swing Shift":
+        hour = rng.randint(14, 21)
+    else:
+        hour = rng.choice([22, 23, 0, 1, 2, 3, 4, 5])
+
+    minute = rng.randint(0, 59)
+    timestamp = _serialize_region_demo_timestamp(day_offset=6 - (seed_index % 6), hour=hour, minute=minute)
+    duration_bases = {
+        "hazardous_area_intrusion": (120, 260),
+        "prolonged_presence": (150, 320),
+        "unauthorized_entry": (18, 85),
+        "repeated_intrusion": (25, 90),
+        "after_hours_entry": (40, 120),
+        "zone_intrusion": (10, 55),
+    }
+
+    incident_count = rng.randint(3, 6)
+    outputs: list[dict[str, Any]] = []
+    for incident_index in range(incident_count):
+        alert_type = rng.choices(
+            [label for label, _ in scenario["alerts"]],
+            weights=[weight for _, weight in scenario["alerts"]],
+            k=1,
+        )[0]
+        low_duration, high_duration = duration_bases[alert_type]
+        duration_sec = round(rng.uniform(low_duration, high_duration), 2)
+        entry_time = round(rng.uniform(4, 220), 2)
+        open_incident = rng.random() < 0.16
+        exit_time = None if open_incident else round(entry_time + duration_sec, 2)
+
+        if alert_type == "hazardous_area_intrusion":
+            severity = "high" if duration_sec >= 150 or rng.random() < 0.7 else "medium"
+        elif alert_type == "prolonged_presence":
+            severity = "high" if duration_sec >= 220 else "medium"
+        elif alert_type in {"after_hours_entry", "repeated_intrusion"}:
+            severity = "medium" if duration_sec >= 45 else "low"
+        elif alert_type == "unauthorized_entry":
+            severity = "medium" if duration_sec >= 55 else "low"
+        else:
+            severity = "low"
+
+        outputs.append(
+            {
+                "object_type": "person",
+                "authorized": 0,
+                "entry_time": entry_time,
+                "exit_time": exit_time,
+                "duration_sec": duration_sec,
+                "alert_type": alert_type,
+                "severity": severity,
+                "confidence_score": round(rng.uniform(0.74, 0.97), 3),
+                "status": "open" if open_incident else "past",
+                "notes": "Synthetic warehouse safety history for Region Alerts dashboard demo.",
+                "metadata_json": {
+                    "tracked_object_id": f"SYN-TRK-{seed_index:03d}-{incident_index + 1:02d}",
+                    REGION_SYNTHETIC_METADATA_KEY: True,
+                    "shift": shift,
+                },
+            }
+        )
+
+    video_duration = max((output["entry_time"] + max(output["duration_sec"], 15) for output in outputs), default=300) + rng.uniform(30, 120)
+    return {
+        "source_ref": f"{REGION_SYNTHETIC_SOURCE_PREFIX}:{seed_index:04d}",
+        "camera_id": rng.choice(scenario["cameras"]),
+        "location": scenario["location"],
+        "zone": scenario["zone"],
+        "zone_type": scenario["zone_type"],
+        "filename": f"region_demo_{seed_index:04d}.mp4",
+        "simulated_timestamp": timestamp,
+        "load_time_sec": round(video_duration, 2),
+        "processing_time_sec": round(rng.uniform(6.5, 18.0), 2),
+        "metadata_json": {
+            REGION_SYNTHETIC_METADATA_KEY: True,
+            "shift": shift,
+            "video_duration_sec": round(video_duration, 2),
+            "demo_story": scenario["zone"],
+        },
+        "outputs": outputs,
+    }
+
+
+def _seed_region_synthetic_records(required_outputs: int) -> None:
+    seed_index = _next_region_synthetic_seed_index()
+    seeded_outputs = 0
+
+    while seeded_outputs < required_outputs:
+        synthetic_input = _build_region_synthetic_input(seed_index)
+        input_row = upsert_region_alert_input(
+            source_ref=synthetic_input["source_ref"],
+            integration_run_id=None,
+            job_id=None,
+            camera_id=synthetic_input["camera_id"],
+            location=synthetic_input["location"],
+            zone=synthetic_input["zone"],
+            zone_type=synthetic_input["zone_type"],
+            filename=synthetic_input["filename"],
+            minio_video_link="",
+            output_video_link="",
+            input_bucket=None,
+            input_object_key=None,
+            output_object_key=None,
+            load_time_sec=synthetic_input["load_time_sec"],
+            processing_time_sec=synthetic_input["processing_time_sec"],
+            simulated_timestamp=synthetic_input["simulated_timestamp"],
+            run_status="processed",
+            metadata_json=synthetic_input["metadata_json"],
+        )
+        output_rows = replace_region_alert_outputs(
+            input_id=int(input_row["input_id"]),
+            outputs=synthetic_input["outputs"],
+        )
+        seeded_outputs += len(output_rows)
+        seed_index += 1
+
+
+def _ensure_region_demo_dataset() -> None:
+    synthetic_count, _real_count = _count_region_records_by_origin()
+    if synthetic_count >= REGION_SYNTHETIC_MIN_OUTPUTS:
+        return
+    _seed_region_synthetic_records(REGION_SYNTHETIC_MIN_OUTPUTS - synthetic_count)
+    if isinstance(raw_value, dict):
+        return raw_value
+    try:
+        parsed = json.loads(raw_value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _matches_filter(value: Any, selected: list[str] | None) -> bool:
+    if not selected:
+        return True
+    return str(value or "") in {str(item) for item in selected if item not in {"", "All"}}
+
+
+def _group_records(records: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        group_value = str(record.get(key) or "")
+        grouped.setdefault(group_value, []).append(record)
+    return grouped
+
+
+def _within_date_range(timestamp: str | None, date_from: str | None, date_to: str | None) -> bool:
+    if not timestamp:
+        return False
+    dt = np.datetime64(timestamp)
+    if date_from:
+        if dt < np.datetime64(f"{date_from}T00:00:00"):
+            return False
+    if date_to:
+        if dt > np.datetime64(f"{date_to}T23:59:59"):
+            return False
+    return True
+
+
+def _safe_zone_facility(location: str, zone: str) -> str:
+    if "Warehouse B" in location or zone in {"Forklift Bay", "Storage Bay"}:
+        return "Plant 2"
+    if "Warehouse C" in location or zone in {"Dispatch Area", "Packaging Zone"}:
+        return "Warehouse Annex"
+    return "Plant 1"
+
+
+def _shift_from_timestamp(timestamp: str) -> str:
+    try:
+        hour = int(str(timestamp)[11:13])
+    except Exception:
+        hour = 0
+    if 6 <= hour < 14:
+        return "Morning Shift"
+    if 14 <= hour < 22:
+        return "Swing Shift"
+    return "Night Shift"
+
+
+def _offset_iso_timestamp(base_timestamp: str, seconds_offset: float | None) -> str:
+    if not base_timestamp:
+        return _utc_now_iso()
+    if not seconds_offset or seconds_offset <= 0:
+        return base_timestamp
+    return (
+        np.datetime64(base_timestamp) + np.timedelta64(int(float(seconds_offset) * 1000), "ms")
+    ).astype("datetime64[ms]").astype(str)
+
+
+def _helmet_vest_shoes_state(value: Any) -> str:
+    if value is True or value == 1:
+        return "OK"
+    if value is False or value == 0:
+        return "MISSING"
+    return "UNKNOWN"
+
+
+def _build_ppe_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.source_ref,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.shift,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            i.metadata_json AS input_metadata_json,
+            o.output_id,
+            o.person_id,
+            o.helmet_worn,
+            o.vest_worn,
+            o.shoes_worn,
+            o.violation_type,
+            o.confidence_score,
+            o.status,
+            o.first_seen_frame,
+            o.last_seen_frame,
+            o.first_seen_sec,
+            o.last_seen_sec,
+            o.processed_at,
+            o.notes,
+            o.metadata_json AS output_metadata_json
+        FROM ppe_detection_outputs o
+        JOIN ppe_detection_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        helmet = _helmet_vest_shoes_state(row["helmet_worn"])
+        vest = _helmet_vest_shoes_state(row["vest_worn"])
+        shoes = _helmet_vest_shoes_state(row["shoes_worn"])
+        missing_items = [
+            item
+            for item, state in [("Helmet", helmet), ("Vest", vest), ("Shoes", shoes)]
+            if state == "MISSING"
+        ]
+        compliance_status = "FAIL" if missing_items else "PASS"
+        first_seen_sec = float(row["first_seen_sec"] or 0)
+        last_seen_sec = float(row["last_seen_sec"] or first_seen_sec)
+        duration_sec = max(0.0, last_seen_sec - first_seen_sec)
+
+        output_video = _build_integration_proxy_url("ppe-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
+
+        records.append(
+            {
+                "output_id": int(row["output_id"]),
+                "input_id": int(row["input_id"]),
+                "camera_id": str(row["camera_id"]),
+                "location": str(row["location"]),
+                "zone": str(row["zone"]),
+                "shift": str(row["shift"]),
+                "tracked_worker_id": str(row["person_id"]),
+                "helmet": helmet,
+                "vest": vest,
+                "shoes": shoes,
+                "compliance_status": compliance_status,
+                "missing_items": missing_items,
+                "frames_observed": int(output_meta.get("observations") or 0),
+                "first_seen_sec": first_seen_sec,
+                "last_seen_sec": last_seen_sec,
+                "duration_sec": round(duration_sec, 2),
+                "confidence_score": float(row["confidence_score"] or 0),
+                "processed_at": str(row["processed_at"]),
+                "timestamp": str(row["simulated_timestamp"]),
+                "output_video_url": output_video,
+                "violation_type": str(row["violation_type"] or ""),
+                "notes": str(row["notes"] or ""),
+            }
+        )
+    return records
+
+
+def _build_fire_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.source_ref,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            i.metadata_json AS input_metadata_json,
+            o.output_id,
+            o.fire_detected,
+            o.smoke_detected,
+            o.severity,
+            o.alert_type,
+            o.confidence_score,
+            o.response_time_sec,
+            o.status,
+            o.notes,
+            o.metadata_json AS output_metadata_json
+        FROM fire_detection_outputs o
+        JOIN fire_detection_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        input_meta = _parse_json_blob(row["input_metadata_json"])
+        simulated_timestamp = str(row["simulated_timestamp"])
+        location = str(row["location"])
+        zone = str(row["zone"])
+
+        output_video_url = _build_integration_proxy_url("fire-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
+        records.append(
+            {
+                "output_id": int(row["output_id"]),
+                "input_id": int(row["input_id"]),
+                "camera_id": str(row["camera_id"]),
+                "location": location,
+                "facility": str(input_meta.get("facility") or _safe_zone_facility(location, zone)),
+                "zone": zone,
+                "shift": str(input_meta.get("shift") or _shift_from_timestamp(simulated_timestamp)),
+                "alert_type": str(row["alert_type"] or "no_alert"),
+                "severity": str(row["severity"] or "none"),
+                "confidence_score": float(row["confidence_score"] or 0),
+                "fire_detected": "Yes" if int(row["fire_detected"] or 0) else "No",
+                "smoke_detected": "Yes" if int(row["smoke_detected"] or 0) else "No",
+                "total_fire_events": int(output_meta.get("total_fire_events") or 0),
+                "total_smoke_events": int(output_meta.get("total_smoke_events") or 0),
+                "output_video_url": output_video_url,
+                "simulated_timestamp": simulated_timestamp,
+                "is_latest_demo_alert": False,
+                "status": str(row["status"] or "alert"),
+            }
+        )
+    return records
+
+
+def _filter_ppe_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    shift: list[str] | None,
+    compliance_status: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(compliance_status or "").strip().upper()
+    return [
+        record
+        for record in records
+        if _within_date_range(record["timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["shift"], shift)
+        and (not normalized_status or normalized_status == "ALL" or record["compliance_status"] == normalized_status)
+    ]
+
+
+def _filter_fire_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    facility: str | None,
+    shift: list[str] | None,
+    alert_type: list[str] | None,
+    severity: list[str] | None,
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if _within_date_range(record["simulated_timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and (not facility or facility == "All" or record["facility"] == facility)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["shift"], shift)
+        and _matches_filter(record["alert_type"], alert_type)
+        and _matches_filter(record["severity"], severity)
+    ]
+
+
+def _build_region_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.source_ref,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.zone_type,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            i.processed_at,
+            i.load_time_sec,
+            i.metadata_json AS input_metadata_json,
+            o.output_id,
+            o.object_type,
+            o.entry_time,
+            o.exit_time,
+            o.duration_sec,
+            o.alert_type,
+            o.severity,
+            o.confidence_score,
+            o.status,
+            o.notes,
+            o.metadata_json AS output_metadata_json
+        FROM region_alert_outputs o
+        JOIN region_alert_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    latest_non_synthetic_input_id = None
+    latest_any_input_id = rows[0]["input_id"] if rows else None
+    records: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        input_meta = _parse_json_blob(row["input_metadata_json"])
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        is_synthetic_demo = bool(
+            str(row["source_ref"] or "").startswith(f"{REGION_SYNTHETIC_SOURCE_PREFIX}:")
+            or input_meta.get(REGION_SYNTHETIC_METADATA_KEY)
+        )
+        if latest_non_synthetic_input_id is None and not is_synthetic_demo:
+            latest_non_synthetic_input_id = row["input_id"]
+        timestamp = str(row["simulated_timestamp"] or row["processed_at"] or _utc_now_iso())
+        duration_sec = float(row["duration_sec"] or 0)
+        entry_time = float(row["entry_time"] or 0)
+        exit_time = row["exit_time"]
+        video_duration_sec = float(row["load_time_sec"] or input_meta.get("video_duration_sec") or 0)
+        explicit_status = str(row["status"] or "").strip().lower()
+
+        if explicit_status in {"open", "active"}:
+            status = "Open"
+        elif explicit_status in {"past", "resolved", "closed"}:
+            status = "Past"
+        elif exit_time is None:
+            status = "Open"
+        elif video_duration_sec and float(exit_time) >= max(video_duration_sec - 1.5, 0):
+            status = "Open"
+        else:
+            status = "Past"
+
+        output_video_url = _build_integration_proxy_url("region-alerts", row["output_object_key"]) or str(row["output_video_link"] or "")
+        records.append(
+            {
+                "incident_id": int(row["output_id"]),
+                "input_id": int(row["input_id"]),
+                "timestamp": timestamp,
+                "camera_id": str(row["camera_id"]),
+                "location": str(row["location"]),
+                "zone": str(row["zone"]),
+                "zone_type": str(row["zone_type"] or input_meta.get("zone_type") or "Restricted"),
+                "shift": _shift_from_timestamp(timestamp),
+                "object_type": str(row["object_type"] or "person").title(),
+                "entry_time": _offset_iso_timestamp(timestamp, entry_time),
+                "exit_time": (
+                    ""
+                    if exit_time is None
+                    else _offset_iso_timestamp(timestamp, float(exit_time))
+                ),
+                "duration_sec": round(duration_sec, 2),
+                "alert_type": str(row["alert_type"] or "zone_intrusion").replace("_", " ").title(),
+                "severity": str(row["severity"] or "low").title(),
+                "status": status,
+                "confidence_score": float(row["confidence_score"] or 0),
+                "tracked_object_id": str(output_meta.get("tracked_object_id") or f"TRK-{index + 1:04d}"),
+                "input_reference": f"region_alert_inputs:{int(row['input_id'])}",
+                "output_reference": output_video_url,
+                "notes": str(row["notes"] or ""),
+                "is_latest_demo_incident": (
+                    (latest_non_synthetic_input_id or latest_any_input_id) is not None
+                    and int(row["input_id"]) == int(latest_non_synthetic_input_id or latest_any_input_id)
+                ),
+                "is_synthetic_demo": is_synthetic_demo,
+            }
+        )
+
+    return records
+
+
+def _filter_region_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    zone_type: list[str] | None,
+    object_type: list[str] | None,
+    shift: list[str] | None,
+    severity: list[str] | None,
+    status: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(status or "").strip().lower()
+    return [
+        record
+        for record in records
+        if _within_date_range(record["entry_time"] or record["timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["zone_type"], zone_type)
+        and _matches_filter(record["object_type"], object_type)
+        and _matches_filter(record["shift"], shift)
+        and _matches_filter(record["severity"], severity)
+        and (not normalized_status or normalized_status == "all" or record["status"].lower() == normalized_status)
+    ]
+
+
+@app.get("/api/region-alerts/metrics", tags=["Dashboard"])
+def get_region_alert_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    zone_type: list[str] | None = Query(default=None),
+    object_type: list[str] | None = Query(default=None),
+    shift: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+    status: str | None = None,
+) -> dict[str, Any]:
+    _ensure_region_demo_dataset()
+    records = _filter_region_dashboard_records(
+        _build_region_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        zone_type=zone_type,
+        object_type=object_type,
+        shift=shift,
+        severity=severity,
+        status=status,
+    )
+
+    incident_records = [record for record in records if record["alert_type"]]
+    summary = {
+        "total_incidents": len(incident_records),
+        "open_incidents": sum(1 for record in incident_records if record["status"] == "Open"),
+        "critical_incidents": sum(1 for record in incident_records if record["severity"] == "High"),
+        "most_violated_zone": max(_group_records(incident_records, "zone").items(), key=lambda item: len(item[1]))[0] if incident_records else "No incidents",
+        "most_triggered_camera": max(_group_records(incident_records, "camera_id").items(), key=lambda item: len(item[1]))[0] if incident_records else "No incidents",
+    }
+
+    return {
+        "summary": summary,
+        "records": records,
+    }
+
+
+@app.get("/api/ppe/metrics", tags=["Dashboard"])
+def get_ppe_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    shift: list[str] | None = Query(default=None),
+    compliance_status: str | None = None,
+) -> dict[str, Any]:
+    records = _filter_ppe_dashboard_records(
+        _build_ppe_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        shift=shift,
+        compliance_status=compliance_status,
+    )
+
+    violations = [record for record in records if record["compliance_status"] == "FAIL"]
+    unique_workers = {f'{record["input_id"]}:{record["tracked_worker_id"]}' for record in records}
+    summary = {
+        "total_workers_checked": len(unique_workers),
+        "total_violations": len(violations),
+        "compliance_rate": round(((len(records) - len(violations)) / len(records)) * 100, 1) if records else 0.0,
+        "missing_helmet_count": sum(1 for record in records if record["helmet"] == "MISSING"),
+        "missing_vest_count": sum(1 for record in records if record["vest"] == "MISSING"),
+        "missing_shoes_count": sum(1 for record in records if record["shoes"] == "MISSING"),
+    }
+
+    return {
+        "summary": summary,
+        "violations_by_zone": [
+            {"zone": zone_name, "count": len(items)}
+            for zone_name, items in sorted(_group_records(violations, "zone").items(), key=lambda item: len(item[1]), reverse=True)
+        ],
+        "records": records,
+    }
+
+
+@app.get("/api/fire/metrics", tags=["Dashboard"])
+def get_fire_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    facility: str | None = None,
+    shift: list[str] | None = Query(default=None),
+    alert_type: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+    records = _filter_fire_dashboard_records(
+        _build_fire_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        facility=facility,
+        shift=shift,
+        alert_type=alert_type,
+        severity=severity,
+    )
+
+    true_alerts = [record for record in records if record["alert_type"] != "no_alert"]
+    summary = {
+        "total_incidents": len(true_alerts),
+        "critical_alerts": sum(1 for record in records if record["severity"] == "high"),
+        "fire_and_smoke_alerts": sum(1 for record in records if record["alert_type"] == "fire_and_smoke"),
+        "smoke_only_warnings": sum(1 for record in records if record["alert_type"] == "smoke_only"),
+        "most_affected_zone": max(_group_records(true_alerts, "zone").items(), key=lambda item: len(item[1]))[0] if true_alerts else "No alerts",
+        "most_triggered_camera": max(_group_records(true_alerts, "camera_id").items(), key=lambda item: len(item[1]))[0] if true_alerts else "No alerts",
+    }
+
+    return {
+        "summary": summary,
+        "records": records,
     }
 
 
@@ -1657,6 +2512,7 @@ async def playground_preview(
         file_kind=file_kind,
         frame=frame,
         temp_path=temp_path,
+        source_name=file.filename or "",
     )
 
 
@@ -1688,8 +2544,10 @@ async def playground_preview_sample(
         if frame is None:
             raise HTTPException(status_code=400, detail="Unable to load sample image.")
     else:
-        temp_path = sample_path
-        frame = extract_preview_frame(sample_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=sample_path.suffix or ".mp4") as temp_video:
+            shutil.copyfile(sample_path, temp_video.name)
+            temp_path = Path(temp_video.name)
+        frame = extract_preview_frame(temp_path)
 
     return build_playground_preview_response(
         use_case_id=use_case_id,
@@ -1697,6 +2555,7 @@ async def playground_preview_sample(
         file_kind=file_kind,
         frame=frame,
         temp_path=temp_path,
+        source_name=sample_path.name,
     )
 
 

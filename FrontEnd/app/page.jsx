@@ -16,7 +16,6 @@ import {
   YAxis,
 } from "recharts";
 import fireDetectionCover from "../FireDetection.webp";
-import objectCountingCover from "../ObjectCounting.webp";
 import objectTrackingCover from "../ObjectTracking.webp";
 import ppeDetectionImage from "../PPE_Detection.png";
 import queueIntelligenceImage from "../Queue_Intelligence.png";
@@ -38,15 +37,6 @@ const resolveBackendUrl = (value) => {
 // ── Use Cases (updated lineup) ───────────────────────────────────────────
 
 const useCases = [
-  {
-    id: "object-counting",
-    title: "Object Counting",
-    description: "Count objects crossing a checkpoint to monitor throughput across production lines, docks, and conveyor lanes.",
-    category: "Operations Intelligence",
-    accent: BRAND_BLUE,
-    image: objectCountingCover,
-    backstory: "Operations teams need a reliable throughput view without waiting for custom models. This view tracks how many objects move through a line and how close the site is to its daily target.",
-  },
   {
     id: "region-alerts",
     title: "Region Alerts",
@@ -150,12 +140,6 @@ const categoryDetails = [
     description: "Analyze speed and class-wise traffic mix for roads, campuses, toll lanes, and logistics corridors.",
     image: speedEstimationCover,
   },
-  {
-    label: "Operations Intelligence",
-    param: "operations-intelligence",
-    description: "Track throughput and object movement across lines, docks, conveyors, and production checkpoints.",
-    image: objectCountingCover,
-  },
 ];
 
 const sampleMediaByUseCase = {
@@ -164,9 +148,6 @@ const sampleMediaByUseCase = {
   ],
   "fire-detection": [
     { id: "fire-sample-1", label: "FireDetection_Test.webp", src: `${API_BASE_URL}/static/sample-images/FireDetection_Test.webp`, type: "image" },
-  ],
-  "object-counting": [
-    { id: "object-counting-sample-1", label: "ObjectCounting_Test.png", src: `${API_BASE_URL}/static/sample-images/ObjectCounting_Test.png`, type: "image" },
   ],
   "region-alerts": [
     { id: "region-alerts-sample-1", label: "solutions-ci-demo.mp4", src: `${API_BASE_URL}/static/sample-images/solutions-ci-demo.mp4`, type: "video" },
@@ -193,7 +174,6 @@ const sectionParamToLabel = Object.fromEntries(categoryDetails.map((c) => [c.par
 const sectionLabelToParam = Object.fromEntries(categoryDetails.map((c) => [c.label, c.param]));
 
 const useCaseToAnalyticsDashboardSlug = {
-  "object-counting": "object-counting",
   "region-alerts": "region-alerts",
   "queue-management": "queue-management",
   "speed-estimation": "speed-estimation",
@@ -225,6 +205,7 @@ function VisionLabPage() {
   const [playgroundState, setPlaygroundState] = useState({
     status: "idle",
     imageBase64: "",
+    outputVideoUrl: "",
     detections: [],
     sourceLabel: "",
     error: "",
@@ -277,9 +258,11 @@ function VisionLabPage() {
         : "landing";
 
   const activeTab = tabParamToLabel[searchParams.get("tab")] ?? "Model Playground";
-  const activeSection = sectionParamToLabel[searchParams.get("section")] ?? "Safety & Compliance";
-  const activeUseCaseId = searchParams.get("usecase") ?? "ppe-detection";
-  const activeUseCase = useCases.find((uc) => uc.id === activeUseCaseId) ?? useCases[0];
+  const requestedSection = sectionParamToLabel[searchParams.get("section")] ?? "Safety & Compliance";
+  const requestedUseCaseId = searchParams.get("usecase") ?? "ppe-detection";
+  const activeUseCase = useCases.find((uc) => uc.id === requestedUseCaseId) ?? useCases[0];
+  const activeUseCaseId = activeUseCase.id;
+  const activeSection = categoryDetails.some((section) => section.label === requestedSection) ? requestedSection : activeUseCase.category;
   const sampleMedia = sampleMediaByUseCase[activeUseCaseId] ?? [];
 
   const fetchVideos = async () => {
@@ -498,6 +481,7 @@ function VisionLabPage() {
     setPlaygroundState({
       status: "idle",
       imageBase64: "",
+      outputVideoUrl: "",
       detections: [],
       sourceLabel: "",
       error: "",
@@ -549,7 +533,7 @@ function VisionLabPage() {
   };
 
   const runPlaygroundPreview = async (file, sourceLabel) => {
-    setPlaygroundState({ status: "loading", imageBase64: "", detections: [], sourceLabel, error: "" });
+    setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
     navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
     try {
       const formData = new FormData();
@@ -561,9 +545,16 @@ function VisionLabPage() {
         throw new Error(errorData?.detail ?? "Playground preview failed.");
       }
       const data = await response.json();
-      setPlaygroundState({ status: "success", imageBase64: data.image_base64, detections: data.detections ?? [], sourceLabel, error: "" });
+      setPlaygroundState({
+        status: "success",
+        imageBase64: data.image_base64 ?? "",
+        outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
+        detections: data.detections ?? [],
+        sourceLabel,
+        error: "",
+      });
     } catch (error) {
-      setPlaygroundState({ status: "error", imageBase64: "", detections: [], sourceLabel, error: error instanceof Error ? error.message : "Unable to generate playground preview." });
+      setPlaygroundState({ status: "error", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: error instanceof Error ? error.message : "Unable to generate playground preview." });
     }
   };
 
@@ -575,7 +566,7 @@ function VisionLabPage() {
     if (!matchingSample) return;
 
     try {
-      setPlaygroundState({ status: "loading", imageBase64: "", detections: [], sourceLabel, error: "" });
+      setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
       navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
       const formData = new FormData();
       formData.append("sample_name", matchingSample.label);
@@ -586,11 +577,19 @@ function VisionLabPage() {
         throw new Error(errorData?.detail ?? "Unable to load sample media.");
       }
       const data = await response.json();
-      setPlaygroundState({ status: "success", imageBase64: data.image_base64, detections: data.detections ?? [], sourceLabel, error: "" });
+      setPlaygroundState({
+        status: "success",
+        imageBase64: data.image_base64 ?? "",
+        outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
+        detections: data.detections ?? [],
+        sourceLabel,
+        error: "",
+      });
     } catch (error) {
       setPlaygroundState({
         status: "error",
         imageBase64: "",
+        outputVideoUrl: "",
         detections: [],
         sourceLabel,
         error: error instanceof Error ? error.message : "Unable to process sample media.",
@@ -749,7 +748,7 @@ function LandingPage({ onExploreSection }) {
           <div className="grid grid-cols-4 gap-6">
             {[
               { label: "Pre-built Use Cases", value: String(useCases.length) },
-              { label: "Industry Verticals", value: "5" },
+              { label: "Industry Verticals", value: "4" },
               { label: "CV Models Integrated", value: "YOLOv8" },
               { label: "Processing", value: "Real-time" },
             ].map((stat) => (
@@ -1054,7 +1053,18 @@ function ModelPlayground({ activeUseCase, onProcessInput, playgroundState, selec
         ) : (
           <div>
             <div className="relative flex h-[28rem] items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4">
-              <img alt="Processed output" className="max-h-full max-w-full rounded-xl object-contain" src={playgroundState.imageBase64} />
+              {playgroundState.outputVideoUrl ? (
+                <video
+                  className="max-h-full max-w-full rounded-xl object-contain"
+                  controls
+                  playsInline
+                  preload="metadata"
+                  poster={playgroundState.imageBase64 || undefined}
+                  src={playgroundState.outputVideoUrl}
+                />
+              ) : (
+                <img alt="Processed output" className="max-h-full max-w-full rounded-xl object-contain" src={playgroundState.imageBase64} />
+              )}
             </div>
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-2 text-xs text-slate-400">Source: {playgroundState.sourceLabel}</div>
@@ -1070,10 +1080,21 @@ function ModelPlayground({ activeUseCase, onProcessInput, playgroundState, selec
               </div>
             </div>
             <div className="mt-5 flex gap-3">
-              <button className="rounded-xl border border-brandBlue px-4 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white" onClick={() => window.open(playgroundState.imageBase64, "_blank")} type="button">Preview in Browser</button>
+              <button
+                className="rounded-xl border border-brandBlue px-4 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white"
+                onClick={() => window.open(playgroundState.outputVideoUrl || playgroundState.imageBase64, "_blank")}
+                type="button"
+              >
+                Preview in Browser
+              </button>
               <button
                 className="rounded-xl bg-brandBlue px-4 py-3 text-sm font-semibold text-white transition hover:opacity-95"
-                onClick={() => { const link = document.createElement("a"); link.href = playgroundState.imageBase64; link.download = "analysis-result.jpg"; link.click(); }}
+                onClick={() => {
+                  const link = document.createElement("a");
+                  link.href = playgroundState.outputVideoUrl || playgroundState.imageBase64;
+                  link.download = playgroundState.outputVideoUrl ? "analysis-result.mp4" : "analysis-result.jpg";
+                  link.click();
+                }}
                 type="button"
               >Download Results</button>
             </div>
@@ -2090,7 +2111,9 @@ function formatPlaygroundDetection(detection) {
     return `${detection.class} | Helmet: ${detection.helmet ?? "?"} | Vest: ${detection.vest ?? "?"} | Shoes: ${detection.shoes ?? "?"}`;
   }
   if (detection.zone_status) {
-    return `${detection.class} | Zone: ${detection.zone_status}`;
+    const severity = detection.severity ? ` | Severity: ${detection.severity}` : "";
+    const tracked = detection.tracked_object_id ? ` | Track: ${detection.tracked_object_id}` : "";
+    return `${detection.class} | Zone: ${detection.zone_status}${severity}${tracked}`;
   }
   if (["vehicles scanned", "avg speed km/h", "max speed km/h", "speeding violations"].includes(detection.class)) {
     return `${detection.class}: ${detection.confidence}`;

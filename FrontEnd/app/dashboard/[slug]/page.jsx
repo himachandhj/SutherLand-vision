@@ -1,13 +1,17 @@
- "use client";
-
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
-import { DashboardPage, buildDashboardDefinition } from "../../../components/dashboard/dashboard-page";
+import { DashboardPage } from "../../../components/dashboard/dashboard-page";
 import { dashboardData, dashboardInfo } from "../../../components/dashboard/mock-data";
 
 export default function DashboardRoute({ params }) {
   const slug = params.slug;
-  const rows = dashboardData[slug];
+  if (slug === "object-counting") {
+    redirect("/dashboard/ppe-detection");
+  }
+
+  const usesLiveRows = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts";
+  const rows = usesLiveRows ? [] : dashboardData[slug];
   const info = dashboardInfo[slug];
 
   if (!rows || !info) {
@@ -29,17 +33,12 @@ export default function DashboardRoute({ params }) {
     );
   }
 
-  const definition = buildDashboardDefinition(slug, rows, info);
-
   return (
     <DashboardPage
       slug={slug}
-      title={definition.title}
-      description={definition.description}
+      title={info}
+      description={info}
       rows={rows}
-      metricDefs={definition.metricDefs}
-      columns={definition.columns}
-      extraFilterDefs={definition.extraFilterDefs}
     />
   );
 }

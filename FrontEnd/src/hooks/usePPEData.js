@@ -1,99 +1,100 @@
-import { useState, useEffect } from "react";
-import Papa from "papaparse";
+import { useEffect, useState } from "react";
 
-const DATA_SOURCE = "csv"; // change to "api" when backend is ready
-const CSV_URL = "/data/ppe_detection.csv";
-const API_URL = "/api/ppe_events";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_URL = `${API_BASE_URL}/api/ppe/metrics`;
+const POLL_INTERVAL_MS = 15000;
 
-export function usePPEData(filters = {}) {
+function appendFilterValues(params, key, value) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => {
+      if (item && item !== "All") params.append(key, item);
+    });
+    return;
+  }
+  if (value && value !== "All") {
+    params.append(key, value);
+  }
+}
+
+export function usePPEData(filters = {}, enabled = true) {
   const [data, setData] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [metrics, setMetrics] = useState({});
+  const [loading, setLoading] = useState(Boolean(enabled));
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    setLoading(true);
-    setError(null);
-
-    if (DATA_SOURCE === "api") {
-      const params = new URLSearchParams();
-      if (filters.zone)        params.append("zone", filters.zone);
-      if (filters.shift)       params.append("shift", filters.shift);
-      if (filters.cameraId)    params.append("camera_id", filters.cameraId);
-      if (filters.location)    params.append("location", filters.location);
-      if (filters.status)      params.append("status", filters.status);
-      if (filters.dateFrom)    params.append("date_from", filters.dateFrom);
-      if (filters.dateTo)      params.append("date_to", filters.dateTo);
-
-      fetch(`${API_URL}?${params.toString()}`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`API error: ${res.status}`);
-          return res.json();
-        })
-        .then((json) => {
-          setData(json);
-          setLoading(false);
-        })
-        .catch((err) => {
-          setError(err.message);
-          setLoading(false);
-        });
-
-      return;
+    if (!enabled) {
+      setData([]);
+      setMetrics({});
+      setLoading(false);
+      setError("");
+      return undefined;
     }
 
-    // CSV mode
-    Papa.parse(CSV_URL, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        let rows = results.data;
+    let active = true;
+    let currentController = null;
 
-        if (filters.zone)
-          rows = rows.filter((r) => r.zone === filters.zone);
-        if (filters.shift)
-          rows = rows.filter((r) => r.shift === filters.shift);
-        if (filters.cameraId)
-          rows = rows.filter((r) => r.camera_id === filters.cameraId);
-        if (filters.location)
-          rows = rows.filter((r) => r.location === filters.location);
-        if (filters.status)
-          rows = rows.filter((r) => r.status === filters.status);
-        if (filters.dateFrom)
-          rows = rows.filter(
-            (r) => new Date(r.simulated_timestamp) >= new Date(filters.dateFrom)
-          );
-        if (filters.dateTo)
-          rows = rows.filter(
-            (r) => new Date(r.simulated_timestamp) <= new Date(filters.dateTo)
-          );
+    const load = async ({ silent = false } = {}) => {
+      if (!silent) {
+        setLoading(true);
+      }
+      setError("");
 
-        setData(rows);
-        setLoading(false);
-      },
-      error: (err) => {
-        setError(err.message);
-        setLoading(false);
-      },
-    });
+      try {
+        currentController?.abort();
+        const controller = new AbortController();
+        currentController = controller;
+        const params = new URLSearchParams();
+        if (filters.from) params.append("date_from", filters.from);
+        if (filters.to) params.append("date_to", filters.to);
+        if (filters.location && filters.location !== "All") params.append("location", filters.location);
+        appendFilterValues(params, "zone", filters.zone);
+        appendFilterValues(params, "camera_id", filters.cameraId);
+        appendFilterValues(params, "shift", filters.shift);
+        if (filters.complianceStatus && filters.complianceStatus !== "All") {
+          params.append("compliance_status", filters.complianceStatus);
+        }
+
+        const response = await fetch(`${API_URL}?${params.toString()}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`PPE metrics request failed: ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!active) return;
+        setData(Array.isArray(payload.records) ? payload.records : []);
+        setMetrics(payload.summary ?? {});
+      } catch (fetchError) {
+        if (!active || fetchError?.name === "AbortError") return;
+        setError(fetchError.message || "Unable to load PPE dashboard data.");
+      } finally {
+        if (active && !silent) setLoading(false);
+      }
+    };
+
+    load();
+    const interval = window.setInterval(() => {
+      void load({ silent: true });
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      currentController?.abort();
+      window.clearInterval(interval);
+    };
   }, [
-    filters.zone,
-    filters.shift,
-    filters.cameraId,
+    enabled,
+    filters.from,
+    filters.to,
     filters.location,
-    filters.status,
-    filters.dateFrom,
-    filters.dateTo,
+    JSON.stringify(filters.zone ?? []),
+    JSON.stringify(filters.cameraId ?? []),
+    JSON.stringify(filters.shift ?? []),
+    filters.complianceStatus,
   ]);
 
-  // Derived KPI values computed from filtered data
-  const totalWorkers = data.length;
-  const violations = data.filter((r) => r.status === "Violation").length;
-  const compliant = data.filter((r) => r.status === "Compliant").length;
-  const complianceRate =
-    totalWorkers > 0
-      ? ((compliant / totalWorkers) * 100).toFixed(1)
-      : "0.0";
-
-  return { data, loading, error, totalWorkers, violations, compliant, complianceRate };
+  return { data, metrics, loading, error };
 }
