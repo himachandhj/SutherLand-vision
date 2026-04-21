@@ -48,6 +48,7 @@ import sys
 import time
 import warnings
 from datetime import datetime, timezone
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
@@ -102,7 +103,10 @@ _K5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 # PPE model class-name maps (for optional PPE YOLO model)
 # ════════════════════════════════════════════════════════════════════════════
 
-PPE_MODEL_SOURCES = ["ppe.pt"]
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_PPE_MODEL_PATH = BASE_DIR / "models" / "ppe" / "best.pt"
+LEGACY_PPE_MODEL_PATH = BASE_DIR / "ppe.pt"
+PPE_MODEL_SOURCES = [str(DEFAULT_PPE_MODEL_PATH), str(LEGACY_PPE_MODEL_PATH), "ppe.pt"]
 
 HELMET_OK_NAMES = {
     "helmet", "hardhat", "hard_hat", "hard hat", "hard-hat",
@@ -119,6 +123,14 @@ VEST_OK_NAMES = {
 VEST_NO_NAMES = {
     "no-vest", "no_vest", "no vest", "no safety vest",
 }
+SHOE_OK_NAMES = {
+    "boots", "boot", "safety boots", "safety_boots", "safety boot", "safety_boot",
+    "shoes", "shoe", "safety shoes", "safety_shoes", "safety shoe", "safety_shoe",
+}
+SHOE_NO_NAMES = {
+    "no-boots", "no_boots", "no boots", "no-boot", "no_boot", "no boot",
+    "no-shoes", "no_shoes", "no shoes", "no-shoe", "no_shoe", "no shoe",
+}
 
 
 def _classify_ppe_class(name: str):
@@ -127,27 +139,41 @@ def _classify_ppe_class(name: str):
     if n in HELMET_NO_NAMES: return "helmet_no"
     if n in VEST_OK_NAMES:   return "vest_ok"
     if n in VEST_NO_NAMES:   return "vest_no"
+    if n in SHOE_OK_NAMES:   return "shoe_ok"
+    if n in SHOE_NO_NAMES:   return "shoe_no"
     for kw in ("helmet", "hardhat", "hard hat"):
         if kw in n:
             return "helmet_no" if any(x in n for x in ("no ", "no-")) else "helmet_ok"
     for kw in ("vest", "hi-vis", "reflective"):
         if kw in n:
             return "vest_no" if any(x in n for x in ("no ", "no-")) else "vest_ok"
+    for kw in ("boot", "boots", "shoe", "shoes"):
+        if kw in n:
+            return "shoe_no" if any(x in n for x in ("no ", "no-")) else "shoe_ok"
+    return None
+
+
+def resolve_ppe_model_path(user_path=None) -> str | None:
+    srcs = ([user_path] if user_path else []) + PPE_MODEL_SOURCES
+    for source in srcs:
+        if not source:
+            continue
+        candidate = Path(source)
+        if candidate.is_file():
+            return str(candidate.resolve())
     return None
 
 
 def load_ppe_model(user_path=None):
-    srcs = ([user_path] if user_path else []) + PPE_MODEL_SOURCES
-    for s in srcs:
-        if not s or not os.path.isfile(s):
-            continue
-        try:
-            m = YOLO(s)
-            names = {int(k): str(v).lower() for k, v in m.names.items()}
-            return m, names
-        except Exception:
-            continue
-    return None, {}
+    model_path = resolve_ppe_model_path(user_path)
+    if not model_path:
+        return None, {}
+    try:
+        model = YOLO(model_path)
+        names = {int(k): str(v).lower() for k, v in model.names.items()}
+        return model, names
+    except Exception:
+        return None, {}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -196,9 +222,9 @@ def check_vis(bbox, fh, fw):
 class PPEDetector:
     """
     Detects helmet, vest, shoes using a three-layer approach:
-      Layer 1: Optional PPE YOLO model (most accurate when available)
-      Layer 2: Skin/hair NEGATIVE detection for helmets (catches bare heads)
-      Layer 3: Strict-crop HSV positive detection with tight ranges
+      Layer 1: PPE YOLO model as the primary signal when available
+      Layer 2: Per-person PPE crop inference when the full-frame model is unsure
+      Layer 3: Legacy HSV / skin-hair heuristics only as fallback
     """
 
     # ── Vest HSV ranges — tight fluorescent colours ───────────────────────
@@ -321,13 +347,15 @@ class PPEDetector:
             return []
 
     def _model_assign(self, p_bbox, ppe_items):
-        """Assign model detections to a person box. Returns (helmet, vest) statuses."""
+        """Assign model detections to a person box. Returns (helmet, vest, shoes) statuses."""
         x1, y1, x2, y2 = map(int, p_bbox)
         bh = y2 - y1
         head_box  = [x1, y1,           x2, y1 + int(bh * 0.35)]
         torso_box = [x1, y1 + int(bh*0.15), x2, y1 + int(bh * 0.78)]
+        foot_box  = [x1, y1 + int(bh * 0.72), x2, y2]
         helmet = PPE_UNKNOWN
         vest   = PPE_UNKNOWN
+        shoes  = PPE_UNKNOWN
 
         for bb, ct in ppe_items:
             inside = (_ctr_in(bb, p_bbox) or
@@ -349,8 +377,45 @@ class PPEDetector:
                         vest = PPE_OK
                     elif ct == "vest_no" and vest != PPE_OK:
                         vest = PPE_MISSING
+            elif "shoe" in ct:
+                f_ok = (_ctr_in(bb, foot_box) or _iou(bb, foot_box) >= 0.04)
+                if f_ok:
+                    if ct == "shoe_ok" and shoes != PPE_MISSING:
+                        shoes = PPE_OK
+                    elif ct == "shoe_no" and shoes != PPE_OK:
+                        shoes = PPE_MISSING
 
-        return helmet, vest
+        return helmet, vest, shoes
+
+    @staticmethod
+    def _merge_unknown_statuses(primary, secondary):
+        merged = []
+        for first, second in zip(primary, secondary):
+            merged.append(second if first == PPE_UNKNOWN else first)
+        return tuple(merged)
+
+    def _run_crop_model_assign(self, frame, bbox):
+        """Run the PPE model on a padded single-person crop for stronger per-person decisions."""
+        if not self.has_model:
+            return PPE_UNKNOWN, PPE_UNKNOWN, PPE_UNKNOWN
+
+        x1, y1, x2, y2 = map(int, bbox)
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        pad_x = max(10, int(bw * 0.08))
+        pad_top = max(8, int(bh * 0.10))
+        pad_bottom = max(6, int(bh * 0.05))
+
+        person_roi = self._crop(frame, x1 - pad_x, y1 - pad_top, x2 + pad_x, y2 + pad_bottom)
+        if person_roi is None or person_roi.size == 0:
+            return PPE_UNKNOWN, PPE_UNKNOWN, PPE_UNKNOWN
+
+        roi_items = self._run_ppe_model(person_roi)
+        if not roi_items:
+            return PPE_UNKNOWN, PPE_UNKNOWN, PPE_UNKNOWN
+
+        roi_h, roi_w = person_roi.shape[:2]
+        return self._model_assign([0, 0, roi_w, roi_h], roi_items)
 
     # ── Per-person detection ──────────────────────────────────────────────
 
@@ -362,9 +427,10 @@ class PPEDetector:
 
         Key accuracy features:
         - Horizontal inset crop prevents adjacent-person bleed
-        - Skin/hair detection as NEGATIVE signal for helmet
+        - Fine-tuned PPE model is the primary decision source
+        - Per-person crop inference improves small / crowded detections
         - Tight colour ranges + blob-size filter
-        - PPE model confirmation when available
+        - Legacy heuristics remain as fallback only
         """
         if not vis["ok"]:
             return {"helmet": PPE_UNKNOWN, "vest": PPE_UNKNOWN, "shoes": PPE_UNKNOWN}
@@ -380,9 +446,15 @@ class PPEDetector:
         sx2   = x2 - h_ins
 
         # ── Get model-level detections if model is available ──────────────
-        m_helmet, m_vest = PPE_UNKNOWN, PPE_UNKNOWN
+        m_helmet, m_vest, m_shoes = PPE_UNKNOWN, PPE_UNKNOWN, PPE_UNKNOWN
         if ppe_items is not None:
-            m_helmet, m_vest = self._model_assign(bbox, ppe_items)
+            m_helmet, m_vest, m_shoes = self._model_assign(bbox, ppe_items)
+        if PPE_UNKNOWN in (m_helmet, m_vest, m_shoes):
+            crop_model_statuses = self._run_crop_model_assign(frame, bbox)
+            m_helmet, m_vest, m_shoes = self._merge_unknown_statuses(
+                (m_helmet, m_vest, m_shoes),
+                crop_model_statuses,
+            )
 
         # ════════════════════════════════════════════════════════════════════
         # HELMET
@@ -396,25 +468,20 @@ class PPEDetector:
                 skin_f, hair_f = self._skin_hair_fractions(head_roi)
                 ppe_blob       = self._largest_blob_frac(head_roi, self._HELMET_RANGES)
 
-                # Primary decision via skin/hair negative signal
                 bare_head = (skin_f > SKIN_NO_HELMET_TH or
                              (skin_f + hair_f) > SKIN_HAIR_NO_HELM)
 
-                if bare_head:
-                    # Strong negative signal — override even model if model says OK
-                    # (model can confuse fair skin with white helmet at distance)
-                    hsv_helmet = PPE_MISSING
-                elif ppe_blob >= HELMET_BLOB_TH:
-                    hsv_helmet = PPE_OK
+                # Prefer the fine-tuned PPE model whenever it returns a clear status.
+                # Legacy bare-head / HSV logic is now only a fallback.
+                if m_helmet in (PPE_OK, PPE_MISSING):
+                    helmet = m_helmet
                 else:
-                    hsv_helmet = PPE_MISSING
-
-                # Merge: PPE model is confirmatory; negative signal wins
-                if m_helmet == PPE_OK and not bare_head:
-                    helmet = PPE_OK
-                elif m_helmet == PPE_MISSING or bare_head:
-                    helmet = PPE_MISSING
-                else:
+                    if bare_head:
+                        hsv_helmet = PPE_MISSING
+                    elif ppe_blob >= HELMET_BLOB_TH:
+                        hsv_helmet = PPE_OK
+                    else:
+                        hsv_helmet = PPE_MISSING
                     helmet = hsv_helmet
             else:
                 helmet = PPE_UNKNOWN
@@ -433,11 +500,8 @@ class PPEDetector:
                 cov = self._best_range_cov(torso_roi, self._VEST_RANGES)
                 hsv_vest = PPE_OK if cov >= VEST_COLOR_TH else PPE_MISSING
 
-                # Model confirmation
-                if m_vest == PPE_OK:
-                    vest = PPE_OK
-                elif m_vest == PPE_MISSING:
-                    vest = PPE_MISSING
+                if m_vest in (PPE_OK, PPE_MISSING):
+                    vest = m_vest
                 else:
                     vest = hsv_vest
             else:
@@ -453,7 +517,11 @@ class PPEDetector:
             foot_roi = self._crop(frame, sx1, f_top, sx2, y2)
             if foot_roi is not None and foot_roi.size > 0:
                 cov  = self._best_range_cov(foot_roi, self._SHOE_RANGES)
-                shoes = PPE_OK if cov >= 0.06 else PPE_MISSING
+                hsv_shoes = PPE_OK if cov >= 0.06 else PPE_MISSING
+                if m_shoes in (PPE_OK, PPE_MISSING):
+                    shoes = m_shoes
+                else:
+                    shoes = hsv_shoes
             else:
                 shoes = PPE_UNKNOWN
         else:
@@ -462,7 +530,7 @@ class PPEDetector:
         return {"helmet": helmet, "vest": vest, "shoes": shoes}
 
     def evaluate_frame(self, frame, bboxes, visibilities):
-        """Evaluate all persons in a frame — runs PPE model once for efficiency."""
+        """Evaluate all persons in a frame using the fine-tuned model first, then fallback logic."""
         ppe_items = self._run_ppe_model(frame) if self.has_model else None
         return [self.detect(frame, b, v, ppe_items) for b, v in zip(bboxes, visibilities)]
 
@@ -642,12 +710,32 @@ def create_writer(path, fps, w, h):
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Invalid video dimensions for output writer: width={width}, height={height}")
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    wr = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
-    if not wr.isOpened():
+    last_error = None
+    for codec in ("avc1", "H264", "X264", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        wr = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
+        if wr.isOpened():
+            return wr
         wr.release()
-        raise RuntimeError(f"VideoWriter failed to open for {path}")
-    return wr
+        last_error = codec
+
+    raise RuntimeError(f"VideoWriter failed to open for {path}; tried avc1/H264/X264/mp4v (last tried: {last_error})")
+
+
+def _extract_person_detections(results):
+    if not results or results[0].boxes is None:
+        return [], [], []
+
+    det = results[0].boxes
+    if det.xyxy is None or len(det.xyxy) == 0:
+        return [], [], []
+
+    boxes = det.xyxy.cpu().numpy()
+    tids  = (det.id.cpu().numpy().astype(int).tolist()
+             if det.id is not None else list(range(len(boxes))))
+    confs = (det.conf.cpu().numpy().tolist()
+             if det.conf is not None else [1.0] * len(boxes))
+    return boxes, tids, confs
 
 
 def _status_vote_bucket(status: str) -> str:
@@ -769,18 +857,19 @@ def process_video(
                     source=frame, classes=[0], conf=conf,
                     iou=0.70, device=device, persist=True, verbose=False)
             except Exception:
-                writer.write(frame)
-                continue
+                try:
+                    res = person_model.predict(
+                        source=frame,
+                        classes=[0],
+                        conf=conf,
+                        device=device,
+                        verbose=False,
+                    )
+                except Exception:
+                    writer.write(frame)
+                    continue
 
-            boxes, tids, confs = [], [], []
-            if res and res[0].boxes is not None:
-                det = res[0].boxes
-                if det.xyxy is not None and len(det.xyxy) > 0:
-                    boxes = det.xyxy.cpu().numpy()
-                    tids  = (det.id.cpu().numpy().astype(int).tolist()
-                             if det.id is not None else list(range(len(boxes))))
-                    confs = (det.conf.cpu().numpy().tolist()
-                             if det.conf is not None else [1.0] * len(boxes))
+            boxes, tids, confs = _extract_person_detections(res)
 
             vis_list = [check_vis(b, fh, fw) for b in boxes]
             ppe_list = detector.evaluate_frame(frame, boxes, vis_list)

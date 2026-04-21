@@ -60,11 +60,8 @@ def process_video(
         if candidate.exists():
             resolved_model = str(candidate)
 
-    # Look for optional dedicated PPE YOLO model (ppe.pt)
-    ppe_model_path: str | None = None
-    ppe_candidate = BASE_DIR / "ppe.pt"
-    if ppe_candidate.exists():
-        ppe_model_path = str(ppe_candidate)
+    # Resolve the dedicated PPE YOLO model, preferring the fine-tuned weights.
+    ppe_model_path = _engine.resolve_ppe_model_path()
 
     return _engine.process_video(
         input_path=input_path,

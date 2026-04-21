@@ -201,6 +201,205 @@ def init_db() -> None:
         )
         connection.commit()
 
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS speed_estimation_inputs (
+                input_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ref TEXT NOT NULL UNIQUE,
+                integration_run_id INTEGER,
+                job_id INTEGER,
+                camera_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                zone TEXT NOT NULL,
+                zone_speed_limit_kmh REAL,
+                filename TEXT NOT NULL,
+                minio_video_link TEXT,
+                output_video_link TEXT,
+                input_bucket TEXT,
+                input_object_key TEXT,
+                output_object_key TEXT,
+                load_time_sec REAL,
+                processing_time_sec REAL,
+                simulated_timestamp TEXT NOT NULL,
+                processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_status TEXT NOT NULL DEFAULT 'processed',
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS speed_estimation_outputs (
+                output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                input_id INTEGER NOT NULL,
+                object_id TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                detected_speed_kmh REAL,
+                speed_limit_kmh REAL,
+                is_overspeeding INTEGER,
+                excess_speed_kmh REAL,
+                confidence_score REAL,
+                status TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(input_id) REFERENCES speed_estimation_inputs(input_id) ON DELETE CASCADE,
+                UNIQUE(input_id, object_id)
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS queue_management_inputs (
+                input_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ref TEXT NOT NULL UNIQUE,
+                integration_run_id INTEGER,
+                job_id INTEGER,
+                camera_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                zone TEXT NOT NULL,
+                counter_id TEXT,
+                max_queue_limit INTEGER,
+                filename TEXT NOT NULL,
+                minio_video_link TEXT,
+                output_video_link TEXT,
+                input_bucket TEXT,
+                input_object_key TEXT,
+                output_object_key TEXT,
+                load_time_sec REAL,
+                processing_time_sec REAL,
+                simulated_timestamp TEXT NOT NULL,
+                processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_status TEXT NOT NULL DEFAULT 'processed',
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS queue_management_outputs (
+                output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                input_id INTEGER NOT NULL UNIQUE,
+                queue_length INTEGER,
+                estimated_wait_sec REAL,
+                is_breached INTEGER,
+                excess_count INTEGER,
+                staff_count INTEGER,
+                confidence_score REAL,
+                status TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(input_id) REFERENCES queue_management_inputs(input_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS class_wise_object_counting_inputs (
+                input_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ref TEXT NOT NULL UNIQUE,
+                integration_run_id INTEGER,
+                job_id INTEGER,
+                camera_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                zone TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                minio_video_link TEXT,
+                output_video_link TEXT,
+                input_bucket TEXT,
+                input_object_key TEXT,
+                output_object_key TEXT,
+                load_time_sec REAL,
+                processing_time_sec REAL,
+                simulated_timestamp TEXT NOT NULL,
+                processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_status TEXT NOT NULL DEFAULT 'processed',
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS class_wise_object_counting_outputs (
+                output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                input_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                class_count INTEGER,
+                expected_count INTEGER,
+                count_difference INTEGER,
+                total_objects_in_frame INTEGER,
+                class_percentage REAL,
+                confidence_score REAL,
+                status TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(input_id) REFERENCES class_wise_object_counting_inputs(input_id) ON DELETE CASCADE,
+                UNIQUE(input_id, class_name)
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS object_tracking_inputs (
+                input_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ref TEXT NOT NULL UNIQUE,
+                integration_run_id INTEGER,
+                job_id INTEGER,
+                camera_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                zone TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                minio_video_link TEXT,
+                output_video_link TEXT,
+                input_bucket TEXT,
+                input_object_key TEXT,
+                output_object_key TEXT,
+                load_time_sec REAL,
+                processing_time_sec REAL,
+                simulated_timestamp TEXT NOT NULL,
+                processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_status TEXT NOT NULL DEFAULT 'processed',
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS object_tracking_outputs (
+                output_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                input_id INTEGER NOT NULL,
+                object_id TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                entry_time REAL,
+                exit_time REAL,
+                duration_in_zone_sec REAL,
+                next_zone TEXT,
+                path_sequence TEXT,
+                is_anomaly INTEGER,
+                confidence_score REAL,
+                status TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(input_id) REFERENCES object_tracking_inputs(input_id) ON DELETE CASCADE,
+                UNIQUE(input_id, object_id)
+            )
+            """
+        )
+        connection.commit()
+
         # Migration: add columns if missing (for existing DBs)
         cursor = connection.execute("PRAGMA table_info(jobs)")
         columns = {row[1] for row in cursor.fetchall()}
@@ -837,6 +1036,510 @@ def replace_fire_detection_outputs(
         connection.commit()
         rows = connection.execute(
             "SELECT * FROM fire_detection_outputs WHERE input_id = ? ORDER BY output_id ASC",
+            (input_id,),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+
+def upsert_speed_estimation_input(
+    *,
+    source_ref: str,
+    integration_run_id: int | None,
+    job_id: int | None,
+    camera_id: str,
+    location: str,
+    zone: str,
+    zone_speed_limit_kmh: float | None,
+    filename: str,
+    minio_video_link: str | None,
+    output_video_link: str | None,
+    input_bucket: str | None,
+    input_object_key: str | None,
+    output_object_key: str | None,
+    load_time_sec: float | None,
+    processing_time_sec: float | None,
+    simulated_timestamp: str,
+    run_status: str,
+    metadata_json: dict | None = None,
+) -> dict:
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT input_id FROM speed_estimation_inputs WHERE source_ref = ?",
+            (source_ref,),
+        ).fetchone()
+
+        payload = (
+            integration_run_id,
+            job_id,
+            camera_id,
+            location,
+            zone,
+            zone_speed_limit_kmh,
+            filename,
+            minio_video_link,
+            output_video_link,
+            input_bucket,
+            input_object_key,
+            output_object_key,
+            load_time_sec,
+            processing_time_sec,
+            simulated_timestamp,
+            run_status,
+            json.dumps(metadata_json or {}),
+        )
+
+        if existing is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO speed_estimation_inputs (
+                    source_ref, integration_run_id, job_id, camera_id, location, zone, zone_speed_limit_kmh,
+                    filename, minio_video_link, output_video_link, input_bucket, input_object_key,
+                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
+                    run_status, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_ref, *payload),
+            )
+            input_id = cursor.lastrowid
+        else:
+            input_id = existing["input_id"]
+            connection.execute(
+                """
+                UPDATE speed_estimation_inputs
+                SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?, zone_speed_limit_kmh = ?,
+                    filename = ?, minio_video_link = ?, output_video_link = ?, input_bucket = ?,
+                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
+                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                WHERE input_id = ?
+                """,
+                (*payload, input_id),
+            )
+
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM speed_estimation_inputs WHERE input_id = ?",
+            (input_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def replace_speed_estimation_outputs(
+    *,
+    input_id: int,
+    outputs: list[dict],
+) -> list[dict]:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM speed_estimation_outputs WHERE input_id = ?",
+            (input_id,),
+        )
+
+        for output in outputs:
+            connection.execute(
+                """
+                INSERT INTO speed_estimation_outputs (
+                    input_id, object_id, object_type, detected_speed_kmh, speed_limit_kmh,
+                    is_overspeeding, excess_speed_kmh, confidence_score, status, notes, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    input_id,
+                    output.get("object_id"),
+                    output.get("object_type"),
+                    output.get("detected_speed_kmh"),
+                    output.get("speed_limit_kmh"),
+                    output.get("is_overspeeding"),
+                    output.get("excess_speed_kmh"),
+                    output.get("confidence_score"),
+                    output.get("status"),
+                    output.get("notes", ""),
+                    json.dumps(output.get("metadata_json") or {}),
+                ),
+            )
+
+        connection.commit()
+        rows = connection.execute(
+            "SELECT * FROM speed_estimation_outputs WHERE input_id = ? ORDER BY output_id ASC",
+            (input_id,),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+
+def upsert_queue_management_input(
+    *,
+    source_ref: str,
+    integration_run_id: int | None,
+    job_id: int | None,
+    camera_id: str,
+    location: str,
+    zone: str,
+    counter_id: str | None,
+    max_queue_limit: int | None,
+    filename: str,
+    minio_video_link: str | None,
+    output_video_link: str | None,
+    input_bucket: str | None,
+    input_object_key: str | None,
+    output_object_key: str | None,
+    load_time_sec: float | None,
+    processing_time_sec: float | None,
+    simulated_timestamp: str,
+    run_status: str,
+    metadata_json: dict | None = None,
+) -> dict:
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT input_id FROM queue_management_inputs WHERE source_ref = ?",
+            (source_ref,),
+        ).fetchone()
+
+        payload = (
+            integration_run_id,
+            job_id,
+            camera_id,
+            location,
+            zone,
+            counter_id,
+            max_queue_limit,
+            filename,
+            minio_video_link,
+            output_video_link,
+            input_bucket,
+            input_object_key,
+            output_object_key,
+            load_time_sec,
+            processing_time_sec,
+            simulated_timestamp,
+            run_status,
+            json.dumps(metadata_json or {}),
+        )
+
+        if existing is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO queue_management_inputs (
+                    source_ref, integration_run_id, job_id, camera_id, location, zone, counter_id, max_queue_limit,
+                    filename, minio_video_link, output_video_link, input_bucket, input_object_key,
+                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
+                    run_status, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_ref, *payload),
+            )
+            input_id = cursor.lastrowid
+        else:
+            input_id = existing["input_id"]
+            connection.execute(
+                """
+                UPDATE queue_management_inputs
+                SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?, counter_id = ?, max_queue_limit = ?,
+                    filename = ?, minio_video_link = ?, output_video_link = ?, input_bucket = ?,
+                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
+                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                WHERE input_id = ?
+                """,
+                (*payload, input_id),
+            )
+
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM queue_management_inputs WHERE input_id = ?",
+            (input_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def replace_queue_management_outputs(
+    *,
+    input_id: int,
+    outputs: list[dict],
+) -> list[dict]:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM queue_management_outputs WHERE input_id = ?",
+            (input_id,),
+        )
+
+        for output in outputs:
+            connection.execute(
+                """
+                INSERT INTO queue_management_outputs (
+                    input_id, queue_length, estimated_wait_sec, is_breached, excess_count,
+                    staff_count, confidence_score, status, notes, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    input_id,
+                    output.get("queue_length"),
+                    output.get("estimated_wait_sec"),
+                    output.get("is_breached"),
+                    output.get("excess_count"),
+                    output.get("staff_count"),
+                    output.get("confidence_score"),
+                    output.get("status"),
+                    output.get("notes", ""),
+                    json.dumps(output.get("metadata_json") or {}),
+                ),
+            )
+
+        connection.commit()
+        rows = connection.execute(
+            "SELECT * FROM queue_management_outputs WHERE input_id = ? ORDER BY output_id ASC",
+            (input_id,),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+
+def upsert_class_wise_object_counting_input(
+    *,
+    source_ref: str,
+    integration_run_id: int | None,
+    job_id: int | None,
+    camera_id: str,
+    location: str,
+    zone: str,
+    filename: str,
+    minio_video_link: str | None,
+    output_video_link: str | None,
+    input_bucket: str | None,
+    input_object_key: str | None,
+    output_object_key: str | None,
+    load_time_sec: float | None,
+    processing_time_sec: float | None,
+    simulated_timestamp: str,
+    run_status: str,
+    metadata_json: dict | None = None,
+) -> dict:
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT input_id FROM class_wise_object_counting_inputs WHERE source_ref = ?",
+            (source_ref,),
+        ).fetchone()
+
+        payload = (
+            integration_run_id,
+            job_id,
+            camera_id,
+            location,
+            zone,
+            filename,
+            minio_video_link,
+            output_video_link,
+            input_bucket,
+            input_object_key,
+            output_object_key,
+            load_time_sec,
+            processing_time_sec,
+            simulated_timestamp,
+            run_status,
+            json.dumps(metadata_json or {}),
+        )
+
+        if existing is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO class_wise_object_counting_inputs (
+                    source_ref, integration_run_id, job_id, camera_id, location, zone,
+                    filename, minio_video_link, output_video_link, input_bucket, input_object_key,
+                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
+                    run_status, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_ref, *payload),
+            )
+            input_id = cursor.lastrowid
+        else:
+            input_id = existing["input_id"]
+            connection.execute(
+                """
+                UPDATE class_wise_object_counting_inputs
+                SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?,
+                    filename = ?, minio_video_link = ?, output_video_link = ?, input_bucket = ?,
+                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
+                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                WHERE input_id = ?
+                """,
+                (*payload, input_id),
+            )
+
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM class_wise_object_counting_inputs WHERE input_id = ?",
+            (input_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def replace_class_wise_object_counting_outputs(
+    *,
+    input_id: int,
+    outputs: list[dict],
+) -> list[dict]:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM class_wise_object_counting_outputs WHERE input_id = ?",
+            (input_id,),
+        )
+
+        for output in outputs:
+            connection.execute(
+                """
+                INSERT INTO class_wise_object_counting_outputs (
+                    input_id, class_name, class_count, expected_count, count_difference,
+                    total_objects_in_frame, class_percentage, confidence_score, status, notes, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    input_id,
+                    output.get("class_name"),
+                    output.get("class_count"),
+                    output.get("expected_count"),
+                    output.get("count_difference"),
+                    output.get("total_objects_in_frame"),
+                    output.get("class_percentage"),
+                    output.get("confidence_score"),
+                    output.get("status"),
+                    output.get("notes", ""),
+                    json.dumps(output.get("metadata_json") or {}),
+                ),
+            )
+
+        connection.commit()
+        rows = connection.execute(
+            "SELECT * FROM class_wise_object_counting_outputs WHERE input_id = ? ORDER BY output_id ASC",
+            (input_id,),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+
+def upsert_object_tracking_input(
+    *,
+    source_ref: str,
+    integration_run_id: int | None,
+    job_id: int | None,
+    camera_id: str,
+    location: str,
+    zone: str,
+    filename: str,
+    minio_video_link: str | None,
+    output_video_link: str | None,
+    input_bucket: str | None,
+    input_object_key: str | None,
+    output_object_key: str | None,
+    load_time_sec: float | None,
+    processing_time_sec: float | None,
+    simulated_timestamp: str,
+    run_status: str,
+    metadata_json: dict | None = None,
+) -> dict:
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT input_id FROM object_tracking_inputs WHERE source_ref = ?",
+            (source_ref,),
+        ).fetchone()
+
+        payload = (
+            integration_run_id,
+            job_id,
+            camera_id,
+            location,
+            zone,
+            filename,
+            minio_video_link,
+            output_video_link,
+            input_bucket,
+            input_object_key,
+            output_object_key,
+            load_time_sec,
+            processing_time_sec,
+            simulated_timestamp,
+            run_status,
+            json.dumps(metadata_json or {}),
+        )
+
+        if existing is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO object_tracking_inputs (
+                    source_ref, integration_run_id, job_id, camera_id, location, zone,
+                    filename, minio_video_link, output_video_link, input_bucket, input_object_key,
+                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
+                    run_status, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_ref, *payload),
+            )
+            input_id = cursor.lastrowid
+        else:
+            input_id = existing["input_id"]
+            connection.execute(
+                """
+                UPDATE object_tracking_inputs
+                SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?,
+                    filename = ?, minio_video_link = ?, output_video_link = ?, input_bucket = ?,
+                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
+                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                WHERE input_id = ?
+                """,
+                (*payload, input_id),
+            )
+
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM object_tracking_inputs WHERE input_id = ?",
+            (input_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def replace_object_tracking_outputs(
+    *,
+    input_id: int,
+    outputs: list[dict],
+) -> list[dict]:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM object_tracking_outputs WHERE input_id = ?",
+            (input_id,),
+        )
+
+        for output in outputs:
+            connection.execute(
+                """
+                INSERT INTO object_tracking_outputs (
+                    input_id, object_id, object_type, entry_time, exit_time,
+                    duration_in_zone_sec, next_zone, path_sequence, is_anomaly,
+                    confidence_score, status, notes, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    input_id,
+                    output.get("object_id"),
+                    output.get("object_type"),
+                    output.get("entry_time"),
+                    output.get("exit_time"),
+                    output.get("duration_in_zone_sec"),
+                    output.get("next_zone"),
+                    output.get("path_sequence"),
+                    output.get("is_anomaly"),
+                    output.get("confidence_score"),
+                    output.get("status"),
+                    output.get("notes", ""),
+                    json.dumps(output.get("metadata_json") or {}),
+                ),
+            )
+
+        connection.commit()
+        rows = connection.execute(
+            "SELECT * FROM object_tracking_outputs WHERE input_id = ? ORDER BY output_id ASC",
             (input_id,),
         ).fetchall()
         return [_row_to_dict(row) for row in rows]

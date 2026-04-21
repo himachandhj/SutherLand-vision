@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import mimetypes
 import math
 import hashlib
 import io
@@ -33,15 +34,23 @@ from app.core.database import (
     init_db,
     list_integration_runs,
     list_jobs,
+    replace_class_wise_object_counting_outputs,
     replace_fire_detection_outputs,
+    replace_object_tracking_outputs,
     replace_ppe_detection_outputs,
+    replace_queue_management_outputs,
     replace_region_alert_outputs,
+    replace_speed_estimation_outputs,
+    upsert_class_wise_object_counting_input,
     upsert_fire_detection_input,
+    upsert_object_tracking_input,
+    upsert_ppe_detection_input,
+    upsert_queue_management_input,
+    upsert_region_alert_input,
+    upsert_speed_estimation_input,
     update_integration_run,
     update_job,
     upsert_integration_run,
-    upsert_ppe_detection_input,
-    upsert_region_alert_input,
 )
 from app.core.minio_integration import (
     MinioConnectionConfig,
@@ -102,22 +111,44 @@ PPE_PREVIEW_DETECTOR: ppe_engine.PPEDetector | None = None
 INTEGRATION_PROVIDER = "minio"
 INTEGRATION_USE_CASE_ID = "ppe-detection"
 INTEGRATION_SUPPORTED_USE_CASES = {
+    "class-wise-object-counting",
     "ppe-detection",
+    "queue-management",
     "region-alerts",
+    "speed-estimation",
     "fire-detection",
+    "object-tracking",
 }
 INTEGRATION_USE_CASE_ALIASES = {
+    "class-wise-counting": "class-wise-object-counting",
     "region-alert": "region-alerts",
 }
 INTEGRATION_USE_CASE_PREFIXES = {
+    "class-wise-object-counting": ("counting/input/", "counting/output/"),
+    "queue-management": ("queue/input/", "queue/output/"),
     "ppe-detection": ("ppe/input/", "ppe/output/"),
     "region-alerts": ("region/input/", "region/output/"),
     "fire-detection": ("fire/input/", "fire/output/"),
+    "speed-estimation": ("speed/input/", "speed/output/"),
+    "object-tracking": ("tracking/input/", "tracking/output/"),
 }
 INTEGRATION_USE_CASE_OUTPUT_SUFFIXES = {
+    "class-wise-object-counting": "class_wise_object_counting",
+    "queue-management": "queue_management",
     "ppe-detection": "ppe_detection",
     "region-alerts": "region_alert",
     "fire-detection": "fire_detection",
+    "speed-estimation": "speed_estimation",
+    "object-tracking": "object_tracking",
+}
+INTEGRATION_PROCESSING_VERSIONS = {
+    "class-wise-object-counting": 1,
+    "fire-detection": 1,
+    "ppe-detection": 3,
+    "queue-management": 1,
+    "region-alerts": 1,
+    "speed-estimation": 1,
+    "object-tracking": 1,
 }
 INTEGRATION_OVERVIEW_LIMIT = 5
 INTEGRATION_STATE_LOCK = threading.Lock()
@@ -126,6 +157,8 @@ INTEGRATION_STATES: dict[str, dict[str, Any]] = {}
 REGION_SYNTHETIC_SOURCE_PREFIX = "synthetic-region-demo"
 REGION_SYNTHETIC_METADATA_KEY = "synthetic_demo"
 REGION_SYNTHETIC_MIN_OUTPUTS = 180
+DEFAULT_ZONE_SPEED_LIMIT_KMH = 35.0
+DEFAULT_QUEUE_MAX_LIMIT = 6
 
 
 app = FastAPI(
@@ -221,7 +254,7 @@ def load_ppe_preview_components() -> None:
         PPE_PREVIEW_DETECTOR = None
         return
 
-    ppe_model_path = str(BASE_DIR / "ppe.pt") if (BASE_DIR / "ppe.pt").exists() else None
+    ppe_model_path = ppe_engine.resolve_ppe_model_path()
     ppe_model, ppe_names = ppe_engine.load_ppe_model(ppe_model_path)
     PPE_PREVIEW_DETECTOR = ppe_engine.PPEDetector(
         ppe_model=ppe_model,
@@ -305,6 +338,45 @@ def _get_integration_state(use_case_id: str) -> dict[str, Any]:
     _ensure_integration_slot(use_case_id)
     with INTEGRATION_STATE_LOCK:
         return dict(INTEGRATION_STATES[use_case_id])
+
+
+def _get_integration_processing_version(use_case_id: str) -> int:
+    return int(INTEGRATION_PROCESSING_VERSIONS.get(use_case_id, 0))
+
+
+def _integration_output_needs_refresh(
+    use_case_id: str,
+    existing_run: dict[str, Any] | None,
+    *,
+    has_output: bool,
+) -> bool:
+    current_version = _get_integration_processing_version(use_case_id)
+    if current_version <= 0 or not has_output:
+        return False
+
+    metrics = existing_run.get("metrics", {}) if isinstance(existing_run, dict) else {}
+    stored_version_raw = metrics.get("processing_version") if isinstance(metrics, dict) else None
+    try:
+        stored_version = int(stored_version_raw)
+    except (TypeError, ValueError):
+        stored_version = None
+    return stored_version != current_version
+
+
+def _resolve_upload_use_case_id(requested_use_case_id: str | None) -> str:
+    if requested_use_case_id and requested_use_case_id.strip():
+        return _normalize_integration_use_case_id(requested_use_case_id)
+
+    connected_use_cases = [
+        use_case_id
+        for use_case_id in sorted(INTEGRATION_SUPPORTED_USE_CASES)
+        if _get_integration_state(use_case_id).get("connected")
+    ]
+
+    if len(connected_use_cases) == 1:
+        return connected_use_cases[0]
+
+    return _normalize_integration_use_case_id(requested_use_case_id)
 
 
 def _build_connection_details(
@@ -512,6 +584,46 @@ def _build_integration_proxy_url(use_case_id: str, object_key: str | None) -> st
     return f"/api/integrations/minio/object?use_case_id={quote(canonical_use_case_id)}&object_key={quote(object_key, safe='')}"
 
 
+def _parse_http_byte_range(range_header: str, total_size: int) -> tuple[int, int]:
+    if total_size <= 0:
+        raise ValueError("Range requests require a non-empty object.")
+
+    units, value = range_header.strip().split("=", 1)
+    if units.strip().lower() != "bytes":
+        raise ValueError("Unsupported range unit")
+
+    if "," in value:
+        raise ValueError("Multiple byte ranges are not supported")
+
+    start_text, end_text = value.split("-", 1)
+    start_text = start_text.strip()
+    end_text = end_text.strip()
+
+    if not start_text and not end_text:
+        raise ValueError("Missing byte range values")
+
+    if not start_text:
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            raise ValueError("Suffix byte range must be greater than zero")
+        if suffix_length >= total_size:
+            return 0, total_size - 1
+        return total_size - suffix_length, total_size - 1
+
+    start = int(start_text)
+    if start < 0 or start >= total_size:
+        raise ValueError("Range start is outside the object")
+
+    if not end_text:
+        return start, total_size - 1
+
+    end = int(end_text)
+    if end < start:
+        raise ValueError("Range end precedes range start")
+
+    return start, min(end, total_size - 1)
+
+
 def _derive_demo_source_metadata(source_ref: str, simulated_timestamp: str) -> dict[str, str]:
     digest = hashlib.sha1(source_ref.encode("utf-8")).hexdigest()
     camera_index = int(digest[0:2], 16) % 8 + 1
@@ -548,6 +660,37 @@ def _derive_demo_source_metadata(source_ref: str, simulated_timestamp: str) -> d
         "zone": zone_options[int(digest[6:8], 16) % len(zone_options)],
         "shift": shift,
     }
+
+
+def _stable_hash_int(value: str, *, start: int = 0, length: int = 8) -> int:
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
+    return int(digest[start:start + length], 16)
+
+
+def _derive_zone_speed_limit_kmh(source_ref: str, zone: str) -> float:
+    zone_limits = {
+        "Restricted Bay": 20.0,
+        "Dock Lane": 25.0,
+        "Zone 1": 30.0,
+        "Zone 2": 35.0,
+        "Zone 3": 40.0,
+    }
+    return float(zone_limits.get(zone, DEFAULT_ZONE_SPEED_LIMIT_KMH))
+
+
+def _derive_queue_counter_id(source_ref: str) -> str:
+    return f"COUNTER-{_stable_hash_int(source_ref, start=2, length=2) % 6 + 1:02d}"
+
+
+def _derive_queue_max_limit(source_ref: str, zone: str) -> int:
+    zone_limits = {
+        "Restricted Bay": 4,
+        "Dock Lane": 5,
+        "Zone 1": 6,
+        "Zone 2": 7,
+        "Zone 3": 8,
+    }
+    return int(zone_limits.get(zone, DEFAULT_QUEUE_MAX_LIMIT))
 
 
 def _persist_ppe_analytics(
@@ -779,6 +922,313 @@ def _persist_fire_detection_analytics(
     }
 
 
+def _persist_speed_estimation_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    speed_summaries = analytics.get("speed_summaries", []) if isinstance(analytics.get("speed_summaries"), list) else []
+
+    minio_video_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_video_link or (f"job://speed-estimation/{job_id}" if job_id is not None else f"file://{filename}")
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+    zone_speed_limit_kmh = float(video_summary.get("zone_speed_limit_kmh") or _derive_zone_speed_limit_kmh(source_ref, source_metadata["zone"]))
+
+    input_row = upsert_speed_estimation_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        zone_speed_limit_kmh=zone_speed_limit_kmh,
+        filename=filename,
+        minio_video_link=minio_video_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": result.get("metrics", {}),
+            "source_type": "minio" if minio_video_link else "local",
+        },
+    )
+
+    output_rows = replace_speed_estimation_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "object_id": summary.get("object_id"),
+                "object_type": summary.get("object_type"),
+                "detected_speed_kmh": summary.get("detected_speed_kmh"),
+                "speed_limit_kmh": summary.get("speed_limit_kmh", zone_speed_limit_kmh),
+                "is_overspeeding": summary.get("is_overspeeding"),
+                "excess_speed_kmh": summary.get("excess_speed_kmh"),
+                "confidence_score": summary.get("confidence_score"),
+                "status": summary.get("status", "normal"),
+                "notes": summary.get("notes", ""),
+                "metadata_json": summary.get("metadata", {}),
+            }
+            for summary in speed_summaries
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
+def _persist_queue_management_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    queue_summaries = analytics.get("queue_summaries", []) if isinstance(analytics.get("queue_summaries"), list) else []
+
+    minio_video_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_video_link or (f"job://queue-management/{job_id}" if job_id is not None else f"file://{filename}")
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+    counter_id = str(video_summary.get("counter_id") or _derive_queue_counter_id(source_ref))
+    max_queue_limit = int(video_summary.get("max_queue_limit") or _derive_queue_max_limit(source_ref, source_metadata["zone"]))
+
+    input_row = upsert_queue_management_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        counter_id=counter_id,
+        max_queue_limit=max_queue_limit,
+        filename=filename,
+        minio_video_link=minio_video_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": result.get("metrics", {}),
+            "source_type": "minio" if minio_video_link else "local",
+        },
+    )
+
+    output_rows = replace_queue_management_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "queue_length": summary.get("queue_length"),
+                "estimated_wait_sec": summary.get("estimated_wait_sec"),
+                "is_breached": summary.get("is_breached"),
+                "excess_count": summary.get("excess_count"),
+                "staff_count": summary.get("staff_count"),
+                "confidence_score": summary.get("confidence_score"),
+                "status": summary.get("status", "normal"),
+                "notes": summary.get("notes", ""),
+                "metadata_json": summary.get("metadata", {}),
+            }
+            for summary in queue_summaries
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
+def _persist_class_wise_object_counting_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    class_summaries = analytics.get("class_summaries", []) if isinstance(analytics.get("class_summaries"), list) else []
+
+    minio_video_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_video_link or (f"job://class-wise-object-counting/{job_id}" if job_id is not None else f"file://{filename}")
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+
+    input_row = upsert_class_wise_object_counting_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        filename=filename,
+        minio_video_link=minio_video_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": result.get("metrics", {}),
+            "source_type": "minio" if minio_video_link else "local",
+        },
+    )
+
+    output_rows = replace_class_wise_object_counting_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "class_name": summary.get("class_name"),
+                "class_count": summary.get("class_count"),
+                "expected_count": summary.get("expected_count"),
+                "count_difference": summary.get("count_difference"),
+                "total_objects_in_frame": summary.get("total_objects_in_frame"),
+                "class_percentage": summary.get("class_percentage"),
+                "confidence_score": summary.get("confidence_score"),
+                "status": summary.get("status", "matched"),
+                "notes": summary.get("notes", ""),
+                "metadata_json": summary.get("metadata", {}),
+            }
+            for summary in class_summaries
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
+def _persist_object_tracking_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    track_summaries = analytics.get("track_summaries", []) if isinstance(analytics.get("track_summaries"), list) else []
+
+    minio_video_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_video_link or (f"job://object-tracking/{job_id}" if job_id is not None else f"file://{filename}")
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+
+    input_row = upsert_object_tracking_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        filename=filename,
+        minio_video_link=minio_video_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": result.get("metrics", {}),
+            "source_type": "minio" if minio_video_link else "local",
+        },
+    )
+
+    output_rows = replace_object_tracking_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "object_id": summary.get("object_id"),
+                "object_type": summary.get("object_type"),
+                "entry_time": summary.get("entry_time"),
+                "exit_time": summary.get("exit_time"),
+                "duration_in_zone_sec": summary.get("duration_in_zone_sec"),
+                "next_zone": summary.get("next_zone"),
+                "path_sequence": summary.get("path_sequence"),
+                "is_anomaly": summary.get("is_anomaly"),
+                "confidence_score": summary.get("confidence_score"),
+                "status": summary.get("status", "normal"),
+                "notes": summary.get("notes", ""),
+                "metadata_json": summary.get("metadata", {}),
+            }
+            for summary in track_summaries
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
 def _persist_use_case_analytics(
     *,
     use_case_id: str,
@@ -819,6 +1269,54 @@ def _persist_use_case_analytics(
         )
     if canonical_use_case_id == "fire-detection":
         return _persist_fire_detection_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
+    if canonical_use_case_id == "speed-estimation":
+        return _persist_speed_estimation_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
+    if canonical_use_case_id == "queue-management":
+        return _persist_queue_management_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
+    if canonical_use_case_id == "class-wise-object-counting":
+        return _persist_class_wise_object_counting_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
+    if canonical_use_case_id == "object-tracking":
+        return _persist_object_tracking_analytics(
             result=result,
             filename=filename,
             job_id=job_id,
@@ -976,7 +1474,14 @@ def _build_manual_input_video_items(
         )
         run = run_by_input.get(input_key)
         has_output = object_exists(client, config.bucket, expected_output_key)
-        if run:
+        needs_refresh = _integration_output_needs_refresh(
+            canonical_use_case_id,
+            run,
+            has_output=has_output,
+        )
+        if needs_refresh:
+            status = "available"
+        elif run:
             status = str(run.get("status") or "available")
         elif has_output:
             status = "completed"
@@ -1068,8 +1573,14 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     bucket=config.bucket,
                     input_key=input_key,
                 )
+                has_output = object_exists(client, config.bucket, output_key)
+                needs_refresh = _integration_output_needs_refresh(
+                    canonical_use_case_id,
+                    existing_run,
+                    has_output=has_output,
+                )
 
-                if object_exists(client, config.bucket, output_key):
+                if has_output and not needs_refresh:
                     upsert_integration_run(
                         provider=INTEGRATION_PROVIDER,
                         use_case_id=canonical_use_case_id,
@@ -1087,7 +1598,9 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     if existing_status != "queued":
                         continue
                 else:
-                    if existing_status in {"completed", "failed", "processing"}:
+                    if existing_status in {"failed", "processing"}:
+                        continue
+                    if existing_status == "completed" and not needs_refresh:
                         continue
 
                 next_item = item
@@ -1161,6 +1674,14 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
 
                     client.fput_object(config.bucket, next_output_key, str(actual_output), content_type="video/mp4")
                     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+                    if not isinstance(metrics, dict):
+                        metrics = {}
+                    processing_version = _get_integration_processing_version(canonical_use_case_id)
+                    if processing_version > 0:
+                        metrics = {
+                            **metrics,
+                            "processing_version": processing_version,
+                        }
                     analytics_rows = _persist_use_case_analytics(
                         use_case_id=canonical_use_case_id,
                         result=result,
@@ -1292,7 +1813,7 @@ def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str |
     if PPE_PREVIEW_PERSON_MODEL is None or PPE_PREVIEW_DETECTOR is None:
         raise HTTPException(
             status_code=503,
-            detail="PPE preview model is not available. Add yolov8n.pt/best.pt and optional ppe.pt in BackEnd.",
+            detail="PPE preview model is not available. Add yolov8n.pt/best.pt and BackEnd/models/ppe/best.pt in BackEnd.",
         )
 
     annotated = frame.copy()
@@ -2594,7 +3115,7 @@ async def analyze_video(payload: AnalyzeVideoRequest) -> VideoJobResponse:
             input_path=str(selected_asset),
             output_path=str(output_path),
             model_path=model_path,
-            ppe_model_path=str(BASE_DIR / "ppe.pt") if (BASE_DIR / "ppe.pt").exists() else None,
+            ppe_model_path=ppe_engine.resolve_ppe_model_path(),
             device=auto_device(),
             show=False,
         )
@@ -2895,8 +3416,20 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
             bucket=config.bucket,
             input_key=input_key,
         )
+        has_output = object_exists(client, config.bucket, output_key)
+        needs_refresh = _integration_output_needs_refresh(
+            canonical_use_case_id,
+            existing_run,
+            has_output=has_output,
+        )
         existing_status = str(existing_run["status"]) if existing_run else ""
-        if object_exists(client, config.bucket, output_key) or existing_status in {"completed", "processing"}:
+        if existing_status == "processing":
+            skipped_count += 1
+            continue
+        if has_output and not needs_refresh:
+            skipped_count += 1
+            continue
+        if existing_status == "completed" and not needs_refresh:
             skipped_count += 1
             continue
 
@@ -2964,18 +3497,7 @@ def stream_minio_integration_object(request: Request, use_case_id: str, object_k
 
     if range_header and total_size > 0:
         try:
-            units, value = range_header.strip().split("=", 1)
-            if units != "bytes":
-                raise ValueError("Unsupported range unit")
-            start_text, end_text = value.split("-", 1)
-            if start_text:
-                start = int(start_text)
-            if end_text:
-                end = int(end_text)
-            else:
-                end = total_size - 1
-            start = max(0, min(start, total_size - 1))
-            end = max(start, min(end, total_size - 1))
+            start, end = _parse_http_byte_range(range_header, total_size)
             status_code = 206
         except Exception as error:
             raise HTTPException(status_code=416, detail=f"Invalid range request: {error}") from error
@@ -2995,16 +3517,21 @@ def stream_minio_integration_object(request: Request, use_case_id: str, object_k
             response.close()
             response.release_conn()
 
+    content_type = getattr(stat, "content_type", None) or mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+    filename = Path(object_key).name or "output"
+
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Type": "video/mp4",
+        "Content-Type": content_type,
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "Cache-Control": "no-store",
     }
     if total_size > 0:
         headers["Content-Length"] = str(length if status_code == 206 else total_size)
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{total_size}"
 
-    return StreamingResponse(iter_chunks(), status_code=status_code, headers=headers, media_type="video/mp4")
+    return StreamingResponse(iter_chunks(), status_code=status_code, headers=headers, media_type=content_type)
 
 
 @app.post(
@@ -3013,17 +3540,27 @@ def stream_minio_integration_object(request: Request, use_case_id: str, object_k
     response_model=MinioUploadResponse,
 )
 async def upload_minio_integration_videos(
-    files: list[UploadFile] = File(...),
-    use_case_id: str = Form(INTEGRATION_USE_CASE_ID),
+    files: list[UploadFile] | None = File(None),
+    file: UploadFile | None = File(None),
+    use_case_id: str | None = Form(None),
 ) -> MinioUploadResponse:
-    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    canonical_use_case_id = _resolve_upload_use_case_id(use_case_id)
     snapshot = _get_integration_state(canonical_use_case_id)
     config = snapshot.get("connection")
 
     if not snapshot.get("connected") or config is None:
-        raise HTTPException(status_code=400, detail="Connect to MinIO before uploading videos.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Connect to MinIO before uploading videos for {_get_integration_use_case_title(canonical_use_case_id)}."
+            ),
+        )
 
-    if not files:
+    upload_files = [uploaded for uploaded in (files or []) if uploaded is not None]
+    if file is not None:
+        upload_files.append(file)
+
+    if not upload_files:
         raise HTTPException(status_code=400, detail="At least one video file is required.")
 
     try:
@@ -3034,26 +3571,26 @@ async def upload_minio_integration_videos(
 
     uploaded_items: list[MinioUploadItem] = []
 
-    for file in files:
-        if not file.filename:
+    for uploaded_file in upload_files:
+        if not uploaded_file.filename:
             continue
 
-        ext = Path(file.filename).suffix.lower()
+        ext = Path(uploaded_file.filename).suffix.lower()
         if ext not in ALLOWED_VIDEO_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type '{ext}' for '{file.filename}'. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
+                detail=f"Unsupported file type '{ext}' for '{uploaded_file.filename}'. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
             )
 
         object_key, output_key = _build_unique_input_object_key(
             client,
             config,
-            file.filename,
+            uploaded_file.filename,
             use_case_id=canonical_use_case_id,
         )
-        contents = await file.read()
+        contents = await uploaded_file.read()
         if not contents:
-            raise HTTPException(status_code=400, detail=f"Uploaded file '{file.filename}' is empty.")
+            raise HTTPException(status_code=400, detail=f"Uploaded file '{uploaded_file.filename}' is empty.")
 
         data_stream = io.BytesIO(contents)
         client.put_object(
@@ -3061,7 +3598,7 @@ async def upload_minio_integration_videos(
             object_key,
             data_stream,
             length=len(contents),
-            content_type=file.content_type or "video/mp4",
+            content_type=uploaded_file.content_type or "video/mp4",
         )
 
         upsert_integration_run(
@@ -3076,7 +3613,7 @@ async def upload_minio_integration_videos(
         )
         uploaded_items.append(
             MinioUploadItem(
-                filename=Path(file.filename).name,
+                filename=Path(uploaded_file.filename).name,
                 object_key=object_key,
                 output_key=output_key,
                 status="queued",

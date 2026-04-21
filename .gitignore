@@ -21,3 +21,40 @@ yarn-debug.log*
 yarn-error.log*
 
 minio
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+.venv/
+
+# Node / Next
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Models
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Videos / media
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Env
+.env
+.env.local
+
+# OS files
+.DS_Store

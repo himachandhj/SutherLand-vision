@@ -40,7 +40,7 @@ def open_video(path: str) -> cv2.VideoCapture:
 
 
 def create_writer(path: str, fps: float, w: int, h: int) -> cv2.VideoWriter:
-    """Create an MP4 video writer using OpenCV's mp4v codec."""
+    """Create an MP4 video writer, preferring browser-friendly H.264 when available."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     width = int(w)
     height = int(h)
@@ -48,12 +48,16 @@ def create_writer(path: str, fps: float, w: int, h: int) -> cv2.VideoWriter:
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Invalid video dimensions for output writer: width={width}, height={height}")
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
-    if not writer.isOpened():
+    last_error: str | None = None
+    for codec in ("avc1", "H264", "X264", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(path, fourcc, safe_fps, (width, height))
+        if writer.isOpened():
+            return writer
         writer.release()
-        raise RuntimeError(f"Unable to open MP4 writer for {path}")
-    return writer
+        last_error = codec
+
+    raise RuntimeError(f"Unable to open MP4 writer for {path} using codecs avc1/H264/X264/mp4v (last tried: {last_error})")
 
 
 def validate_output_video(path: str) -> int:
@@ -159,6 +163,75 @@ def load_model(model_path: str, task: str | None = None) -> YOLO:
         return YOLO(model_path)
     except Exception as e:
         raise RuntimeError(f"Failed to load model '{model_path}': {e}") from e
+
+
+def run_tracking_inference(
+    model: YOLO,
+    frame,
+    *,
+    conf: float,
+    device: str | None,
+    classes: list[int] | None = None,
+    iou: float = 0.70,
+    tracker: str | None = None,
+):
+    """
+    Prefer tracking when available, but fall back to plain prediction when
+    tracker dependencies (for example `lap`) are unavailable.
+    """
+    track_kwargs = {
+        "source": frame,
+        "conf": conf,
+        "device": device,
+        "verbose": False,
+        "iou": iou,
+        "persist": True,
+    }
+    if classes is not None:
+        track_kwargs["classes"] = classes
+    if tracker:
+        track_kwargs["tracker"] = tracker
+
+    try:
+        return model.track(**track_kwargs)
+    except Exception:
+        predict_kwargs = {
+            "source": frame,
+            "conf": conf,
+            "device": device,
+            "verbose": False,
+        }
+        if classes is not None:
+            predict_kwargs["classes"] = classes
+        return model.predict(**predict_kwargs)
+
+
+def extract_detection_payload(results) -> tuple[list, list[int], list[int], list[float], dict]:
+    """
+    Normalize Ultralytics result payloads from both `track()` and `predict()`.
+    """
+    if not results or results[0].boxes is None:
+        return [], [], [], [], {}
+
+    det = results[0].boxes
+    if det.xyxy is None or len(det.xyxy) == 0:
+        return [], [], [], [], getattr(results[0], "names", {}) or {}
+
+    boxes = det.xyxy.cpu().numpy()
+    tids = (
+        det.id.cpu().numpy().astype(int).tolist()
+        if det.id is not None else list(range(len(boxes)))
+    )
+    class_ids = (
+        det.cls.cpu().numpy().astype(int).tolist()
+        if det.cls is not None else [0] * len(boxes)
+    )
+    confs = (
+        det.conf.cpu().numpy().tolist()
+        if det.conf is not None else [1.0] * len(boxes)
+    )
+    names = getattr(results[0], "names", {}) or {}
+    return boxes, tids, class_ids, confs, names
 
 
 # ── Drawing helpers ──────────────────────────────────────────────────────
