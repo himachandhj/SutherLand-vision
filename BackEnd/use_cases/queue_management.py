@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -26,8 +27,10 @@ from use_cases.base import (
     draw_alert_bar,
     draw_hud_panel,
     draw_label,
+    extract_detection_payload,
     load_model,
     open_video,
+    run_tracking_inference,
 )
 
 
@@ -80,6 +83,7 @@ def process_video(
     completed_waits: list[float] = []
     service_abandonment = 0
     previous_active = set()
+    queue_confidences: list[float] = []
     t0 = time.time()
 
     try:
@@ -97,14 +101,13 @@ def process_video(
             cv2.putText(frame, "QUEUE ZONE", (queue_zone[0][0] + 8, queue_zone[0][1] + 24), FONT, 0.5, C_BLUE, 2, cv2.LINE_AA)
 
             try:
-                results = model.track(
-                    source=frame,
+                results = run_tracking_inference(
+                    model,
+                    frame,
                     classes=[PERSON_CLASS],
                     conf=conf,
                     iou=0.70,
                     device=device,
-                    persist=True,
-                    verbose=False,
                 )
             except Exception:
                 writer.write(frame)
@@ -113,29 +116,28 @@ def process_video(
             active_ids = set()
             queue_count = 0
 
-            if results and results[0].boxes is not None:
-                det = results[0].boxes
-                boxes = det.xyxy.cpu().numpy() if det.xyxy is not None and len(det.xyxy) > 0 else []
-                tids = det.id.cpu().numpy().astype(int).tolist() if det.id is not None else list(range(len(boxes)))
+            boxes, tids, _, confs, _ = extract_detection_payload(results)
 
-                for i, bbox in enumerate(boxes):
-                    x1, y1, x2, y2 = map(int, bbox)
-                    tid = tids[i] if i < len(tids) else i
-                    cx = (x1 + x2) // 2
-                    cy = y2
-                    active_ids.add(tid)
+            for i, bbox in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, bbox)
+                tid = tids[i] if i < len(tids) else i
+                conf_score = float(confs[i]) if i < len(confs) else 1.0
+                cx = (x1 + x2) // 2
+                cy = y2
+                active_ids.add(tid)
 
-                    in_queue = _inside_queue(cx, cy, queue_zone)
-                    if in_queue:
-                        queue_count += 1
-                        if tid not in enter_frames:
-                            enter_frames[tid] = frame_num
-                        last_positions[tid] = (cx, cy)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_BLUE, 2)
-                        draw_label(frame, f"#{tid} queued", x1, y1, C_BLUE)
-                    else:
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
-                        draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
+                in_queue = _inside_queue(cx, cy, queue_zone)
+                if in_queue:
+                    queue_count += 1
+                    queue_confidences.append(conf_score)
+                    if tid not in enter_frames:
+                        enter_frames[tid] = frame_num
+                    last_positions[tid] = (cx, cy)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), C_BLUE, 2)
+                    draw_label(frame, f"#{tid} queued", x1, y1, C_BLUE)
+                else:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
+                    draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
 
             departed = previous_active - active_ids
             for tid in departed:
@@ -187,6 +189,26 @@ def process_video(
 
     current_queue_length = queue_history[-1] if queue_history else 0
     average_wait = np.mean(completed_waits) if completed_waits else 0.0
+    processing_time_sec = round(time.time() - t0, 2)
+    duration_sec = round(frame_num / sfps, 2) if sfps else None
+    max_queue_limit = 6
+    summary_row = {
+        "queue_length": current_queue_length,
+        "estimated_wait_sec": round(float(average_wait) * 60.0, 1),
+        "is_breached": max_queue_length > max_queue_limit,
+        "excess_count": max(max_queue_length - max_queue_limit, 0),
+        "staff_count": 1,
+        "confidence_score": round(float(np.mean(queue_confidences)), 4) if queue_confidences else 0.0,
+        "status": "breached" if max_queue_length > max_queue_limit else "normal",
+        "notes": "staff_count is a placeholder default for a single service counter; wait time is derived from tracked departures.",
+        "metadata": {
+            "current_queue_length": current_queue_length,
+            "max_queue_length": max_queue_length,
+            "average_wait_time_min": round(float(average_wait), 2),
+            "service_abandonment": int(service_abandonment),
+            "max_queue_limit": max_queue_limit,
+        },
+    }
 
     return {
         "output_video": out_p,
@@ -196,5 +218,20 @@ def process_video(
             "max_queue_length": max_queue_length,
             "service_abandonment": service_abandonment,
             "frames_analyzed": frame_num,
+            "processing_time_sec": processing_time_sec,
+            "video_duration_sec": duration_sec,
+            "event_rows_generated": 1,
+        },
+        "analytics": {
+            "video_summary": {
+                "frame_count": frame_num,
+                "fps": round(float(sfps), 2) if sfps else None,
+                "duration_sec": duration_sec,
+                "processing_time_sec": processing_time_sec,
+                "simulated_timestamp": datetime.now(timezone.utc).isoformat(),
+                "counter_id": "COUNTER-01",
+                "max_queue_limit": max_queue_limit,
+            },
+            "queue_summaries": [summary_row],
         },
     }

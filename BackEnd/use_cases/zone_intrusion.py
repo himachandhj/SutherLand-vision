@@ -44,6 +44,26 @@ def point_in_polygon(px: int, py: int, polygon: np.ndarray) -> bool:
     return cv2.pointPolygonTest(polygon, (float(px), float(py)), False) >= 0
 
 
+def _extract_person_detections(results) -> tuple[list, list[int], list[float]]:
+    if not results or results[0].boxes is None:
+        return [], [], []
+
+    det = results[0].boxes
+    if det.xyxy is None or len(det.xyxy) == 0:
+        return [], [], []
+
+    boxes = det.xyxy.cpu().numpy()
+    tids = (
+        det.id.cpu().numpy().astype(int).tolist()
+        if det.id is not None else list(range(len(boxes)))
+    )
+    confs = (
+        det.conf.cpu().numpy().tolist()
+        if det.conf is not None else [1.0] * len(boxes)
+    )
+    return boxes, tids, confs
+
+
 def process_video(
     *,
     input_path: str,
@@ -99,55 +119,57 @@ def process_video(
                     iou=0.70, device=device, persist=True, verbose=False
                 )
             except Exception:
-                writer.write(frame)
-                continue
+                try:
+                    results = model.predict(
+                        source=frame,
+                        classes=[PERSON_CLASS],
+                        conf=conf,
+                        device=device,
+                        verbose=False,
+                    )
+                except Exception:
+                    writer.write(frame)
+                    continue
 
             zone_count = 0
 
-            if results and results[0].boxes is not None:
-                det = results[0].boxes
-                boxes = det.xyxy.cpu().numpy() if det.xyxy is not None and len(det.xyxy) > 0 else []
-                tids = (det.id.cpu().numpy().astype(int).tolist()
-                        if det.id is not None else list(range(len(boxes))))
-                confs = (det.conf.cpu().numpy().tolist()
-                         if det.conf is not None else [1.0] * len(boxes))
+            boxes, tids, confs = _extract_person_detections(results)
 
-                for i, bbox in enumerate(boxes):
-                    x1, y1, x2, y2 = map(int, bbox)
-                    tid = tids[i] if i < len(tids) else i
-                    conf_score = float(confs[i]) if i < len(confs) else 1.0
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-                    foot_y = y2  # use foot position for zone check
+            for i, bbox in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, bbox)
+                tid = tids[i] if i < len(tids) else i
+                conf_score = float(confs[i]) if i < len(confs) else 1.0
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+                foot_y = y2  # use foot position for zone check
 
-                    in_zone = point_in_polygon(cx, foot_y, zone)
+                in_zone = point_in_polygon(cx, foot_y, zone)
 
-                    if in_zone:
-                        zone_count += 1
-                        total_intrusions += 1
-                        seen_intruders.add(tid)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 3)
-                        draw_label(frame, f"#{tid} INTRUDER", x1, y1, C_RED)
-                        # Pulsing circle around intruder
-                        radius = max(15, (x2 - x1) // 2)
-                        cv2.circle(frame, (cx, cy), radius, C_RED, 2, cv2.LINE_AA)
-                        if tid not in intrusion_events:
-                            intrusion_events[tid] = {
-                                "object_type": "person",
-                                "first_seen_frame": frame_num,
-                                "last_seen_frame": frame_num,
-                                "observations": 0,
-                                "confidence_sum": 0.0,
-                                "confidence_max": 0.0,
-                            }
-                        event = intrusion_events[tid]
-                        event["last_seen_frame"] = frame_num
-                        event["observations"] = int(event["observations"]) + 1
-                        event["confidence_sum"] = float(event["confidence_sum"]) + conf_score
-                        event["confidence_max"] = max(float(event["confidence_max"]), conf_score)
-                    else:
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
-                        draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
+                if in_zone:
+                    zone_count += 1
+                    total_intrusions += 1
+                    seen_intruders.add(tid)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 3)
+                    draw_label(frame, f"#{tid} INTRUDER", x1, y1, C_RED)
+                    radius = max(15, (x2 - x1) // 2)
+                    cv2.circle(frame, (cx, cy), radius, C_RED, 2, cv2.LINE_AA)
+                    if tid not in intrusion_events:
+                        intrusion_events[tid] = {
+                            "object_type": "person",
+                            "first_seen_frame": frame_num,
+                            "last_seen_frame": frame_num,
+                            "observations": 0,
+                            "confidence_sum": 0.0,
+                            "confidence_max": 0.0,
+                        }
+                    event = intrusion_events[tid]
+                    event["last_seen_frame"] = frame_num
+                    event["observations"] = int(event["observations"]) + 1
+                    event["confidence_sum"] = float(event["confidence_sum"]) + conf_score
+                    event["confidence_max"] = max(float(event["confidence_max"]), conf_score)
+                else:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
+                    draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
 
             peak_zone_occupancy = max(peak_zone_occupancy, zone_count)
 

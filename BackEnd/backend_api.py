@@ -42,6 +42,7 @@ from ppe_detection import (
     create_writer,
     draw_person,
     load_ppe_model,
+    resolve_ppe_model_path,
 )
 
 # -----------------------------------------------------------------------------
@@ -55,7 +56,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 PERSON_MODEL_NAME = os.getenv("PERSON_MODEL", "yolo11m.pt")
-PPE_MODEL_PATH = os.getenv("PPE_MODEL_PATH") or None
+PPE_MODEL_PATH = os.getenv("PPE_MODEL_PATH") or resolve_ppe_model_path()
 DEVICE = os.getenv("DEVICE") or auto_device()
 CONF = float(os.getenv("CONF", "0.40"))
 PPE_CONF = float(os.getenv("PPE_CONF", "0.30"))
@@ -96,7 +97,7 @@ def get_person_model() -> YOLO:
 
 @lru_cache(maxsize=1)
 def get_ppe_detector() -> PPEDetector:
-    ppe_model, ppe_names = load_ppe_model(PPE_MODEL_PATH)
+    ppe_model, ppe_names = load_ppe_model(PPE_MODEL_PATH or None)
     return PPEDetector(ppe_model, ppe_names, PPE_CONF, DEVICE)
 
 

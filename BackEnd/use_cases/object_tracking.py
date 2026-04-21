@@ -11,7 +11,7 @@ Industry Application:
 
 import os
 import time
-from collections import defaultdict
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -19,7 +19,7 @@ import numpy as np
 from use_cases.base import (
     FONT, C_RED, C_GREEN, C_YELLOW, C_WHITE, C_GRAY, C_BLUE, C_CYAN,
     auto_device, open_video, create_writer, build_output_path,
-    load_model, draw_hud_panel, draw_label,
+    load_model, draw_hud_panel, draw_label, extract_detection_payload, run_tracking_inference,
 )
 
 
@@ -43,16 +43,27 @@ class TrackState:
         self.track_id = track_id
         self.class_name = class_name
         self.positions: list[tuple[int, int]] = []
+        self.zone_history: list[str] = []
         self.first_frame = 0
         self.last_frame = 0
+        self.confidence_sum = 0.0
+        self.confidence_max = 0.0
+        self.observations = 0
 
-    def update(self, cx: int, cy: int, frame_num: int):
+    def update(self, cx: int, cy: int, frame_num: int, confidence: float, zone_label: str):
         self.positions.append((cx, cy))
         if len(self.positions) > 60:
             self.positions = self.positions[-60:]
+        if not self.zone_history or self.zone_history[-1] != zone_label:
+            self.zone_history.append(zone_label)
+            if len(self.zone_history) > 12:
+                self.zone_history = self.zone_history[-12:]
         if self.first_frame == 0:
             self.first_frame = frame_num
         self.last_frame = frame_num
+        self.confidence_sum += confidence
+        self.confidence_max = max(self.confidence_max, confidence)
+        self.observations += 1
 
     @property
     def duration_frames(self) -> int:
@@ -61,6 +72,18 @@ class TrackState:
     @property
     def color(self):
         return TRACK_COLORS[self.track_id % len(TRACK_COLORS)]
+
+    @property
+    def avg_confidence(self) -> float:
+        return self.confidence_sum / max(1, self.observations)
+
+
+def _motion_zone_label(cx: int, fw: int) -> str:
+    if cx < fw / 3:
+        return "left"
+    if cx < (2 * fw) / 3:
+        return "center"
+    return "right"
 
 
 def process_video(
@@ -100,50 +123,42 @@ def process_video(
             frame_num += 1
 
             try:
-                results = model.track(
-                    source=frame, conf=conf,
-                    iou=0.70, device=device, persist=True, verbose=False
+                results = run_tracking_inference(
+                    model,
+                    frame,
+                    conf=conf,
+                    iou=0.70,
+                    device=device,
                 )
             except Exception:
                 writer.write(frame)
                 continue
 
-            if results and results[0].boxes is not None:
-                det = results[0].boxes
-                boxes = det.xyxy.cpu().numpy() if det.xyxy is not None and len(det.xyxy) > 0 else []
-                tids = (det.id.cpu().numpy().astype(int).tolist()
-                        if det.id is not None else list(range(len(boxes))))
-                class_ids = det.cls.cpu().numpy().astype(int).tolist() if det.cls is not None else []
-                names = results[0].names
+            boxes, tids, class_ids, confs, names = extract_detection_payload(results)
 
-                for i, bbox in enumerate(boxes):
-                    x1, y1, x2, y2 = map(int, bbox)
-                    tid = tids[i] if i < len(tids) else i
-                    cls_id = class_ids[i] if i < len(class_ids) else 0
-                    cls_name = names.get(cls_id, str(cls_id))
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            for i, bbox in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, bbox)
+                tid = tids[i] if i < len(tids) else i
+                cls_id = class_ids[i] if i < len(class_ids) else 0
+                conf_score = float(confs[i]) if i < len(confs) else 1.0
+                cls_name = names.get(cls_id, str(cls_id))
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                zone_label = _motion_zone_label(cx, fw)
 
-                    if tid not in tracks:
-                        tracks[tid] = TrackState(tid, cls_name)
-                    tracks[tid].update(cx, cy, frame_num)
+                if tid not in tracks:
+                    tracks[tid] = TrackState(tid, cls_name)
+                tracks[tid].update(cx, cy, frame_num, conf_score, zone_label)
 
-                    color = tracks[tid].color
+                color = tracks[tid].color
 
-                    # Draw bounding box
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    draw_label(frame, f"#{tid} {cls_name}", x1, y1, color)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                draw_label(frame, f"#{tid} {cls_name}", x1, y1, color)
 
-                    # Draw trail
-                    pts = tracks[tid].positions
-                    for j in range(1, len(pts)):
-                        alpha = j / len(pts)
-                        thickness = max(1, int(alpha * 3))
-                        cv2.line(frame, pts[j - 1], pts[j], color, thickness, cv2.LINE_AA)
-
-            # Prune stale tracks
-            stale_ids = [tid for tid, t in tracks.items() if frame_num - t.last_frame > timeout]
-            for tid in stale_ids:
-                del tracks[tid]
+                pts = tracks[tid].positions
+                for j in range(1, len(pts)):
+                    alpha = j / len(pts)
+                    thickness = max(1, int(alpha * 3))
+                    cv2.line(frame, pts[j - 1], pts[j], color, thickness, cv2.LINE_AA)
 
             # HUD
             active = {tid: t for tid, t in tracks.items() if frame_num - t.last_frame <= timeout}
@@ -175,6 +190,42 @@ def process_video(
         raise RuntimeError(f"Output missing or empty: {out_p}")
 
     all_durations = [t.duration_frames / sfps for t in tracks.values() if t.duration_frames > 0]
+    processing_time_sec = round(time.time() - t0, 2)
+    duration_sec = round(frame_num / sfps, 2) if sfps else None
+    track_summaries = []
+    anomaly_duration_threshold = 15.0
+
+    for track in sorted(tracks.values(), key=lambda item: item.track_id):
+        entry_time = round(track.first_frame / sfps, 2) if sfps else None
+        exit_time = round(track.last_frame / sfps, 2) if sfps else None
+        duration_in_zone_sec = round(track.duration_frames / sfps, 2) if sfps else None
+        path_sequence = " -> ".join(track.zone_history) if track.zone_history else ""
+        next_zone = track.zone_history[1] if len(track.zone_history) > 1 else None
+        is_anomaly = bool(
+            (duration_in_zone_sec or 0.0) >= anomaly_duration_threshold
+            or len(track.zone_history) >= 4
+        )
+        track_summaries.append(
+            {
+                "object_id": str(track.track_id),
+                "object_type": str(track.class_name),
+                "entry_time": entry_time,
+                "exit_time": exit_time,
+                "duration_in_zone_sec": duration_in_zone_sec,
+                "next_zone": next_zone,
+                "path_sequence": path_sequence,
+                "is_anomaly": is_anomaly,
+                "confidence_score": round(track.avg_confidence, 4),
+                "status": "anomaly" if is_anomaly else "normal",
+                "notes": "path_sequence and next_zone are derived from coarse left/center/right movement zones.",
+                "metadata": {
+                    "first_seen_frame": track.first_frame,
+                    "last_seen_frame": track.last_frame,
+                    "observations": track.observations,
+                    "max_confidence": round(track.confidence_max, 4),
+                },
+            }
+        )
 
     return {
         "output_video": out_p,
@@ -183,5 +234,18 @@ def process_video(
             "unique_objects": len(set(t.track_id for t in tracks.values())),
             "frames_analyzed": frame_num,
             "avg_track_duration": round(np.mean(all_durations), 1) if all_durations else 0.0,
+            "processing_time_sec": processing_time_sec,
+            "video_duration_sec": duration_sec,
+            "event_rows_generated": len(track_summaries),
+        },
+        "analytics": {
+            "video_summary": {
+                "frame_count": frame_num,
+                "fps": round(float(sfps), 2) if sfps else None,
+                "duration_sec": duration_sec,
+                "processing_time_sec": processing_time_sec,
+                "simulated_timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            "track_summaries": track_summaries,
         },
     }
