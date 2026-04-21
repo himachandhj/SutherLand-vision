@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -75,6 +75,29 @@ from app.schemas.integration import (
     MinioProcessSelectedResponse,
     MinioUploadItem,
     MinioUploadResponse,
+)
+from app.schemas.fine_tuning import (
+    FineTuningDatasetRegisterRequest,
+    FineTuningDatasetSelectRequest,
+    FineTuningLabelStatusRequest,
+)
+from app.services.dataset_service import (
+    get_dataset_detail,
+    list_datasets_for_session,
+    register_dataset_for_session,
+    select_dataset_for_session,
+)
+from app.services.labeling_service import (
+    build_dataset_ready_payload,
+    get_label_state,
+    update_label_status,
+)
+from app.services.fine_tuning import (
+    build_step_one_response,
+    get_data_check_status,
+    run_dataset_audit,
+    start_data_check,
+    start_setup,
 )
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
@@ -1753,6 +1776,135 @@ def startup_event() -> None:
     ensure_mock_video()
     load_yolo_model()
     load_ppe_preview_components()
+
+
+@app.get("/api/fine-tuning/{usecase_slug}/step-1", tags=["Fine Tuning"])
+def get_fine_tuning_step_one(usecase_slug: str) -> dict[str, Any]:
+    try:
+        return build_step_one_response(usecase_slug)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning setup: {error}") from error
+
+
+def _fine_tuning_error_status(error: ValueError) -> int:
+    message = str(error).lower()
+    return 404 if "not found" in message else 400
+
+
+@app.get("/api/fine-tuning/{session_id}/datasets", tags=["Fine Tuning"])
+def get_fine_tuning_datasets(session_id: int) -> dict[str, Any]:
+    try:
+        return list_datasets_for_session(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning datasets: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/datasets/register", tags=["Fine Tuning"])
+def register_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningDatasetRegisterRequest,
+) -> dict[str, Any]:
+    try:
+        return register_dataset_for_session(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to register fine-tuning dataset: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/datasets/select", tags=["Fine Tuning"])
+def select_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningDatasetSelectRequest,
+) -> dict[str, Any]:
+    try:
+        return select_dataset_for_session(session_id, payload.dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to select fine-tuning dataset: {error}") from error
+
+
+@app.get("/api/fine-tuning/{session_id}/datasets/{dataset_id}", tags=["Fine Tuning"])
+def get_fine_tuning_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
+    try:
+        return get_dataset_detail(session_id, dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning dataset detail: {error}") from error
+
+
+@app.get("/api/fine-tuning/{session_id}/labels", tags=["Fine Tuning"])
+def get_fine_tuning_label_state(session_id: int) -> dict[str, Any]:
+    try:
+        return get_label_state(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning label state: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/status", tags=["Fine Tuning"])
+def update_fine_tuning_label_status(
+    session_id: int,
+    payload: FineTuningLabelStatusRequest,
+) -> dict[str, Any]:
+    try:
+        return update_label_status(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to update fine-tuning label status: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/prepare-dataset-ready-payload", tags=["Fine Tuning"])
+def prepare_fine_tuning_dataset_ready_payload(session_id: int) -> dict[str, Any]:
+    try:
+        return build_dataset_ready_payload(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to prepare fine-tuning dataset handoff: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/run-data-check", tags=["Fine Tuning"])
+def run_fine_tuning_data_check(session_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    try:
+        audit = start_data_check(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to start data check: {error}") from error
+
+    background_tasks.add_task(run_dataset_audit, int(audit["id"]))
+    return {
+        "session_id": session_id,
+        "audit_id": int(audit["id"]),
+        "status": audit["status"],
+    }
+
+
+@app.get("/api/fine-tuning/{session_id}/data-check-status", tags=["Fine Tuning"])
+def get_fine_tuning_data_check_status(session_id: int) -> dict[str, Any]:
+    try:
+        return get_data_check_status(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load data check status: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/start-setup", tags=["Fine Tuning"])
+def start_fine_tuning_setup(session_id: int) -> dict[str, Any]:
+    try:
+        return start_setup(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to start fine-tuning setup: {error}") from error
 
 
 def image_to_base64(image: np.ndarray) -> str:

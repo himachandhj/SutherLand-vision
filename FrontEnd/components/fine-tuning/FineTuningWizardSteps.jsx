@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   ArrowRight,
   BarChart3,
@@ -49,12 +49,17 @@ function SmallCard({ title, value, helper, tone = "normal" }) {
   );
 }
 
-function ChoiceCard({ active, title, helper, icon: Icon, badge, onClick }) {
+function ChoiceCard({ active, title, helper, icon: Icon, badge, disabled = false, onClick }) {
   return (
     <button
       className={`rounded-2xl border p-4 text-left transition ${
-        active ? "border-brandRed bg-brandRed/5 shadow-sm" : "border-slate-200 bg-white hover:border-brandBlue/30 hover:bg-slate-50"
+        disabled
+          ? "cursor-not-allowed border-slate-200 bg-slate-50 opacity-60"
+          : active
+            ? "border-brandRed bg-brandRed/5 shadow-sm"
+            : "border-slate-200 bg-white hover:border-brandBlue/30 hover:bg-slate-50"
       }`}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
@@ -93,50 +98,93 @@ function HelpBox({ title, children }) {
   );
 }
 
-export function GetStartedStep({ activeUseCase, config, datasetHealth, trainingJob, selectedBaseModel, onAuditDataset, onNext }) {
+function guidanceIcon(index) {
+  return [UploadCloud, Tag, ShieldCheck][index] ?? CheckCircle2;
+}
+
+export function GetStartedStep({
+  activeUseCase,
+  config,
+  datasetHealth,
+  step1Data,
+  stepLoading,
+  stepError,
+  actionLoading,
+  trainingJob,
+  selectedBaseModel,
+  onAuditDataset,
+  onNext,
+}) {
+  const guidanceCards = step1Data?.guidance_cards?.length
+    ? step1Data.guidance_cards
+    : [
+        { title: "Bring examples", description: "Use images or short videos from the place where the model will run." },
+        { title: "Check labels", description: "Tell us if labels are ready, missing, or not clear yet." },
+        { title: "Compare first", description: "Review the new version before replacing anything live." },
+      ];
+  const summaryCards = step1Data?.summary_cards ?? {};
+  const dataCard = summaryCards.data_readiness;
+  const safetyCard = summaryCards.safety;
+  const modelCard = summaryCards.starting_model;
+
   return (
     <StepShell
       eyebrow="Step 1"
-      helper="A short guided path for improving the current model with examples from your own site."
-      title={`Tune ${activeUseCase.title} safely`}
+      helper={step1Data?.subtitle ?? "A short guided path for improving the current model with examples from your own site."}
+      title={step1Data?.title ?? `Tune ${activeUseCase.title} safely`}
       aside={
         <>
-          <SmallCard helper={datasetHealth.readiness} title="Data readiness" tone="accent" value={`${datasetHealth.score}/100`} />
-          <SmallCard helper="Current production stays unchanged until rollout." title="Safety" value="Protected" />
-          <SmallCard helper="Recommended starting point." title="Starting model" value={selectedBaseModel?.label ?? "Recommended"} />
+          <SmallCard
+            helper={dataCard?.status ?? datasetHealth.readiness}
+            title={dataCard?.label ?? "Data readiness"}
+            tone="accent"
+            value={`${dataCard?.score ?? datasetHealth.score}/100`}
+          />
+          <SmallCard
+            helper={safetyCard?.issues?.length ? `${safetyCard.issues.length} item(s) need attention.` : "Current production stays unchanged until rollout."}
+            title={safetyCard?.label ?? "Safety"}
+            value={safetyCard?.status ?? "Protected"}
+          />
+          <SmallCard
+            helper={modelCard?.role ? `${modelCard.role}${modelCard.is_active ? " · active" : ""}` : "Recommended starting point."}
+            title={modelCard?.label ?? "Starting model"}
+            value={modelCard?.name ?? selectedBaseModel?.label ?? "Recommended"}
+          />
         </>
       }
     >
+      {stepLoading ? (
+        <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Loading fine-tuning setup...</div>
+      ) : null}
+      {stepError ? (
+        <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] p-4 text-sm text-brandRed">{stepError}</div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <UploadCloud className="h-5 w-5 text-brandBlue" />
-          <div className="mt-3 text-base font-semibold text-slate-900">Bring examples</div>
-          <p className="mt-2 text-sm leading-6 text-slate-500">Use images or short videos from the place where the model will run.</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <Tag className="h-5 w-5 text-brandBlue" />
-          <div className="mt-3 text-base font-semibold text-slate-900">Check labels</div>
-          <p className="mt-2 text-sm leading-6 text-slate-500">Tell us if labels are ready, missing, or not clear yet.</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <ShieldCheck className="h-5 w-5 text-brandBlue" />
-          <div className="mt-3 text-base font-semibold text-slate-900">Compare first</div>
-          <p className="mt-2 text-sm leading-6 text-slate-500">Review the new version before replacing anything live.</p>
-        </div>
+        {guidanceCards.map((card, index) => {
+          const Icon = guidanceIcon(index);
+          return (
+            <div key={`${card.title}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+              <Icon className="h-5 w-5 text-brandBlue" />
+              <div className="mt-3 text-base font-semibold text-slate-900">{card.title}</div>
+              <p className="mt-2 text-sm leading-6 text-slate-500">{card.description}</p>
+            </div>
+          );
+        })}
       </div>
 
       <div className="mt-6 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="text-sm font-semibold text-slate-900">Recommended next action</div>
-            <p className="mt-1 text-sm text-slate-600">{trainingJob.next_up}</p>
+            <p className="mt-1 text-sm text-slate-600">{step1Data?.recommended_next_action ?? trainingJob.next_up}</p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <Button onClick={onAuditDataset} type="button" variant="outline">
-              Run data check
+            <Button disabled={actionLoading || !step1Data?.actions?.can_run_data_check} onClick={onAuditDataset} type="button" variant="outline">
+              {actionLoading ? "Checking..." : "Run data check"}
             </Button>
-            <Button onClick={onNext} type="button">
-              Start setup
+            <Button disabled={actionLoading || !step1Data} onClick={onNext} type="button">
+              {step1Data?.actions?.can_continue ? "Continue" : "Start setup"}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </div>
@@ -144,7 +192,7 @@ export function GetStartedStep({ activeUseCase, config, datasetHealth, trainingJ
       </div>
 
       <HelpBox title="What does fine-tuning mean?">
-        It means starting with the current model and helping it learn your camera angles, lighting, and real examples. This screen is UI-only for now and is ready for backend hookup later.
+        It means starting with the current model and helping it learn your camera angles, lighting, and real examples. The current production model stays protected until a future rollout step.
       </HelpBox>
     </StepShell>
   );
@@ -154,18 +202,23 @@ export function DataStep({
   datasets,
   selectedDataset,
   selectedDatasetId,
+  selectedDatasetDetail,
   datasetSource,
   supportedFormats,
   datasetHealth,
+  loading,
+  error,
+  actionLoading,
+  registerForm,
   onDatasetSourceChange,
   onDatasetSelect,
-  onDatasetUpload,
+  onDatasetRegister,
+  onRegisterFormChange,
 }) {
-  const uploadInputRef = useRef(null);
   const sourceOptions = [
-    { value: "upload", label: "Upload new files", helper: "Choose images, clips, or a ZIP from your site.", icon: UploadCloud },
+    { value: "upload", label: "Upload new files", helper: "Direct upload is not connected in this step yet.", icon: UploadCloud, disabled: true, badge: "Soon" },
     { value: "existing", label: "Use saved data", helper: "Reuse a dataset already stored in this platform.", icon: Database },
-    { value: "external", label: "Import from another tool", helper: "Bring labels or exports from another labeling tool.", icon: Tag },
+    { value: "external", label: "Import from another tool", helper: "External import can be added in a later step.", icon: Tag, disabled: true, badge: "Soon" },
   ];
 
   return (
@@ -190,30 +243,20 @@ export function DataStep({
         </>
       }
     >
-      <input
-        ref={uploadInputRef}
-        accept=".zip,.json,.yaml,.yml"
-        className="hidden"
-        type="file"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onDatasetUpload(file);
-          event.target.value = "";
-        }}
-      />
+      {loading ? <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Loading saved datasets...</div> : null}
+      {error ? <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] p-4 text-sm text-brandRed">{error}</div> : null}
 
       <div className="grid gap-3 md:grid-cols-3">
         {sourceOptions.map((option) => (
           <ChoiceCard
             key={option.value}
             active={datasetSource === option.value}
+            badge={option.badge}
+            disabled={option.disabled}
             helper={option.helper}
             icon={option.icon}
             title={option.label}
-            onClick={() => {
-              onDatasetSourceChange(option.value);
-              if (option.value === "upload") uploadInputRef.current?.click();
-            }}
+            onClick={() => onDatasetSourceChange(option.value)}
           />
         ))}
       </div>
@@ -222,27 +265,127 @@ export function DataStep({
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Saved data</div>
           <div className="mt-3 space-y-3">
-            {datasets.map((dataset) => (
+            {datasets.length ? datasets.map((dataset) => (
               <button
                 key={dataset.id}
                 className={`w-full rounded-2xl border p-4 text-left transition ${
-                  selectedDatasetId === dataset.id ? "border-brandRed bg-white shadow-sm" : "border-slate-200 bg-white hover:border-brandBlue/30"
+                  selectedDatasetId === dataset.id
+                    ? "border-brandRed bg-white shadow-sm"
+                    : dataset.isInvalid
+                      ? "border-brandRed/20 bg-brandRed/[0.03] hover:border-brandRed/40"
+                      : "border-slate-200 bg-white hover:border-brandBlue/30"
                 }`}
                 onClick={() => onDatasetSelect(dataset.id)}
                 type="button"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-semibold text-slate-900">{dataset.name}</div>
-                  <Badge tone={dataset.labeled ? "compliant" : "warning"}>{dataset.labeled ? "labeled" : "needs labels"}</Badge>
+                  <Badge tone={dataset.isInvalid ? "warning" : dataset.labeled ? "compliant" : "warning"}>
+                    {dataset.isInvalid ? "invalid prefix" : dataset.labeled ? "labeled" : "needs labels"}
+                  </Badge>
                 </div>
                 <p className="mt-1 text-sm text-slate-500">{dataset.item_count} · {dataset.format}</p>
+                {dataset.isInvalid ? <p className="mt-1 text-xs font-semibold text-brandRed">{dataset.invalidReason}</p> : null}
               </button>
-            ))}
+            )) : (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-500">
+                No saved datasets are registered for this use case yet. Register a MinIO prefix to begin.
+              </div>
+            )}
           </div>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">What happens next</div>
+          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Register MinIO dataset</div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="text-sm font-semibold text-slate-700">
+              Dataset name
+              <input
+                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
+                value={registerForm.name}
+                onChange={(event) => onRegisterFormChange("name", event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              Source type
+              <input
+                className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-normal text-slate-500"
+                readOnly
+                value={registerForm.source_type}
+              />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              MinIO bucket
+              <input
+                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
+                value={registerForm.minio_bucket}
+                onChange={(event) => onRegisterFormChange("minio_bucket", event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              MinIO prefix
+              <input
+                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
+                value={registerForm.minio_prefix}
+                onChange={(event) => onRegisterFormChange("minio_prefix", event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              Media type
+              <select
+                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
+                value={registerForm.media_type}
+                onChange={(event) => onRegisterFormChange("media_type", event.target.value)}
+              >
+                <option value="mixed">Mixed</option>
+                <option value="image">Image</option>
+                <option value="video">Video</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+            <div className="flex items-end">
+              <Button className="w-full" disabled={actionLoading} onClick={onDatasetRegister} type="button">
+                {actionLoading ? "Registering..." : "Register dataset"}
+              </Button>
+            </div>
+          </div>
+
+          {selectedDataset ? (
+            <div
+              className={`mt-4 rounded-2xl border p-4 text-sm leading-6 text-slate-600 ${
+                selectedDataset.isInvalid ? "border-brandRed/20 bg-brandRed/[0.04]" : "border-brandBlue/15 bg-brandBlue/[0.04]"
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-semibold text-slate-900">{selectedDataset.name}</div>
+                <Badge tone={selectedDataset.isInvalid ? "warning" : selectedDataset.labeled ? "compliant" : "normal"}>
+                  {selectedDataset.isInvalid ? "invalid" : "selected"}
+                </Badge>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                <div>
+                  <span className="font-semibold text-slate-700">Files:</span> {selectedDataset.file_count}
+                </div>
+                <div>
+                  <span className="font-semibold text-slate-700">Media:</span> {selectedDataset.media_type}
+                </div>
+                <div>
+                  <span className="font-semibold text-slate-700">Labels:</span>{" "}
+                  {selectedDatasetDetail?.label_readiness ?? selectedDataset.label_status}
+                </div>
+              </div>
+              {selectedDatasetDetail?.dataset ? (
+                <div className="mt-2 text-xs text-slate-500">
+                  MinIO: {selectedDatasetDetail.dataset.minio_bucket}/{selectedDatasetDetail.dataset.minio_prefix}
+                </div>
+              ) : null}
+              {selectedDataset.isInvalid ? (
+                <div className="mt-2 text-xs font-semibold text-brandRed">This dataset is not auto-selected because no supported files were found at the registered prefix.</div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="mt-5 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">What happens next</div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             {datasetHealth.top_actions.map((action) => (
               <div key={action} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
@@ -265,12 +408,18 @@ export function LabelsStep({
   selectedDataset,
   supportedFormats,
   datasetHealth,
+  labelState,
+  datasetReadyPayload,
+  loading,
+  error,
+  actionLoading,
   onLabelReadinessChange,
   onLabelingModeChange,
   onAuditDataset,
 }) {
   const labelOptions = [
     { value: "yes", label: "Yes, labels are ready", helper: "Use this if boxes or tags already exist.", badge: "Fastest" },
+    { value: "partial", label: "Some labels are ready", helper: "Use this when coverage needs review before training.", badge: "Review" },
     { value: "no", label: "No, labels are needed", helper: "Prepare a labeling path before training.", badge: "Needs setup" },
     { value: "unsure", label: "Not sure yet", helper: "Run a check and decide after we inspect the files.", badge: "Check first" },
   ];
@@ -292,6 +441,15 @@ export function LabelsStep({
         </>
       }
     >
+      {loading ? <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">Loading label status...</div> : null}
+      {error ? <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] p-4 text-sm text-brandRed">{error}</div> : null}
+      {labelState ? (
+        <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-4 text-sm leading-6 text-slate-600">
+          <div className="font-semibold text-slate-900">{labelState.guidance_title}</div>
+          <p>{labelState.guidance_message}</p>
+        </div>
+      ) : null}
+
       <div className="grid gap-3 md:grid-cols-3">
         {labelOptions.map((option) => (
           <ChoiceCard
@@ -301,6 +459,7 @@ export function LabelsStep({
             helper={option.helper}
             icon={Tag}
             title={option.label}
+            disabled={actionLoading}
             onClick={() => onLabelReadinessChange(option.value)}
           />
         ))}
@@ -325,10 +484,20 @@ export function LabelsStep({
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
             <div className="text-sm font-semibold text-slate-900">Next best action</div>
             <p className="mt-2 text-sm leading-6 text-slate-500">Run a data check so training starts from clean examples.</p>
-            <Button className="mt-4" onClick={onAuditDataset} type="button" variant="outline">
-              Run data check
+            <Button className="mt-4" disabled={actionLoading} onClick={onAuditDataset} type="button" variant="outline">
+              {actionLoading ? "Working..." : "Run data check"}
             </Button>
           </div>
+        </div>
+      ) : null}
+
+      {labelReadiness === "partial" ? (
+        <div className="mt-5 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] p-5">
+          <div className="text-sm font-semibold text-slate-900">Labels need review</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Partial labels can be tracked now, but training setup should wait until coverage is confirmed.</p>
+          <Button className="mt-4" disabled={actionLoading} onClick={onAuditDataset} type="button" variant="outline">
+            Run data check
+          </Button>
         </div>
       ) : null}
 
@@ -358,13 +527,21 @@ export function LabelsStep({
           <div className="text-sm font-semibold text-slate-900">Not sure is okay</div>
           <p className="mt-2 text-sm leading-6 text-slate-500">Run a check first. If labels are missing, choose a labeling path before training.</p>
           <div className="mt-4 flex flex-wrap gap-3">
-            <Button onClick={onAuditDataset} type="button">
-              Run data check
+            <Button disabled={actionLoading} onClick={onAuditDataset} type="button">
+              {actionLoading ? "Working..." : "Run data check"}
             </Button>
             <Button onClick={() => onLabelReadinessChange("no")} type="button" variant="outline">
               Prepare labels
             </Button>
           </div>
+        </div>
+      ) : null}
+
+      {datasetReadyPayload ? (
+        <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+          <div className="font-semibold text-slate-900">Step 4 handoff prepared</div>
+          <p>Status: {datasetReadyPayload.status}</p>
+          <p className="break-all">Dataset URI: {datasetReadyPayload.prepared_dataset_uri}</p>
         </div>
       ) : null}
     </StepShell>
