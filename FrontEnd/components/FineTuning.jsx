@@ -21,6 +21,7 @@ import {
   loadDatasetDetail,
   loadDatasets,
   loadLabelState,
+  importLabelExport,
   loadStepOne,
   prepareDatasetReadyPayload,
   registerDataset,
@@ -108,6 +109,19 @@ function normalizeDatasetName(name) {
   return normalized;
 }
 
+function getLabelStatusDisplay(labelStatus, invalid = false) {
+  if (invalid) return "Invalid prefix";
+  if (labelStatus === "ready") return "Labels ready";
+  if (labelStatus === "partial") return "Partial labels";
+  if (labelStatus === "missing") return "Needs labels";
+  return "Labels unknown";
+}
+
+function getLabelStatusTone(labelStatus, invalid = false) {
+  if (invalid) return "warning";
+  return labelStatus === "ready" ? "compliant" : "warning";
+}
+
 function getDatasetApiId(dataset) {
   const id = dataset?.dataset_id ?? dataset?.id;
   return id === undefined || id === null ? "" : String(id);
@@ -174,6 +188,7 @@ function mapDatasetFromApi(dataset) {
   const fileCount = Number(dataset.file_count ?? 0);
   const mediaType = dataset.media_type ?? "unknown";
   const invalid = isDatasetInvalid(dataset);
+  const labelDisplay = getLabelStatusDisplay(labelStatus, invalid);
   return {
     id: getDatasetApiId(dataset),
     name: normalizeDatasetName(dataset.name),
@@ -184,6 +199,8 @@ function mapDatasetFromApi(dataset) {
     item_count: `${fileCount} supported ${fileCount === 1 ? "file" : "files"}`,
     labeled: labelStatus === "ready",
     label_status: labelStatus,
+    label_display: labelDisplay,
+    label_tone: getLabelStatusTone(labelStatus, invalid),
     annotation_mode: labelStatus,
     status: dataset.readiness_status ?? dataset.audit_status ?? "not_run",
     isInvalid: invalid,
@@ -279,6 +296,170 @@ function buildDatasetHealth(step1Data, dataCheckStatus, labelState, selectedData
   };
 }
 
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function titleCaseLabel(value) {
+  return String(value || "Unknown")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeClassDistribution(distribution) {
+  if (!distribution || typeof distribution !== "object") return [];
+
+  const entries = Array.isArray(distribution)
+    ? distribution.map((item) => [
+        item?.class_name ?? item?.class ?? item?.label ?? item?.name,
+        item?.count ?? item?.value ?? item?.items ?? item?.total,
+      ])
+    : Object.entries(distribution).map(([name, value]) => [
+        name,
+        typeof value === "object" && value !== null ? value.count ?? value.value ?? value.total : value,
+      ]);
+
+  const rows = entries
+    .map(([name, count]) => ({
+      name: titleCaseLabel(name),
+      count: firstFiniteNumber(count) ?? 0,
+    }))
+    .filter((row) => row.name && row.count > 0);
+
+  const total = rows.reduce((sum, row) => sum + row.count, 0);
+  if (!total) return [];
+
+  return rows
+    .map((row) => ({
+      ...row,
+      percentage: Math.round((row.count / total) * 100),
+    }))
+    .sort((first, second) => second.count - first.count);
+}
+
+function getClassBalanceMessage(classRows) {
+  if (!classRows.length) {
+    return {
+      status: "unavailable",
+      title: "Class distribution unavailable",
+      message: "Class distribution not available yet.",
+      tone: "normal",
+    };
+  }
+
+  if (classRows.length === 1) {
+    return {
+      status: "single_class",
+      title: "Single class dataset",
+      message: "Balance check unavailable until multiple classes are present.",
+      tone: "normal",
+    };
+  }
+
+  const counts = classRows.map((row) => row.count);
+  const smallest = Math.min(...counts);
+  const largest = Math.max(...counts);
+  const ratio = largest > 0 ? smallest / largest : 0;
+
+  if (ratio >= 0.5) {
+    return {
+      status: "good",
+      title: "Good balance",
+      message: "Classes are reasonably balanced for an initial training setup.",
+      tone: "accent",
+    };
+  }
+
+  if (ratio >= 0.3) {
+    return {
+      status: "partial",
+      title: "Partially balanced",
+      message: "One class is smaller than the others. More examples may improve accuracy.",
+      tone: "warn",
+    };
+  }
+
+  return {
+    status: "imbalanced",
+    title: "Highly imbalanced dataset",
+    message: "Better class balance may improve training accuracy.",
+    tone: "warn",
+  };
+}
+
+function buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset, datasetDetail, datasetReadyPayload }) {
+  const dataCard = step1Data?.summary_cards?.data_readiness ?? {};
+  const auditSummary =
+    dataCheckStatus?.summary ??
+    datasetDetail?.dataset?.latest_audit?.summary ??
+    step1Data?.data_check_summary ??
+    {};
+  const contract = datasetReadyPayload ?? {};
+  const classDistribution =
+    contract.class_distribution ??
+    auditSummary.class_distribution ??
+    auditSummary.class_counts ??
+    auditSummary.label_distribution ??
+    dataCard.class_distribution ??
+    selectedDataset?.raw?.class_distribution ??
+    {};
+  const classRows = normalizeClassDistribution(classDistribution);
+  const balance = getClassBalanceMessage(classRows);
+  const itemCount = firstFiniteNumber(
+    contract.item_count,
+    auditSummary.item_count,
+    auditSummary.file_count,
+    auditSummary.supported_file_count,
+    dataCard.file_count,
+    selectedDataset?.file_count,
+    selectedDataset?.raw?.file_count,
+  );
+  const labelCount = firstFiniteNumber(
+    contract.label_count,
+    auditSummary.label_count,
+    auditSummary.label_file_count,
+    dataCard.label_count,
+    selectedDataset?.raw?.label_count,
+  );
+  const labelStatus = String(
+    contract.label_status ??
+      datasetDetail?.label_readiness ??
+      datasetDetail?.dataset?.label_status ??
+      selectedDataset?.label_status ??
+      dataCard.label_status ??
+      "unknown",
+  ).toLowerCase();
+  const readinessScore = firstFiniteNumber(contract.readiness_score, dataCheckStatus?.readiness_score, dataCard.score);
+  const labelsMissing = labelStatus === "missing" || labelCount === 0;
+
+  let recommendation = "Dataset looks usable. Continue to the next step.";
+  if (labelsMissing) {
+    recommendation = "Labels are missing. Go to the Labels step before training.";
+  } else if (balance.status === "imbalanced") {
+    recommendation = "Review class balance before continuing.";
+  } else if (balance.status === "unavailable") {
+    recommendation = "Class distribution is not available yet. Run a data check before continuing.";
+  }
+
+  return {
+    classRows,
+    balance,
+    itemCount,
+    labelCount,
+    labelStatus,
+    labelsMissing,
+    readinessScore,
+    recommendation,
+  };
+}
+
 function buildTrainingJob(mockTrainingJob, step1Data, dataCheckStatus) {
   if (dataCheckStatus?.status === "running") {
     return {
@@ -351,13 +532,17 @@ export default function FineTuning({ activeUseCase }) {
     () => buildDatasetHealth(step1Data, dataCheckStatus, labelState, selectedDataset),
     [step1Data, dataCheckStatus, labelState, selectedDataset],
   );
+  const stepOneDatasetState = useMemo(
+    () => buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset, datasetDetail, datasetReadyPayload }),
+    [step1Data, dataCheckStatus, selectedDataset, datasetDetail, datasetReadyPayload],
+  );
   const trainingJob = useMemo(() => buildTrainingJob(mockState.trainingJob, step1Data, dataCheckStatus), [mockState.trainingJob, step1Data, dataCheckStatus]);
 
   const steps = useMemo(
     () => [
       { id: "start", label: "Get started", helper: "Understand the safe path" },
-      { id: "data", label: "Your data", helper: "Choose examples" },
-      { id: "labels", label: "Labels", helper: "Say if labels are ready" },
+      { id: "data", label: "Your data", helper: "Register MinIO data" },
+      { id: "labels", label: "Labels", helper: "Choose labeling path" },
       { id: "plan", label: "Training plan", helper: "Pick model and goal" },
       { id: "training", label: "Watch training", helper: "Track progress" },
       { id: "compare", label: "Compare results", helper: "Choose the best version" },
@@ -733,6 +918,41 @@ export default function FineTuning({ activeUseCase }) {
     }
   };
 
+  const handleLabelImport = async (file) => {
+    if (!sessionId) {
+      setError("labels", "Fine-tuning session is not loaded yet.");
+      return null;
+    }
+    if (!file) {
+      setError("labels", "Choose a YOLO label zip before importing.");
+      return null;
+    }
+    setLoadingFlag("labelImport", true);
+    setError("labels", "");
+    try {
+      const payload = await importLabelExport(sessionId, file);
+      setLabelState(payload.label_state ?? null);
+      setDatasetReadyPayload(null);
+      const refreshed = await loadDatasetsState({ silent: true, repairBackendSelection: true });
+      const detailId = refreshed?.selectedDatasetId ?? formState.selectedDatasetId;
+      if (detailId) await loadDatasetDetailState(detailId, { silent: true });
+      await loadLabelStateFromBackend({ silent: true });
+      setPageMessage(
+        payload.label_status === "ready"
+          ? "Imported labels validated. The dataset can now be prepared for handoff."
+          : "Imported labels validated with partial coverage. Review warnings before training setup.",
+      );
+      return payload;
+    } catch (error) {
+      const message = getErrorMessage(error, "Unable to import labels.");
+      setError("labels", message);
+      setPageMessage(message);
+      return null;
+    } finally {
+      setLoadingFlag("labelImport", false);
+    }
+  };
+
   const handlePrepareDatasetReadyPayload = async () => {
     if (!sessionId) {
       setError("labels", "Fine-tuning session is not loaded yet.");
@@ -748,11 +968,11 @@ export default function FineTuning({ activeUseCase }) {
         goNext();
         return;
       }
-      setPageMessage(
-        payload.status === "needs_labeling"
-          ? "Dataset handoff says labels are missing. Add labels before training setup."
-          : "Dataset handoff says labels need review before training setup.",
-      );
+      if (payload.status === "blocked" || payload.status === "needs_labeling") {
+        setPageMessage("Dataset handoff is blocked because labels are missing or invalid. Add labels before training setup.");
+        return;
+      }
+      setPageMessage("Dataset handoff was prepared with warnings. Review label coverage before training setup.");
     } catch (error) {
       setError("labels", getErrorMessage(error, "Unable to prepare dataset handoff."));
     } finally {
@@ -827,6 +1047,7 @@ export default function FineTuning({ activeUseCase }) {
           config={config}
           datasetHealth={datasetHealth}
           selectedBaseModel={selectedBaseModel}
+          stepOneDatasetState={stepOneDatasetState}
           step1Data={step1Data}
           stepError={errors.step1}
           stepLoading={Boolean(loading.step1)}
@@ -862,7 +1083,7 @@ export default function FineTuning({ activeUseCase }) {
     if (activeStepId === "labels") {
       return (
         <LabelsStep
-          actionLoading={Boolean(loading.labelStatus || loading.dataCheck || loading.handoff)}
+          actionLoading={Boolean(loading.labelStatus || loading.dataCheck || loading.handoff || loading.labelImport)}
           datasetHealth={datasetHealth}
           datasetReadyPayload={datasetReadyPayload}
           error={errors.labels}
@@ -871,8 +1092,10 @@ export default function FineTuning({ activeUseCase }) {
           labelingMode={formState.labelingMode}
           loading={Boolean(loading.labels)}
           selectedDataset={selectedDataset}
+          selectedDatasetDetail={datasetDetail}
           supportedFormats={config.supportedFormats}
           onAuditDataset={handleAuditDataset}
+          onLabelImport={handleLabelImport}
           onLabelReadinessChange={handleLabelReadinessChange}
           onLabelingModeChange={(value) => updateFormField("labelingMode", value)}
         />
@@ -956,6 +1179,7 @@ export default function FineTuning({ activeUseCase }) {
             <div className="rounded-2xl border border-white bg-white/90 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Data</div>
               <div className="mt-1 truncate text-sm font-semibold text-slate-900">{selectedDataset?.name ?? "Choose data"}</div>
+              {selectedDataset ? <div className="mt-1 truncate text-xs font-semibold text-slate-500">{selectedDataset.label_display}</div> : null}
             </div>
             <div className="rounded-2xl border border-white bg-white/90 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Goal</div>

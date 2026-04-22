@@ -18,14 +18,30 @@ class FineTuningLabelStatusRequest(BaseModel):
     label_status: str
 
 
+class FineTuningSplitSummary(BaseModel):
+    train: int = 0
+    val: int = 0
+    test: int = 0
+
+
 class FineTuningDatasetReadyPayload(BaseModel):
     workspace_id: str
-    dataset_id: int
+    dataset_id: str
+    dataset_version_id: str
     use_case_id: str
     dataset_name: str
     label_status: str
-    readiness_score: int | None = None
+    readiness_score: int
     prepared_dataset_uri: str
-    classes: list[str] = Field(default_factory=list)
-    accepted_formats: list[str] = Field(default_factory=list)
+    prepared_dataset_manifest_uri: str
+    annotation_format: str
+    task_type: str
+    split_summary: FineTuningSplitSummary = Field(default_factory=FineTuningSplitSummary)
+    class_distribution: dict[str, int] = Field(default_factory=dict)
+    item_count: int
+    label_count: int
+    warnings: list[str] = Field(default_factory=list)
+    blocking_issues: list[str] = Field(default_factory=list)
+    schema_version: str = "v1"
+    data_fingerprint: str
     status: str

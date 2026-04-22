@@ -9,11 +9,11 @@ from app.core.database import (
     update_dataset_label_status,
     update_fine_tuning_session,
 )
-from app.schemas.fine_tuning import FineTuningDatasetReadyPayload
+from app.services.dataset_label_status import normalize_label_status, resolve_label_status
+from app.services.dataset_contract_service import build_finalized_dataset_ready_payload
 
 
 SUPPORTED_LABEL_STATUSES = {"ready", "missing", "partial", "unknown"}
-ACCEPTED_FORMATS = ["zip_images", "zip_clips", "yolo_labels"]
 
 
 def _payload_to_dict(payload: Any) -> dict[str, Any]:
@@ -22,19 +22,6 @@ def _payload_to_dict(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return dict(payload)
-
-
-def normalize_label_status(label_status: str | None) -> str:
-    value = (label_status or "unknown").strip().lower().replace(" ", "_")
-    if value in {"ready", "present", "available", "labeled"}:
-        return "ready"
-    if value in {"missing", "none", "not_found", "no_labels"}:
-        return "missing"
-    if value in {"partial", "incomplete", "partially_labeled"}:
-        return "partial"
-    if value in {"unknown", "not_sure", "unsure", ""}:
-        return "unknown"
-    raise ValueError("Unsupported label status. Use ready, missing, partial, or unknown.")
 
 
 def _guidance_for_status(label_status: str) -> dict[str, Any]:
@@ -98,8 +85,13 @@ def _readiness_score(session: dict[str, Any], audit: dict[str, Any] | None) -> i
 
 
 def _label_state_response(session: dict[str, Any], dataset: dict[str, Any]) -> dict[str, Any]:
-    label_status = normalize_label_status(dataset.get("label_status"))
     audit = _latest_audit(int(session["id"]), int(dataset["id"]))
+    audit_summary = audit.get("summary_json", {}) if audit else {}
+    item_count = audit_summary.get("file_count") if isinstance(audit_summary, dict) else None
+    label_count = audit_summary.get("label_file_count") if isinstance(audit_summary, dict) else None
+    label_status = resolve_label_status(dataset.get("label_status"), item_count=item_count, label_count=label_count)
+    if label_status != normalize_label_status(dataset.get("label_status")):
+        dataset = update_dataset_label_status(int(dataset["id"]), label_status=label_status)
     guidance = _guidance_for_status(label_status)
     readiness_score = _readiness_score(session, audit)
     audit_status = audit.get("status") if audit else dataset.get("audit_status", "not_run")
@@ -134,61 +126,5 @@ def update_label_status(session_id: int, payload: Any) -> dict[str, Any]:
     return _label_state_response(refreshed_session, updated_dataset)
 
 
-def _prepared_dataset_uri(dataset: dict[str, Any]) -> str:
-    bucket = str(dataset.get("minio_bucket") or "").strip()
-    prefix = str(dataset.get("minio_prefix") or "").strip().strip("/")
-    if not bucket:
-        raise ValueError("Selected dataset is missing a MinIO bucket.")
-    if prefix:
-        return f"minio://{bucket}/{prefix}"
-    return f"minio://{bucket}"
-
-
-def _handoff_status(label_status: str) -> str:
-    if label_status == "ready":
-        return "ready_for_training"
-    if label_status == "missing":
-        return "needs_labeling"
-    return "needs_review"
-
-
-def _model_dump(model: FineTuningDatasetReadyPayload) -> dict[str, Any]:
-    if hasattr(model, "model_dump"):
-        return model.model_dump()
-    return model.dict()
-
-
 def build_dataset_ready_payload(session_id: int) -> dict[str, Any]:
-    session, dataset = _session_and_selected_dataset(session_id)
-    if dataset.get("source_type") != "minio":
-        raise ValueError("Only MinIO-backed datasets can be prepared for the training handoff.")
-
-    label_status = normalize_label_status(dataset.get("label_status"))
-    audit = _latest_audit(int(session["id"]), int(dataset["id"]))
-    readiness_score = _readiness_score(session, audit)
-    status = _handoff_status(label_status)
-    guidance = _guidance_for_status(label_status)
-
-    payload = FineTuningDatasetReadyPayload(
-        workspace_id=f"fine-tuning-session-{session_id}",
-        dataset_id=int(dataset["id"]),
-        use_case_id=str(session["usecase_slug"]),
-        dataset_name=str(dataset["name"]),
-        label_status=label_status,
-        readiness_score=readiness_score,
-        prepared_dataset_uri=_prepared_dataset_uri(dataset),
-        # TODO Step 4: populate this from lightweight label schema/class parsing.
-        classes=[],
-        accepted_formats=ACCEPTED_FORMATS,
-        status=status,
-    )
-    update_fine_tuning_session(
-        int(session["id"]),
-        current_step=max(int(session.get("current_step") or 1), 3),
-        recommended_next_action=(
-            "Dataset is ready for training setup handoff."
-            if status == "ready_for_training"
-            else guidance["guidance_message"]
-        ),
-    )
-    return _model_dump(payload)
+    return build_finalized_dataset_ready_payload(session_id)

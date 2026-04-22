@@ -92,6 +92,7 @@ from app.services.labeling_service import (
     get_label_state,
     update_label_status,
 )
+from app.services.label_import_service import import_yolo_labels_for_session
 from app.services.fine_tuning import (
     build_step_one_response,
     get_data_check_status,
@@ -1858,6 +1859,24 @@ def update_fine_tuning_label_status(
         raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Unable to update fine-tuning label status: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/import", tags=["Fine Tuning"])
+async def import_fine_tuning_labels(
+    session_id: int,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    try:
+        content = await file.read()
+        return import_yolo_labels_for_session(
+            session_id,
+            filename=file.filename or "labels.zip",
+            content=content,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to import fine-tuning labels: {error}") from error
 
 
 @app.post("/api/fine-tuning/{session_id}/prepare-dataset-ready-payload", tags=["Fine Tuning"])

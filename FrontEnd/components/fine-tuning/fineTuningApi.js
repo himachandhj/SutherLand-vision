@@ -82,6 +82,16 @@ export function updateLabelStatus(sessionId, labelStatus) {
   });
 }
 
+export async function importLabelExport(sessionId, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/import`, {
+    method: "POST",
+    body: formData,
+  });
+  return parseApiResponse(response);
+}
+
 export function prepareDatasetReadyPayload(sessionId) {
   return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/prepare-dataset-ready-payload`, {
     method: "POST",

@@ -10,6 +10,7 @@ from app.core.database import (
     get_fine_tuning_session,
     get_latest_dataset_audit_for_dataset,
     list_datasets_for_usecase,
+    update_dataset_audit_summary,
     update_fine_tuning_session,
 )
 from app.core.minio_integration import (
@@ -18,6 +19,7 @@ from app.core.minio_integration import (
     normalize_prefix,
     validate_bucket_access,
 )
+from app.services.dataset_label_status import compute_label_status, label_coverage, normalize_label_status, resolve_label_status
 from app.services.fine_tuning import LABEL_EXTENSIONS, SUPPORTED_MEDIA_EXTENSIONS
 
 
@@ -43,12 +45,7 @@ def _get_session_or_raise(session_id: int) -> dict[str, Any]:
 
 
 def _normalize_label_status(status: str | None) -> str:
-    value = (status or "unknown").strip().lower()
-    if value in {"ready", "present"}:
-        return "ready"
-    if value in {"missing", "partial", "unknown"}:
-        return value
-    return "unknown"
+    return normalize_label_status(status)
 
 
 def _normalize_audit_status(status: str | None) -> str:
@@ -133,7 +130,7 @@ def _validate_minio_dataset(bucket: str, prefix: str, requested_media_type: str 
     if unsupported_objects:
         warnings.append(f"{len(unsupported_objects)} unsupported files were ignored while registering this dataset.")
 
-    label_status = "ready" if label_objects else ("missing" if media_objects else "unknown")
+    label_status = compute_label_status(len(media_objects), len(label_objects))
 
     return {
         "bucket_accessible": True,
@@ -143,6 +140,7 @@ def _validate_minio_dataset(bucket: str, prefix: str, requested_media_type: str 
         "file_count": len(media_objects),
         "total_objects": len(objects),
         "label_file_count": len(label_objects),
+        "label_coverage": round(label_coverage(len(media_objects), len(label_objects)), 4),
         "unsupported_file_count": len(unsupported_objects),
         "label_status": label_status,
         "media_type": _infer_media_type(object_names, requested_media_type),
@@ -152,13 +150,17 @@ def _validate_minio_dataset(bucket: str, prefix: str, requested_media_type: str 
 
 def _dataset_summary(dataset: dict[str, Any], selected_dataset_id: int | None = None) -> dict[str, Any]:
     latest_audit = get_latest_dataset_audit_for_dataset(dataset_id=int(dataset["id"]))
+    audit_summary = latest_audit.get("summary_json", {}) if latest_audit else {}
+    label_count = audit_summary.get("label_file_count") if isinstance(audit_summary, dict) else None
+    item_count = audit_summary.get("file_count") if isinstance(audit_summary, dict) else None
+    label_status = resolve_label_status(dataset.get("label_status"), item_count=item_count, label_count=label_count)
     return {
         "dataset_id": int(dataset["id"]),
         "name": dataset["name"],
         "source_type": dataset["source_type"],
         "media_type": dataset.get("media_type") or "unknown",
         "file_count": int(dataset.get("file_count") or 0),
-        "label_status": _normalize_label_status(dataset.get("label_status")),
+        "label_status": label_status,
         "audit_status": _normalize_audit_status(dataset.get("audit_status")),
         "readiness_status": latest_audit.get("status") if latest_audit else None,
         "readiness_score": latest_audit.get("readiness_score") if latest_audit else None,
@@ -167,6 +169,31 @@ def _dataset_summary(dataset: dict[str, Any], selected_dataset_id: int | None = 
         "is_selected": selected_dataset_id == int(dataset["id"]),
         "created_at": dataset.get("created_at"),
     }
+
+
+def _refresh_minio_dataset_state(dataset: dict[str, Any]) -> dict[str, Any]:
+    if dataset.get("source_type") != "minio":
+        return dataset
+    try:
+        validation = _validate_minio_dataset(
+            str(dataset.get("minio_bucket") or settings.minio_bucket),
+            str(dataset.get("minio_prefix") or ""),
+            dataset.get("media_type"),
+        )
+    except Exception:
+        return dataset
+
+    file_count = int(validation["file_count"])
+    label_status = str(validation["label_status"])
+    if file_count == int(dataset.get("file_count") or 0) and label_status == _normalize_label_status(dataset.get("label_status")):
+        return dataset
+
+    return update_dataset_audit_summary(
+        int(dataset["id"]),
+        file_count=file_count,
+        label_status=label_status,
+        audit_status=str(dataset.get("audit_status") or "not_run"),
+    )
 
 
 def _session_state(session: dict[str, Any]) -> dict[str, Any]:
@@ -183,7 +210,7 @@ def _session_state(session: dict[str, Any]) -> dict[str, Any]:
 def list_datasets_for_session(session_id: int) -> dict[str, Any]:
     session = _get_session_or_raise(session_id)
     selected_dataset_id = int(session["selected_dataset_id"]) if session.get("selected_dataset_id") else None
-    datasets = list_datasets_for_usecase(str(session["usecase_slug"]))
+    datasets = [_refresh_minio_dataset_state(dataset) for dataset in list_datasets_for_usecase(str(session["usecase_slug"]))]
     return {
         **_session_state(session),
         "datasets": [_dataset_summary(dataset, selected_dataset_id) for dataset in datasets],
@@ -275,7 +302,9 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
 
     audit_summary = latest_audit.get("summary_json", {}) if latest_audit else {}
     label_count = int(audit_summary.get("label_file_count") or 0) if isinstance(audit_summary, dict) else 0
-    labels_available = _normalize_label_status(dataset.get("label_status")) == "ready" or label_count > 0
+    item_count = int(audit_summary.get("file_count") or dataset.get("file_count") or 0) if isinstance(audit_summary, dict) else int(dataset.get("file_count") or 0)
+    label_status = resolve_label_status(dataset.get("label_status"), item_count=item_count, label_count=(label_count if latest_audit else None))
+    labels_available = label_status in {"ready", "partial"}
 
     return {
         **_session_state(session),
@@ -299,5 +328,5 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
             ),
         },
         # TODO Step 3: replace this light signal with label schema/class coverage checks.
-        "label_readiness": "ready" if labels_available else _normalize_label_status(dataset.get("label_status")),
+        "label_readiness": label_status,
     }

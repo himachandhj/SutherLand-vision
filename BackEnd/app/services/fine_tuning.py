@@ -15,11 +15,13 @@ from app.core.database import (
     get_fine_tuning_session,
     get_latest_dataset,
     get_latest_dataset_audit,
+    get_latest_dataset_audit_for_dataset,
     get_open_fine_tuning_session,
     update_dataset_audit_summary,
     update_fine_tuning_session,
     upsert_default_dataset,
 )
+from app.services.dataset_label_status import compute_label_status, label_coverage
 from app.core.minio_integration import (
     MinioConnectionConfig,
     create_client,
@@ -132,12 +134,34 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
     session = ensure_step_one_session(usecase_slug)
     model = get_active_model_version(usecase_slug) or ensure_default_model_version(usecase_slug=usecase_slug)
     dataset = get_dataset(int(session["selected_dataset_id"])) if session.get("selected_dataset_id") else get_latest_dataset(usecase_slug)
-    latest_audit = get_latest_dataset_audit(session_id=int(session["id"]), completed_only=True)
+    latest_audit = (
+        get_latest_dataset_audit_for_dataset(
+            dataset_id=int(dataset["id"]),
+            session_id=int(session["id"]),
+            completed_only=True,
+        )
+        if dataset
+        else None
+    )
+    live_check = None
+    if dataset and latest_audit is None and dataset.get("source_type") == "minio":
+        try:
+            live_check = inspect_minio_dataset(dataset)
+            dataset = update_dataset_audit_summary(
+                int(dataset["id"]),
+                file_count=int(live_check["summary"].get("file_count", 0)),
+                label_status=str(live_check["summary"].get("label_status", "unknown")),
+                audit_status=str(dataset.get("audit_status") or "not_run"),
+            )
+        except Exception:
+            live_check = None
 
     readiness_score = int(
         latest_audit.get("readiness_score")
         if latest_audit and latest_audit.get("readiness_score") is not None
-        else session.get("readiness_score") or 0
+        else live_check.get("readiness_score")
+        if live_check
+        else 0
     )
     recommended_next_action = _recommended_action(readiness_score, dataset, latest_audit)
 
@@ -148,8 +172,8 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
             recommended_next_action=recommended_next_action,
         )
 
-    audit_summary = latest_audit.get("summary_json", {}) if latest_audit else {}
-    issues = latest_audit.get("issues_json", []) if latest_audit else []
+    audit_summary = latest_audit.get("summary_json", {}) if latest_audit else (live_check.get("summary", {}) if live_check else {})
+    issues = latest_audit.get("issues_json", []) if latest_audit else (live_check.get("issues", []) if live_check else [])
 
     return {
         "session_id": int(session["id"]),
@@ -174,7 +198,7 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
             "data_readiness": {
                 "label": "Data readiness",
                 "score": readiness_score,
-                "status": _readiness_status(readiness_score) if latest_audit else "not_checked",
+                "status": _readiness_status(readiness_score) if latest_audit or live_check else "not_checked",
                 "file_count": int(dataset.get("file_count") or 0) if dataset else 0,
                 "label_status": dataset.get("label_status", "unknown") if dataset else "missing",
                 "issues_count": len(issues),
@@ -190,7 +214,7 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
                 "label": "Safety summary",
                 "status": "review_needed" if issues else ("not_checked" if not latest_audit else "clear"),
                 "issues": issues[:5],
-                "recommendations": (latest_audit.get("recommendations_json", []) if latest_audit else [])[:5],
+                "recommendations": (latest_audit.get("recommendations_json", []) if latest_audit else (live_check.get("recommendations", []) if live_check else []))[:5],
             },
             "starting_model": {
                 "label": "Starting model",
@@ -206,7 +230,7 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         "recommended_next_action": recommended_next_action,
         "actions": {
             "can_run_data_check": bool(dataset),
-            "can_start_setup": bool(latest_audit and readiness_score >= 70),
+            "can_start_setup": bool((latest_audit or live_check) and readiness_score >= 70),
             "can_continue": int(session.get("current_step") or 1) > 1,
         },
     }
@@ -339,7 +363,7 @@ def inspect_minio_dataset(dataset: dict) -> dict[str, Any]:
     score += 10 if enough_files else round(min(file_count / 20, 1) * 10)
     score = max(0, min(100, int(score)))
 
-    label_status = "ready" if labels_found else "missing"
+    label_status = compute_label_status(file_count, len(label_files))
     issues = []
     recommendations = []
     if total_files == 0:
@@ -371,6 +395,7 @@ def inspect_minio_dataset(dataset: dict) -> dict[str, Any]:
         "supported_file_count": file_count,
         "unsupported_file_count": len(unsupported_files),
         "label_file_count": len(label_files),
+        "label_coverage": round(label_coverage(file_count, len(label_files)), 4),
         "label_status": label_status,
         "zero_size_file_count": len(zero_size_files),
         "duplicate_filename_count": len(duplicate_names),
@@ -389,7 +414,12 @@ def get_data_check_status(session_id: int) -> dict[str, Any]:
     session = get_fine_tuning_session(session_id)
     if not session:
         raise ValueError("Fine-tuning session not found.")
-    audit = get_latest_dataset_audit(session_id=session_id)
+    dataset_id = session.get("selected_dataset_id")
+    audit = (
+        get_latest_dataset_audit_for_dataset(dataset_id=int(dataset_id), session_id=session_id)
+        if dataset_id
+        else get_latest_dataset_audit(session_id=session_id)
+    )
     if not audit:
         return {"session_id": session_id, "status": "not_started"}
     response = {

@@ -514,6 +514,34 @@ def init_db() -> None:
         )
         connection.commit()
 
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fine_tuning_dataset_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                dataset_version_id TEXT NOT NULL,
+                session_id INTEGER NOT NULL,
+                data_fingerprint TEXT NOT NULL,
+                manifest_uri TEXT NOT NULL,
+                prepared_dataset_uri TEXT NOT NULL,
+                annotation_format TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                label_count INTEGER NOT NULL DEFAULT 0,
+                readiness_score INTEGER,
+                label_status TEXT NOT NULL,
+                status TEXT NOT NULL,
+                schema_version TEXT NOT NULL DEFAULT 'v1',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES fine_tuning_sessions(id) ON DELETE CASCADE,
+                UNIQUE(session_id, dataset_version_id)
+            )
+            """
+        )
+        connection.commit()
+
 
 @contextmanager
 def get_connection():
@@ -2005,10 +2033,81 @@ def get_dataset_audit(audit_id: int) -> dict | None:
         return _row_to_dict(row) if row else None
 
 
+def upsert_fine_tuning_dataset_version(
+    *,
+    dataset_id: int,
+    dataset_version_id: str,
+    session_id: int,
+    data_fingerprint: str,
+    manifest_uri: str,
+    prepared_dataset_uri: str,
+    annotation_format: str,
+    task_type: str,
+    item_count: int,
+    label_count: int,
+    readiness_score: int | None,
+    label_status: str,
+    status: str,
+    schema_version: str,
+    payload: dict,
+) -> dict:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO fine_tuning_dataset_versions (
+                dataset_id, dataset_version_id, session_id, data_fingerprint,
+                manifest_uri, prepared_dataset_uri, annotation_format, task_type,
+                item_count, label_count, readiness_score, label_status, status,
+                schema_version, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, dataset_version_id) DO UPDATE SET
+                data_fingerprint = excluded.data_fingerprint,
+                manifest_uri = excluded.manifest_uri,
+                prepared_dataset_uri = excluded.prepared_dataset_uri,
+                annotation_format = excluded.annotation_format,
+                task_type = excluded.task_type,
+                item_count = excluded.item_count,
+                label_count = excluded.label_count,
+                readiness_score = excluded.readiness_score,
+                label_status = excluded.label_status,
+                status = excluded.status,
+                schema_version = excluded.schema_version,
+                payload_json = excluded.payload_json
+            """,
+            (
+                dataset_id,
+                dataset_version_id,
+                session_id,
+                data_fingerprint,
+                manifest_uri,
+                prepared_dataset_uri,
+                annotation_format,
+                task_type,
+                item_count,
+                label_count,
+                readiness_score,
+                label_status,
+                status,
+                schema_version,
+                json.dumps(payload),
+            ),
+        )
+        connection.commit()
+        row = connection.execute(
+            """
+            SELECT * FROM fine_tuning_dataset_versions
+            WHERE session_id = ? AND dataset_version_id = ?
+            """,
+            (session_id, dataset_version_id),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
 def _row_to_dict(row) -> dict:
     """Convert a sqlite Row to dict, parsing JSON-ish columns."""
     d = dict(row)
-    for json_key in ("metrics", "metadata_json", "issues_json", "recommendations_json", "summary_json"):
+    for json_key in ("metrics", "metadata_json", "issues_json", "recommendations_json", "summary_json", "payload_json"):
         if json_key in d and isinstance(d[json_key], str):
             try:
                 d[json_key] = json.loads(d[json_key])
