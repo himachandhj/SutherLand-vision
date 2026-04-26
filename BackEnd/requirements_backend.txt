@@ -6,3 +6,5 @@ opencv-python
 numpy
 ultralytics
 torch
+transformers
+Pillow

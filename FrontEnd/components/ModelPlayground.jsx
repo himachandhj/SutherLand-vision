@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 function formatPlaygroundDetection(detection) {
   if (detection.helmet || detection.vest || detection.shoes) {
@@ -17,14 +17,121 @@ function formatPlaygroundDetection(detection) {
   return `${detection.class} (${Math.round(detection.confidence * 100)}%)`;
 }
 
-export default function ModelPlayground({ activeUseCase, onProcessInput, playgroundState, selectedSample, sampleMedia }) {
+function clamp01(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number));
+}
+
+function buildRoiFromPoints(start, end) {
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  const width = Math.abs(end.x - start.x);
+  const height = Math.abs(end.y - start.y);
+  if (width < 0.01 || height < 0.01) return null;
+  return {
+    x: clamp01(left),
+    y: clamp01(top),
+    width: clamp01(width),
+    height: clamp01(height),
+  };
+}
+
+function roiStyle(roi) {
+  return {
+    left: `${clamp01(roi?.x ?? 0) * 100}%`,
+    top: `${clamp01(roi?.y ?? 0) * 100}%`,
+    width: `${clamp01(roi?.width ?? 0) * 100}%`,
+    height: `${clamp01(roi?.height ?? 0) * 100}%`,
+  };
+}
+
+function previewKindFromFile(file) {
+  const contentType = String(file?.type || "").toLowerCase();
+  return contentType.startsWith("image/") ? "image" : "video";
+}
+
+export default function ModelPlayground({
+  activeUseCase,
+  onProcessInput,
+  playgroundState,
+  selectedSample,
+  sampleMedia,
+  persistedRegionAlertsRoi,
+  onRegionAlertsRoiChange,
+}) {
   const fileInputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [loadedSampleVideos, setLoadedSampleVideos] = useState({});
+  const [currentInput, setCurrentInput] = useState(null);
+  const [fireDetectionMode, setFireDetectionMode] = useState("both");
+  const [roiRect, setRoiRect] = useState(null);
+  const [roiStart, setRoiStart] = useState(null);
+  const [roiDraft, setRoiDraft] = useState(null);
+
+  const supportsFireMode = activeUseCase.id === "fire-detection";
+  const supportsRoi = activeUseCase.id === "fire-detection" || activeUseCase.id === "region-alerts";
+  const activeSampleId = currentInput?.kind === "sample" ? currentInput.sampleId : selectedSample;
+
+  useEffect(() => {
+    return () => {
+      if (currentInput?.kind === "file" && String(currentInput.previewSrc || "").startsWith("blob:")) {
+        URL.revokeObjectURL(currentInput.previewSrc);
+      }
+    };
+  }, [currentInput]);
+
+  useEffect(() => {
+    setCurrentInput(null);
+    setFireDetectionMode("both");
+    setRoiRect(activeUseCase.id === "region-alerts" ? persistedRegionAlertsRoi ?? null : null);
+    setRoiStart(null);
+    setRoiDraft(null);
+    setLoadedSampleVideos({});
+  }, [activeUseCase.id]);
+
+  useEffect(() => {
+    if (activeUseCase.id !== "region-alerts") return;
+    setRoiRect(persistedRegionAlertsRoi ?? null);
+  }, [activeUseCase.id, persistedRegionAlertsRoi]);
+
+  const previewOptions = useMemo(
+    () => ({
+      fireDetectionMode: supportsFireMode ? fireDetectionMode : undefined,
+      roi: supportsRoi && roiRect ? roiRect : undefined,
+    }),
+    [fireDetectionMode, roiRect, supportsFireMode, supportsRoi],
+  );
+
+  const replaceCurrentInput = (nextInput) => {
+    setCurrentInput((current) => {
+      if (current?.kind === "file" && String(current.previewSrc || "").startsWith("blob:") && current.previewSrc !== nextInput?.previewSrc) {
+        URL.revokeObjectURL(current.previewSrc);
+      }
+      return nextInput;
+    });
+  };
+
+  const runCurrentInput = async (inputOverride = currentInput) => {
+    if (!inputOverride) return;
+    if (inputOverride.kind === "file") {
+      await onProcessInput("uploaded-file", inputOverride.file, previewOptions);
+      return;
+    }
+    await onProcessInput(inputOverride.sampleId, undefined, previewOptions);
+  };
 
   const processDroppedFile = async (file) => {
     if (!file) return;
-    await onProcessInput("uploaded-file", file);
+    const nextInput = {
+      kind: "file",
+      file,
+      label: file.name,
+      previewSrc: URL.createObjectURL(file),
+      previewType: previewKindFromFile(file),
+    };
+    replaceCurrentInput(nextInput);
+    await runCurrentInput(nextInput);
   };
 
   const handleFileChange = async (event) => {
@@ -34,6 +141,42 @@ export default function ModelPlayground({ activeUseCase, onProcessInput, playgro
     event.target.value = "";
   };
 
+  const getPointerPoint = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: clamp01((event.clientX - rect.left) / Math.max(rect.width, 1)),
+      y: clamp01((event.clientY - rect.top) / Math.max(rect.height, 1)),
+    };
+  };
+
+  const handlePreviewPointerDown = (event) => {
+    if (!supportsRoi || !currentInput) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const point = getPointerPoint(event);
+    setRoiStart(point);
+    setRoiDraft(buildRoiFromPoints(point, point));
+  };
+
+  const handlePreviewPointerMove = (event) => {
+    if (!roiStart) return;
+    event.preventDefault();
+    setRoiDraft(buildRoiFromPoints(roiStart, getPointerPoint(event)));
+  };
+
+  const handlePreviewPointerUp = (event) => {
+    if (!roiStart) return;
+    event.preventDefault();
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const nextRoi = buildRoiFromPoints(roiStart, getPointerPoint(event));
+    setRoiStart(null);
+    setRoiDraft(null);
+    setRoiRect(nextRoi);
+    if (activeUseCase.id === "region-alerts") {
+      onRegionAlertsRoiChange?.(nextRoi);
+    }
+  };
+
   return (
     <div className="grid grid-cols-2 gap-6">
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
@@ -41,6 +184,7 @@ export default function ModelPlayground({ activeUseCase, onProcessInput, playgro
           <h2 className="text-xl font-semibold text-slate-900">Input</h2>
           <span className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-500">Image &amp; Video</span>
         </div>
+
         <input ref={fileInputRef} accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.webm" className="hidden" type="file" onChange={handleFileChange} />
         <button
           className={`flex h-72 w-full flex-col items-center justify-center rounded-2xl border border-dashed text-center transition ${dragging ? "border-brandBlue bg-brandBlue/5" : "border-slate-300 bg-slate-50 hover:border-brandBlue hover:bg-white"}`}
@@ -69,8 +213,18 @@ export default function ModelPlayground({ activeUseCase, onProcessInput, playgro
               {sampleMedia.map((sample) => (
                 <button
                   key={sample.id}
-                  className={`w-full rounded-2xl border p-3 text-left transition ${selectedSample === sample.id ? "border-brandRed shadow-panel" : "border-slate-200 hover:border-brandBlue/40"}`}
-                  onClick={() => onProcessInput(sample.id)}
+                  className={`w-full rounded-2xl border p-3 text-left transition ${activeSampleId === sample.id ? "border-brandRed shadow-panel" : "border-slate-200 hover:border-brandBlue/40"}`}
+                  onClick={async () => {
+                    const nextInput = {
+                      kind: "sample",
+                      sampleId: sample.id,
+                      label: sample.label,
+                      previewSrc: sample.src,
+                      previewType: sample.type,
+                    };
+                    replaceCurrentInput(nextInput);
+                    await runCurrentInput(nextInput);
+                  }}
                   type="button"
                 >
                   <div className="relative h-40 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
@@ -105,6 +259,131 @@ export default function ModelPlayground({ activeUseCase, onProcessInput, playgro
             </div>
           </div>
         )}
+        {(supportsFireMode || supportsRoi) ? (
+          <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="text-sm font-semibold text-slate-900">Custom preview options</div>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              Upload your own input or pick a sample, then re-run the preview with the settings below.
+            </p>
+
+            {supportsFireMode ? (
+              <div className="mt-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Fire detection mode</div>
+                <div className="mt-2 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+                  {[
+                    { value: "fire", label: "Detect fire only" },
+                    { value: "smoke", label: "Detect smoke only" },
+                    { value: "both", label: "Detect both fire and smoke" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
+                        fireDetectionMode === option.value ? "bg-slate-50 text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                      }`}
+                      onClick={() => setFireDetectionMode(option.value)}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {supportsRoi ? (
+              <div className="mt-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Region of interest</div>
+                    <p className="mt-1 text-sm leading-6 text-slate-500">
+                      {activeUseCase.id === "region-alerts"
+                        ? "Drag a rectangle on the current input preview. Region Alerts will treat it as the restricted zone."
+                        : "Drag a rectangle on the current input preview. Fire Detection will keep detections only inside that ROI."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {roiRect ? (
+                      <span className="rounded-full border border-brandBlue/15 bg-brandBlue/[0.04] px-3 py-1 text-xs font-semibold text-brandBlue">
+                        ROI selected
+                      </span>
+                    ) : null}
+                    <button
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-brandBlue/30"
+                      disabled={!roiRect}
+                      onClick={() => {
+                        setRoiRect(null);
+                        if (activeUseCase.id === "region-alerts") {
+                          onRegionAlertsRoiChange?.(null);
+                        }
+                      }}
+                      type="button"
+                    >
+                      Clear ROI
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
+                  {currentInput ? (
+                    <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-950">
+                      {currentInput.previewType === "video" ? (
+                        <video
+                          autoPlay
+                          className="block h-72 w-full object-contain"
+                          loop
+                          muted
+                          playsInline
+                          src={currentInput.previewSrc}
+                        />
+                      ) : (
+                        <img alt={currentInput.label} className="block h-72 w-full object-contain" src={currentInput.previewSrc} />
+                      )}
+                      <div
+                        className="absolute inset-0 cursor-crosshair touch-none"
+                        onPointerDown={handlePreviewPointerDown}
+                        onPointerLeave={() => {
+                          setRoiStart(null);
+                          setRoiDraft(null);
+                        }}
+                        onPointerMove={handlePreviewPointerMove}
+                        onPointerUp={handlePreviewPointerUp}
+                      >
+                        {roiRect ? (
+                          <div className="absolute border-2 border-dashed border-amber-300 bg-amber-300/10" style={roiStyle(roiRect)}>
+                            <span className="absolute left-0 top-0 bg-amber-500 px-2 py-0.5 text-[11px] font-semibold text-white">ROI</span>
+                          </div>
+                        ) : null}
+                        {roiDraft ? (
+                          <div className="absolute border-2 border-dashed border-white bg-white/10" style={roiStyle(roiDraft)} />
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex h-72 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-6 text-center text-sm leading-6 text-slate-500">
+                      Select a sample or upload a file first, then drag on the preview to define an ROI.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-xl bg-brandBlue px-4 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!currentInput || playgroundState.status === "loading"}
+                onClick={() => void runCurrentInput()}
+                type="button"
+              >
+                {playgroundState.status === "loading" ? "Running preview..." : "Run Preview with Current Settings"}
+              </button>
+              {activeUseCase.id === "fire-detection" && currentInput?.previewType === "video" ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
+                  Fire Detection playground previews use a representative frame from the video.
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">

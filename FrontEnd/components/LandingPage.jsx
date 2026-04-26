@@ -26,23 +26,6 @@ export default function LandingPage({ onExploreSection }) {
         <section className="mx-auto mt-14 max-w-5xl overflow-hidden rounded-[2rem] border border-slate-200 bg-slate-100 shadow-panel">
           <video autoPlay className="h-[34rem] w-full object-cover" controls loop muted playsInline src={`${API_BASE_URL}/static/PPE_VIDEO1.mp4`} />
         </section>
-
-        <section className="mx-auto mt-12 max-w-5xl">
-          <div className="grid grid-cols-4 gap-6">
-            {[
-              { label: "Pre-built Use Cases", value: String(useCases.length) },
-              { label: "Industry Verticals", value: "4" },
-              { label: "CV Models Integrated", value: "YOLOv8" },
-              { label: "Processing", value: "Real-time" },
-            ].map((stat) => (
-              <div key={stat.label} className="rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-panel">
-                <div className="text-3xl font-semibold text-brandBlue">{stat.value}</div>
-                <div className="mt-2 text-sm text-slate-500">{stat.label}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
         <section className="mx-auto mt-20 max-w-6xl">
           <div className="mb-8">
             <p className="text-sm font-medium uppercase tracking-[0.24em] text-brandRed">Explore Categories</p>

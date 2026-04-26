@@ -44,6 +44,29 @@ def point_in_polygon(px: int, py: int, polygon: np.ndarray) -> bool:
     return cv2.pointPolygonTest(polygon, (float(px), float(py)), False) >= 0
 
 
+def zone_from_normalized_points(points: list[list[float]] | tuple[tuple[float, float], ...] | None, fw: int, fh: int) -> np.ndarray:
+    if not points:
+        return create_default_zone(fw, fh)
+
+    normalized_points: list[list[int]] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            continue
+        try:
+            x = max(0.0, min(1.0, float(point[0])))
+            y = max(0.0, min(1.0, float(point[1])))
+        except (TypeError, ValueError):
+            continue
+        normalized_points.append([
+            int(round(x * fw)),
+            int(round(y * fh)),
+        ])
+
+    if len(normalized_points) < 4:
+        return create_default_zone(fw, fh)
+    return np.asarray(normalized_points, dtype=np.int32)
+
+
 def _extract_person_detections(results) -> tuple[list, list[int], list[float]]:
     if not results or results[0].boxes is None:
         return [], [], []
@@ -78,6 +101,22 @@ def process_video(
     device = device or auto_device()
     input_p = os.path.abspath(input_path)
     out_p = build_output_path(input_p, output_path, "_zone_intrusion")
+    rule_config = kwargs.get("rule_config") or {}
+
+    try:
+        confidence_threshold = float(rule_config.get("confidence_threshold", conf))
+    except (TypeError, ValueError):
+        confidence_threshold = conf
+    confidence_threshold = max(0.1, min(1.0, confidence_threshold))
+
+    try:
+        alert_delay_sec = float(rule_config.get("alert_delay_sec", 0))
+    except (TypeError, ValueError):
+        alert_delay_sec = 0.0
+    alert_delay_sec = max(0.0, min(10.0, alert_delay_sec))
+
+    alerts_enabled = bool(rule_config.get("alerts_enabled", True))
+    trigger_type = str(rule_config.get("trigger_type") or "enter").strip().lower()
 
     model = load_model(model_path)
 
@@ -89,7 +128,9 @@ def process_video(
     writer = create_writer(out_p, sfps, fw, fh)
 
     # Define restricted zone
-    zone = create_default_zone(fw, fh)
+    zone = zone_from_normalized_points(kwargs.get("zone_points_normalized"), fw, fh)
+    effective_conf = confidence_threshold
+    required_frames = max(0, int(round(alert_delay_sec * sfps)))
 
     seen_intruders = set()
     total_intrusions = 0
@@ -97,6 +138,7 @@ def process_video(
     frame_num = 0
     t0 = time.time()
     intrusion_events: dict[int, dict[str, float | int | str]] = {}
+    person_in_zone_frames: dict[int, int] = {}
 
     try:
         while cap.isOpened():
@@ -115,7 +157,7 @@ def process_video(
 
             try:
                 results = model.track(
-                    source=frame, classes=[PERSON_CLASS], conf=conf,
+                    source=frame, classes=[PERSON_CLASS], conf=effective_conf,
                     iou=0.70, device=device, persist=True, verbose=False
                 )
             except Exception:
@@ -123,7 +165,7 @@ def process_video(
                     results = model.predict(
                         source=frame,
                         classes=[PERSON_CLASS],
-                        conf=conf,
+                        conf=effective_conf,
                         device=device,
                         verbose=False,
                     )
@@ -132,6 +174,7 @@ def process_video(
                     continue
 
             zone_count = 0
+            active_tids = set()
 
             boxes, tids, confs = _extract_person_detections(results)
 
@@ -139,37 +182,53 @@ def process_video(
                 x1, y1, x2, y2 = map(int, bbox)
                 tid = tids[i] if i < len(tids) else i
                 conf_score = float(confs[i]) if i < len(confs) else 1.0
+                if conf_score < confidence_threshold:
+                    continue
                 cx = (x1 + x2) // 2
                 cy = (y1 + y2) // 2
                 foot_y = y2  # use foot position for zone check
+                active_tids.add(tid)
 
                 in_zone = point_in_polygon(cx, foot_y, zone)
 
                 if in_zone:
-                    zone_count += 1
-                    total_intrusions += 1
-                    seen_intruders.add(tid)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 3)
-                    draw_label(frame, f"#{tid} INTRUDER", x1, y1, C_RED)
-                    radius = max(15, (x2 - x1) // 2)
-                    cv2.circle(frame, (cx, cy), radius, C_RED, 2, cv2.LINE_AA)
-                    if tid not in intrusion_events:
-                        intrusion_events[tid] = {
-                            "object_type": "person",
-                            "first_seen_frame": frame_num,
-                            "last_seen_frame": frame_num,
-                            "observations": 0,
-                            "confidence_sum": 0.0,
-                            "confidence_max": 0.0,
-                        }
-                    event = intrusion_events[tid]
-                    event["last_seen_frame"] = frame_num
-                    event["observations"] = int(event["observations"]) + 1
-                    event["confidence_sum"] = float(event["confidence_sum"]) + conf_score
-                    event["confidence_max"] = max(float(event["confidence_max"]), conf_score)
+                    person_in_zone_frames[tid] = person_in_zone_frames.get(tid, 0) + 1
+                    delay_satisfied = required_frames == 0 or person_in_zone_frames[tid] >= required_frames
+                    if alerts_enabled and delay_satisfied:
+                        zone_count += 1
+                        if tid not in seen_intruders:
+                            total_intrusions += 1
+                            seen_intruders.add(tid)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 3)
+                        draw_label(frame, f"#{tid} INTRUDER", x1, y1, C_RED)
+                        radius = max(15, (x2 - x1) // 2)
+                        cv2.circle(frame, (cx, cy), radius, C_RED, 2, cv2.LINE_AA)
+                        if tid not in intrusion_events:
+                            intrusion_events[tid] = {
+                                "object_type": "person",
+                                "first_seen_frame": frame_num,
+                                "last_seen_frame": frame_num,
+                                "observations": 0,
+                                "confidence_sum": 0.0,
+                                "confidence_max": 0.0,
+                            }
+                        event = intrusion_events[tid]
+                        event["last_seen_frame"] = frame_num
+                        event["observations"] = int(event["observations"]) + 1
+                        event["confidence_sum"] = float(event["confidence_sum"]) + conf_score
+                        event["confidence_max"] = max(float(event["confidence_max"]), conf_score)
+                    else:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), C_YELLOW, 2)
+                        status_label = "IN ZONE" if not alerts_enabled else "VERIFYING"
+                        draw_label(frame, f"#{tid} {status_label}", x1, y1, C_YELLOW)
                 else:
+                    person_in_zone_frames.pop(tid, None)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
                     draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
+
+            for tracked_tid in list(person_in_zone_frames.keys()):
+                if tracked_tid not in active_tids:
+                    person_in_zone_frames.pop(tracked_tid, None)
 
             peak_zone_occupancy = max(peak_zone_occupancy, zone_count)
 
@@ -181,6 +240,8 @@ def process_video(
                 (f"Intrusions:    {total_intrusions}", C_RED if total_intrusions > 0 else C_GREEN),
                 (f"Unique Intrs:  {len(seen_intruders)}", C_YELLOW),
                 (f"Peak in Zone:  {peak_zone_occupancy}", C_CYAN),
+                (f"Delay:         {alert_delay_sec:.1f}s", C_BLUE),
+                (f"Trigger:       {trigger_type}", C_GRAY),
                 (f"FPS:           {fps_live:.1f}", C_GRAY),
             ])
 

@@ -8,12 +8,16 @@ export default function FineTuningStepRail({
   steps,
   activeStepId,
   completedStepIds,
+  currentPlanState,
   selectedDataset,
   selectedGoal,
   selectedTrainingMode,
   trainingJob,
   onStepSelect,
 }) {
+  const planStatus = currentPlanState?.status ?? trainingJob.status ?? "normal";
+  const progressPercent = Number(currentPlanState?.progressPercent ?? trainingJob.progress_percent ?? 0);
+
   return (
     <aside className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-panel lg:sticky lg:top-5 lg:self-start">
       <div className="mb-4 px-2">
@@ -59,8 +63,20 @@ export default function FineTuningStepRail({
       <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-slate-900">Current plan</div>
-          <Badge tone={trainingJob.status === "running" ? "warning" : trainingJob.status === "complete" ? "compliant" : "normal"}>
-            {trainingJob.status}
+          <Badge
+            tone={
+              planStatus === "running"
+                ? "warning"
+                : planStatus === "compliant" || planStatus === "complete"
+                  ? "compliant"
+                  : planStatus === "blocked"
+                    ? "alert"
+                    : planStatus === "warning"
+                      ? "warning"
+                      : "normal"
+            }
+          >
+            {planStatus}
           </Badge>
         </div>
         <div className="mt-3 space-y-2 text-sm">
@@ -78,7 +94,7 @@ export default function FineTuningStepRail({
           </div>
         </div>
         <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-200">
-          <div className="h-full rounded-full bg-brandBlue transition-all" style={{ width: `${trainingJob.progress_percent}%` }} />
+          <div className="h-full rounded-full bg-brandBlue transition-all" style={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }} />
         </div>
       </div>
     </aside>

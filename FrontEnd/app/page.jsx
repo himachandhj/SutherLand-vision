@@ -35,6 +35,44 @@ function buildEmptyIntegrationOverview() {
   };
 }
 
+const DEFAULT_REGION_ALERT_RULE_CONFIG = {
+  trigger_type: "enter",
+  alert_delay_sec: 0,
+  confidence_threshold: 0.5,
+  alerts_enabled: true,
+};
+
+function zonePointsNormalizedFromRoi(roi) {
+  if (!roi) return null;
+  return [
+    [roi.x, roi.y],
+    [roi.x + roi.width, roi.y],
+    [roi.x + roi.width, roi.y + roi.height],
+    [roi.x, roi.y + roi.height],
+  ];
+}
+
+function normalizeRegionAlertsRuleConfig(ruleConfig) {
+  if (!ruleConfig || typeof ruleConfig !== "object") {
+    return DEFAULT_REGION_ALERT_RULE_CONFIG;
+  }
+
+  const triggerType = ruleConfig.trigger_type === "exit" ? "exit" : "enter";
+  const alertDelay = Number(ruleConfig.alert_delay_sec);
+  const confidenceThreshold = Number(ruleConfig.confidence_threshold);
+
+  return {
+    trigger_type: triggerType,
+    alert_delay_sec: Number.isFinite(alertDelay) ? Math.max(0, Math.min(10, Math.round(alertDelay))) : 0,
+    confidence_threshold: Number.isFinite(confidenceThreshold)
+      ? Math.max(0.1, Math.min(1, Math.round(confidenceThreshold * 100) / 100))
+      : 0.5,
+    alerts_enabled: typeof ruleConfig.alerts_enabled === "boolean"
+      ? ruleConfig.alerts_enabled
+      : true,
+  };
+}
+
 export default function Page() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-white" />}>
@@ -56,6 +94,8 @@ function VisionLabPage() {
     sourceLabel: "",
     error: "",
   });
+  const [regionAlertsRoi, setRegionAlertsRoi] = useState(null);
+  const [regionAlertsRuleConfig, setRegionAlertsRuleConfig] = useState(DEFAULT_REGION_ALERT_RULE_CONFIG);
   const [integrationForm, setIntegrationForm] = useState({
     endpoint: "http://127.0.0.1:9000",
     access_key: "demo-access-key",
@@ -123,9 +163,15 @@ function VisionLabPage() {
           output_prefix: data.connection.output_prefix ?? current.output_prefix,
         }));
         setIntegrationMode(data.connection.processing_mode ?? "manual");
+        if (activeUseCaseId === "region-alerts") {
+          setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(data.connection.rule_config));
+        }
       } else {
         const defaults = getIntegrationDefaults(activeUseCaseId);
         setIntegrationForm((current) => ({ ...current, input_prefix: defaults.input_prefix, output_prefix: defaults.output_prefix }));
+        if (activeUseCaseId === "region-alerts") {
+          setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+        }
       }
       setIntegrationError("");
     } catch (error) {
@@ -142,10 +188,24 @@ function VisionLabPage() {
     setIsConnectingIntegration(true);
     setIntegrationError("");
     try {
+      const regionAlertZonePoints =
+        activeUseCaseId === "region-alerts" ? zonePointsNormalizedFromRoi(regionAlertsRoi) : undefined;
+      const regionAlertRuleConfig =
+        activeUseCaseId === "region-alerts" ? normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig) : undefined;
       const response = await fetch(`${API_BASE_URL}/api/integrations/minio/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...integrationForm, use_case_id: activeUseCaseId, processing_mode: resolvedMode }),
+        body: JSON.stringify({
+          ...integrationForm,
+          use_case_id: activeUseCaseId,
+          processing_mode: resolvedMode,
+          ...(activeUseCaseId === "region-alerts"
+            ? {
+                zone_points_normalized: regionAlertZonePoints,
+                rule_config: regionAlertRuleConfig,
+              }
+            : {}),
+        }),
       });
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null);
@@ -201,12 +261,22 @@ function VisionLabPage() {
     setIsProcessingIntegrationVideos(true);
     setIntegrationProcessMessage("");
     try {
+      const regionAlertZonePoints =
+        activeUseCaseId === "region-alerts" ? zonePointsNormalizedFromRoi(regionAlertsRoi) : undefined;
+      const regionAlertRuleConfig =
+        activeUseCaseId === "region-alerts" ? normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig) : undefined;
       const response = await fetch(`${API_BASE_URL}/api/integrations/minio/process-selected`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           use_case_id: activeUseCaseId,
           object_keys: selectedIntegrationVideos,
+          ...(activeUseCaseId === "region-alerts"
+            ? {
+                zone_points_normalized: regionAlertZonePoints,
+                rule_config: regionAlertRuleConfig,
+              }
+            : {}),
         }),
       });
       if (!response.ok) {
@@ -269,6 +339,7 @@ function VisionLabPage() {
     setIntegrationError("");
     setIntegrationFetchMessage("");
     setIntegrationProcessMessage("");
+    setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
   }, [activeUseCaseId]);
 
   const navigateTo = (nextView, nextTab, method = "push", nextSection = activeSection, useCaseId) => {
@@ -294,13 +365,19 @@ function VisionLabPage() {
     router[method](href, { scroll: false });
   };
 
-  const runPlaygroundPreview = async (file, sourceLabel) => {
+  const runPlaygroundPreview = async (file, sourceLabel, previewOptions = {}) => {
     setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
     navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("use_case_id", activeUseCaseId);
+      if (previewOptions.fireDetectionMode) {
+        formData.append("fire_detection_mode", previewOptions.fireDetectionMode);
+      }
+      if (previewOptions.roi) {
+        formData.append("roi_json", JSON.stringify(previewOptions.roi));
+      }
       const response = await fetch(`${API_BASE_URL}/api/playground-preview`, { method: "POST", body: formData });
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
@@ -327,12 +404,12 @@ function VisionLabPage() {
     }
   };
 
-  const handleProcessInput = async (sampleId, fileOverride) => {
+  const handleProcessInput = async (sampleId, fileOverride, previewOptions = {}) => {
     const matchingSample = sampleMedia.find((sample) => sample.id === sampleId);
     const sourceLabel = fileOverride?.name ?? matchingSample?.label ?? "Uploaded File";
     setSelectedSample(sampleId);
     if (fileOverride) {
-      await runPlaygroundPreview(fileOverride, sourceLabel);
+      await runPlaygroundPreview(fileOverride, sourceLabel, previewOptions);
       return;
     }
     if (!matchingSample) return;
@@ -343,6 +420,12 @@ function VisionLabPage() {
       const formData = new FormData();
       formData.append("sample_name", matchingSample.label);
       formData.append("use_case_id", activeUseCaseId);
+      if (previewOptions.fireDetectionMode) {
+        formData.append("fire_detection_mode", previewOptions.fireDetectionMode);
+      }
+      if (previewOptions.roi) {
+        formData.append("roi_json", JSON.stringify(previewOptions.roi));
+      }
       const response = await fetch(`${API_BASE_URL}/api/playground-preview-sample`, { method: "POST", body: formData });
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
@@ -392,6 +475,10 @@ function VisionLabPage() {
           playgroundState={playgroundState}
           selectedSample={selectedSample}
           sampleMedia={sampleMedia}
+          persistedRegionAlertsRoi={regionAlertsRoi}
+          onRegionAlertsRoiChange={setRegionAlertsRoi}
+          regionAlertsRuleConfig={regionAlertsRuleConfig}
+          onRegionAlertsRuleConfigChange={(nextConfig) => setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(nextConfig))}
           setActiveTab={(tab) => navigateTo("detail", tab, "push", activeSection, activeUseCaseId)}
           integrationForm={integrationForm}
           integrationOverview={integrationOverview}

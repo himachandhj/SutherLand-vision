@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -76,13 +76,53 @@ from app.schemas.integration import (
     MinioUploadItem,
     MinioUploadResponse,
 )
+from app.schemas.fine_tuning import (
+    FineTuningAutoLabelRequest,
+    FineTuningAssistLabelRequest,
+    FineTuningManualAnnotationRequest,
+    FineTuningSamAssistRequest,
+    FineTuningDatasetRegisterRequest,
+    FineTuningDatasetSelectRequest,
+    FineTuningLabelStatusRequest,
+)
+from app.services.annotation_service import (
+    assist_propagate_dataset,
+    assist_label_dataset,
+    auto_label_dataset,
+    export_selected_dataset_to_yolo,
+    get_annotation_workspace,
+    segment_with_sam,
+    save_manual_annotations,
+    train_assist_model,
+)
+from app.services.dataset_service import (
+    delete_dataset_for_session,
+    get_dataset_detail,
+    list_datasets_for_session,
+    register_dataset_for_session,
+    select_dataset_for_session,
+)
+from app.services.labeling_service import (
+    build_dataset_ready_payload,
+    get_label_state,
+    update_label_status,
+)
+from app.services.label_import_service import import_yolo_labels_for_session
+from app.services.fine_tuning import (
+    build_step_one_response,
+    get_data_check_status,
+    run_dataset_audit,
+    start_data_check,
+    start_new_setup,
+    start_setup,
+)
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
 from use_cases.base import ensure_browser_playable_mp4, validate_output_video
 from use_cases.fire_smoke import detect_fire_smoke_hsv
 from use_cases.registry import USE_CASE_REGISTRY, get_processor, get_metadata, list_use_cases
 from use_cases.speed_estimation import process_video as speed_process_video
-from use_cases.zone_intrusion import create_default_zone, point_in_polygon
+from use_cases.zone_intrusion import PERSON_CLASS, create_default_zone, point_in_polygon
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = BASE_DIR / "static"
@@ -317,6 +357,8 @@ def _build_empty_integration_state(use_case_id: str) -> dict[str, Any]:
         "connected_at": None,
         "credential_mode": "direct",
         "connection": None,
+        "zone_points_normalized": None,
+        "rule_config": None,
     }
 
 
@@ -386,6 +428,7 @@ def _build_connection_details(
     connected_at: str | None,
     credential_mode: str,
     processing_mode: str,
+    rule_config: dict[str, Any] | None = None,
 ) -> MinioConnectionDetails:
     normalized = config.normalized()
     return MinioConnectionDetails(
@@ -397,6 +440,7 @@ def _build_connection_details(
         credential_mode=credential_mode,
         processing_mode=processing_mode,
         connected_at=connected_at,
+        rule_config=rule_config,
     )
 
 
@@ -1354,6 +1398,7 @@ def _build_integration_overview(
             connected_at=connected_at,
             credential_mode=credential_mode,
             processing_mode=processing_mode,
+            rule_config=snapshot.get("rule_config") if canonical_use_case_id == "region-alerts" else None,
         ) if config else None,
     )
 
@@ -1662,12 +1707,23 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     local_output = temp_dir_path / Path(next_output_key).name
                     client.fget_object(config.bucket, input_key, str(local_input))
 
+                    processor_kwargs: dict[str, Any] = {}
+                    if canonical_use_case_id == "region-alerts":
+                        integration_state = _get_integration_state(canonical_use_case_id)
+                        current_zone_points = integration_state.get("zone_points_normalized")
+                        current_rule_config = integration_state.get("rule_config")
+                        if current_zone_points:
+                            processor_kwargs["zone_points_normalized"] = current_zone_points
+                        if current_rule_config:
+                            processor_kwargs["rule_config"] = current_rule_config
+
                     result = processor(
                         input_path=str(local_input),
                         output_path=str(local_output),
                         model_path=model_path,
                         device=auto_device(),
                         show=False,
+                        **processor_kwargs,
                     )
 
                     actual_output = _resolve_completed_output_path(local_output, result)
@@ -1755,6 +1811,271 @@ def startup_event() -> None:
     load_ppe_preview_components()
 
 
+@app.get("/api/fine-tuning/{usecase_slug}/step-1", tags=["Fine Tuning"])
+def get_fine_tuning_step_one(usecase_slug: str) -> dict[str, Any]:
+    try:
+        return build_step_one_response(usecase_slug)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning setup: {error}") from error
+
+
+def _fine_tuning_error_status(error: ValueError) -> int:
+    message = str(error).lower()
+    return 404 if "not found" in message else 400
+
+
+@app.get("/api/fine-tuning/{session_id}/datasets", tags=["Fine Tuning"])
+def get_fine_tuning_datasets(session_id: int) -> dict[str, Any]:
+    try:
+        return list_datasets_for_session(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning datasets: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/datasets/register", tags=["Fine Tuning"])
+def register_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningDatasetRegisterRequest,
+) -> dict[str, Any]:
+    try:
+        return register_dataset_for_session(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to register fine-tuning dataset: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/datasets/select", tags=["Fine Tuning"])
+def select_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningDatasetSelectRequest,
+) -> dict[str, Any]:
+    try:
+        return select_dataset_for_session(session_id, payload.dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to select fine-tuning dataset: {error}") from error
+
+
+@app.get("/api/fine-tuning/{session_id}/datasets/{dataset_id}", tags=["Fine Tuning"])
+def get_fine_tuning_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
+    try:
+        return get_dataset_detail(session_id, dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning dataset detail: {error}") from error
+
+
+@app.delete("/api/fine-tuning/{session_id}/datasets/{dataset_id}", tags=["Fine Tuning"])
+def delete_fine_tuning_dataset(session_id: int, dataset_id: int) -> dict[str, Any]:
+    try:
+        return delete_dataset_for_session(session_id, dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to remove fine-tuning dataset: {error}") from error
+
+
+@app.get("/api/fine-tuning/{session_id}/labels", tags=["Fine Tuning"])
+def get_fine_tuning_label_state(session_id: int) -> dict[str, Any]:
+    try:
+        return get_label_state(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load fine-tuning label state: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/status", tags=["Fine Tuning"])
+def update_fine_tuning_label_status(
+    session_id: int,
+    payload: FineTuningLabelStatusRequest,
+) -> dict[str, Any]:
+    try:
+        return update_label_status(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to update fine-tuning label status: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/import", tags=["Fine Tuning"])
+async def import_fine_tuning_labels(
+    session_id: int,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    try:
+        content = await file.read()
+        return import_yolo_labels_for_session(
+            session_id,
+            filename=file.filename or "labels.zip",
+            content=content,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to import fine-tuning labels: {error}") from error
+
+
+@app.get("/api/fine-tuning/{session_id}/labels/workspace", tags=["Fine Tuning"])
+def get_fine_tuning_annotation_workspace(
+    session_id: int,
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict[str, Any]:
+    try:
+        return get_annotation_workspace(session_id, limit=limit)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load annotation workspace: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/manual", tags=["Fine Tuning"])
+def save_fine_tuning_manual_annotations(
+    session_id: int,
+    payload: FineTuningManualAnnotationRequest,
+) -> dict[str, Any]:
+    try:
+        return save_manual_annotations(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to save manual annotations: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/auto-label", tags=["Fine Tuning"])
+def auto_label_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningAutoLabelRequest,
+) -> dict[str, Any]:
+    try:
+        return auto_label_dataset(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to auto-label fine-tuning dataset: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/assist", tags=["Fine Tuning"])
+def assist_label_fine_tuning_dataset(
+    session_id: int,
+    payload: FineTuningAssistLabelRequest,
+) -> dict[str, Any]:
+    try:
+        return assist_label_dataset(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to assist fine-tuning labels: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/train-assist-model", tags=["Fine Tuning"])
+def train_fine_tuning_assist_model(session_id: int) -> dict[str, Any]:
+    try:
+        return train_assist_model(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to train assist model: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/assist-propagate", tags=["Fine Tuning"])
+def assist_propagate_fine_tuning_labels(
+    session_id: int,
+    payload: FineTuningAssistLabelRequest,
+) -> dict[str, Any]:
+    try:
+        return assist_propagate_dataset(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to propagate assist labels: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/sam", tags=["Fine Tuning"])
+def segment_fine_tuning_annotation_with_sam(
+    session_id: int,
+    payload: FineTuningSamAssistRequest,
+) -> dict[str, Any]:
+    try:
+        return segment_with_sam(session_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to refine annotation with SAM: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/labels/export-yolo", tags=["Fine Tuning"])
+def export_fine_tuning_labels_as_yolo(session_id: int) -> dict[str, Any]:
+    try:
+        return export_selected_dataset_to_yolo(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to export fine-tuning dataset: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/prepare-dataset-ready-payload", tags=["Fine Tuning"])
+def prepare_fine_tuning_dataset_ready_payload(session_id: int) -> dict[str, Any]:
+    try:
+        return build_dataset_ready_payload(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=_fine_tuning_error_status(error), detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to prepare fine-tuning dataset handoff: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/run-data-check", tags=["Fine Tuning"])
+def run_fine_tuning_data_check(session_id: int, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    try:
+        audit = start_data_check(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to start data check: {error}") from error
+
+    background_tasks.add_task(run_dataset_audit, int(audit["id"]))
+    return {
+        "session_id": session_id,
+        "audit_id": int(audit["id"]),
+        "status": audit["status"],
+    }
+
+
+@app.get("/api/fine-tuning/{session_id}/data-check-status", tags=["Fine Tuning"])
+def get_fine_tuning_data_check_status(session_id: int) -> dict[str, Any]:
+    try:
+        return get_data_check_status(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to load data check status: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/start-setup", tags=["Fine Tuning"])
+def start_fine_tuning_setup(session_id: int) -> dict[str, Any]:
+    try:
+        return start_setup(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to start fine-tuning setup: {error}") from error
+
+
+@app.post("/api/fine-tuning/{session_id}/start-new-setup", tags=["Fine Tuning"])
+def start_fine_tuning_new_setup(session_id: int) -> dict[str, Any]:
+    try:
+        return start_new_setup(session_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Unable to start a new fine-tuning setup: {error}") from error
+
+
 def image_to_base64(image: np.ndarray) -> str:
     success, buffer = cv2.imencode(".jpg", image)
     if not success:
@@ -1807,6 +2128,162 @@ def run_yolo_inference(image: np.ndarray) -> tuple[np.ndarray, list[dict[str, st
         )
 
     return annotated, detections
+
+
+def _normalize_fire_detection_mode(value: str | None) -> str:
+    normalized = str(value or "both").strip().lower()
+    if normalized in {"fire", "fire_only"}:
+        return "fire"
+    if normalized in {"smoke", "smoke_only"}:
+        return "smoke"
+    return "both"
+
+
+def _parse_preview_roi(roi_json: str | None) -> dict[str, float] | None:
+    if not roi_json:
+        return None
+    try:
+        payload = json.loads(roi_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="ROI payload is not valid JSON.")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="ROI payload must be an object.")
+
+    try:
+        x = max(0.0, min(1.0, float(payload.get("x", 0.0))))
+        y = max(0.0, min(1.0, float(payload.get("y", 0.0))))
+        width = max(0.0, min(1.0, float(payload.get("width", 0.0))))
+        height = max(0.0, min(1.0, float(payload.get("height", 0.0))))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="ROI coordinates must be numeric.") from error
+
+    if width <= 0.0 or height <= 0.0:
+        return None
+
+    width = min(width, 1.0 - x)
+    height = min(height, 1.0 - y)
+    if width <= 0.0 or height <= 0.0:
+        return None
+
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+    }
+
+
+def _normalize_zone_points_normalized(points: Any) -> list[list[float]] | None:
+    if points is None:
+        return None
+    if not isinstance(points, (list, tuple)):
+        raise HTTPException(status_code=400, detail="zone_points_normalized must be a list of [x, y] points.")
+
+    normalized_points: list[list[float]] = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise HTTPException(status_code=400, detail="Each ROI point must contain two normalized coordinates.")
+        try:
+            x = max(0.0, min(1.0, float(point[0])))
+            y = max(0.0, min(1.0, float(point[1])))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail="ROI point coordinates must be numeric.") from error
+        normalized_points.append([x, y])
+
+    if len(normalized_points) < 4:
+        raise HTTPException(status_code=400, detail="Region Alerts ROI requires at least four normalized points.")
+    return normalized_points
+
+
+def _normalize_region_alert_rule_config(rule_config: Any) -> dict[str, Any] | None:
+    if rule_config is None:
+        return None
+    if not isinstance(rule_config, dict):
+        raise HTTPException(status_code=400, detail="rule_config must be an object.")
+
+    trigger_type = str(rule_config.get("trigger_type") or "enter").strip().lower()
+    if trigger_type not in {"enter", "exit"}:
+        trigger_type = "enter"
+
+    try:
+        alert_delay_sec = float(rule_config.get("alert_delay_sec", 0))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="alert_delay_sec must be numeric.") from error
+    alert_delay_sec = max(0.0, min(10.0, alert_delay_sec))
+
+    try:
+        confidence_threshold = float(rule_config.get("confidence_threshold", 0.5))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="confidence_threshold must be numeric.") from error
+    confidence_threshold = max(0.1, min(1.0, confidence_threshold))
+
+    alerts_enabled_value = rule_config.get("alerts_enabled", True)
+    if isinstance(alerts_enabled_value, str):
+        alerts_enabled = alerts_enabled_value.strip().lower() not in {"false", "0", "off", "no"}
+    else:
+        alerts_enabled = bool(alerts_enabled_value)
+
+    return {
+        "trigger_type": trigger_type,
+        "alert_delay_sec": round(alert_delay_sec, 2),
+        "confidence_threshold": round(confidence_threshold, 2),
+        "alerts_enabled": alerts_enabled,
+    }
+
+
+def _roi_polygon_from_normalized(roi: dict[str, float], frame_width: int, frame_height: int) -> np.ndarray:
+    x1 = int(round(roi["x"] * frame_width))
+    y1 = int(round(roi["y"] * frame_height))
+    x2 = int(round((roi["x"] + roi["width"]) * frame_width))
+    y2 = int(round((roi["y"] + roi["height"]) * frame_height))
+    x1 = max(0, min(frame_width - 1, x1))
+    y1 = max(0, min(frame_height - 1, y1))
+    x2 = max(x1 + 1, min(frame_width, x2))
+    y2 = max(y1 + 1, min(frame_height, y2))
+    return np.array(
+        [
+            [x1, y1],
+            [x2, y1],
+            [x2, y2],
+            [x1, y2],
+        ],
+        dtype=np.int32,
+    )
+
+
+def _roi_points_normalized(roi: dict[str, float]) -> list[list[float]]:
+    return [
+        [roi["x"], roi["y"]],
+        [roi["x"] + roi["width"], roi["y"]],
+        [roi["x"] + roi["width"], roi["y"] + roi["height"]],
+        [roi["x"], roi["y"] + roi["height"]],
+    ]
+
+
+def _apply_roi_overlay(image: np.ndarray, polygon: np.ndarray, label: str) -> None:
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [polygon], 255)
+    dimmed = (image.astype(np.float32) * 0.35).astype(np.uint8)
+    image[mask == 0] = dimmed[mask == 0]
+    cv2.polylines(image, [polygon], True, (0, 140, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        image,
+        label,
+        (int(polygon[0][0]) + 10, max(20, int(polygon[0][1]) + 24)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 140, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def _bbox_center_inside_polygon(bbox: list[int], polygon: np.ndarray) -> bool:
+    x1, y1, x2, y2 = bbox
+    cx = int(round((x1 + x2) / 2))
+    cy = int(round((y1 + y2) / 2))
+    return point_in_polygon(cx, cy, polygon)
 
 
 def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
@@ -1869,22 +2346,30 @@ def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str |
     return annotated, detections
 
 
-def run_region_alerts_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+def run_region_alerts_preview(frame: np.ndarray, roi: dict[str, float] | None = None) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     annotated = frame.copy()
     fh, fw = annotated.shape[:2]
-    zone = create_default_zone(fw, fh)
+    zone = _roi_polygon_from_normalized(roi, fw, fh) if roi else create_default_zone(fw, fh)
 
     overlay = annotated.copy()
     cv2.fillPoly(overlay, [zone], (0, 0, 80))
     cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
     cv2.polylines(annotated, [zone], True, (0, 50, 230), 2, cv2.LINE_AA)
-    cv2.putText(annotated, "RESTRICTED ZONE", (zone[0][0] + 10, zone[0][1] + 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 50, 230), 2, cv2.LINE_AA)
+    cv2.putText(
+        annotated,
+        "SELECTED ROI" if roi else "RESTRICTED ZONE",
+        (zone[0][0] + 10, zone[0][1] + 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 50, 230),
+        2,
+        cv2.LINE_AA,
+    )
 
     if YOLO_MODEL is None:
         raise HTTPException(status_code=503, detail="YOLO model is not available for region alerts preview.")
 
-    results = YOLO_MODEL(frame, conf=0.25, verbose=False)
+    results = YOLO_MODEL(frame, classes=[PERSON_CLASS], conf=0.25, verbose=False)
     detections: list[dict[str, str | float]] = []
     names: dict[int, Any] = results[0].names if results else {}
 
@@ -1911,7 +2396,11 @@ def run_region_alerts_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[
     return annotated, detections
 
 
-def run_region_alerts_video_preview(video_path: Path, source_name: str | None = None) -> dict[str, Any]:
+def run_region_alerts_video_preview(
+    video_path: Path,
+    source_name: str | None = None,
+    roi: dict[str, float] | None = None,
+) -> dict[str, Any]:
     processor = get_processor("region-alerts")
     if processor is None:
         raise HTTPException(status_code=500, detail="Region Alerts processor is not available.")
@@ -1926,6 +2415,7 @@ def run_region_alerts_video_preview(video_path: Path, source_name: str | None = 
         model_path=resolve_default_model_path(),
         device=auto_device(),
         show=False,
+        zone_points_normalized=_roi_points_normalized(roi) if roi else None,
     )
     actual_output = _resolve_completed_output_path(output_path, result)
     preview_frame = extract_preview_frame(actual_output)
@@ -1950,14 +2440,29 @@ def run_region_alerts_video_preview(video_path: Path, source_name: str | None = 
     }
 
 
-def run_fire_detection_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+def run_fire_detection_preview(
+    frame: np.ndarray,
+    *,
+    detection_mode: str = "both",
+    roi: dict[str, float] | None = None,
+) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     annotated = frame.copy()
+    fh, fw = annotated.shape[:2]
+    roi_polygon = _roi_polygon_from_normalized(roi, fw, fh) if roi else None
+    if roi_polygon is not None:
+        _apply_roi_overlay(annotated, roi_polygon, "ROI FILTER")
+
     fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
     detections: list[dict[str, str | float]] = []
+    normalized_mode = _normalize_fire_detection_mode(detection_mode)
+    include_fire = normalized_mode in {"fire", "both"}
+    include_smoke = normalized_mode in {"smoke", "both"}
 
-    for region in fire_regions:
+    for region in fire_regions if include_fire else []:
         x1, y1, x2, y2 = region["bbox"]
         confidence = float(region["confidence"])
+        if roi_polygon is not None and not _bbox_center_inside_polygon([x1, y1, x2, y2], roi_polygon):
+            continue
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
         cv2.putText(annotated, f"FIRE {confidence:.0%}", (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2, cv2.LINE_AA)
@@ -1966,9 +2471,11 @@ def run_fire_detection_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict
             "confidence": round(confidence, 4),
         })
 
-    for region in smoke_regions:
+    for region in smoke_regions if include_smoke else []:
         x1, y1, x2, y2 = region["bbox"]
         confidence = float(region["confidence"])
+        if roi_polygon is not None and not _bbox_center_inside_polygon([x1, y1, x2, y2], roi_polygon):
+            continue
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 140, 255), 2)
         cv2.putText(annotated, f"SMOKE {confidence:.0%}", (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 2, cv2.LINE_AA)
@@ -2100,7 +2607,11 @@ def build_playground_preview_response(
     temp_path: Path | None = None,
     cleanup_temp_path: bool = True,
     source_name: str | None = None,
+    preview_options: dict[str, Any] | None = None,
 ) -> dict[str, object]:
+    preview_options = preview_options or {}
+    roi = preview_options.get("roi")
+    fire_detection_mode = _normalize_fire_detection_mode(preview_options.get("fire_detection_mode"))
     try:
         if use_case_id == "ppe-detection":
             annotated_image, detections = run_ppe_preview(frame)
@@ -2113,16 +2624,16 @@ def build_playground_preview_response(
             model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "region-alerts":
             if file_kind == "video" and temp_path is not None:
-                region_video_preview = run_region_alerts_video_preview(temp_path, source_name=source_name)
+                region_video_preview = run_region_alerts_video_preview(temp_path, source_name=source_name, roi=roi)
                 annotated_image = None
                 detections = region_video_preview["detections"]
                 model_source = "use_cases.zone_intrusion"
             else:
-                annotated_image, detections = run_region_alerts_preview(frame)
+                annotated_image, detections = run_region_alerts_preview(frame, roi=roi)
                 region_video_preview = None
                 model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "fire-detection":
-            annotated_image, detections = run_fire_detection_preview(frame)
+            annotated_image, detections = run_fire_detection_preview(frame, detection_mode=fire_detection_mode, roi=roi)
             model_source = "fire-smoke-hsv-preview"
         elif use_case_id == "speed-estimation":
             if file_kind != "video" or temp_path is None:
@@ -2146,6 +2657,10 @@ def build_playground_preview_response(
         "file_kind": file_kind,
         "detections": detections,
         "model_source": model_source,
+        "preview_options": {
+            "fire_detection_mode": fire_detection_mode,
+            "roi_applied": bool(roi),
+        },
     }
     if use_case_id == "region-alerts" and file_kind == "video" and temp_path is not None and region_video_preview is not None:
         response["image_base64"] = region_video_preview["preview_image_base64"]
@@ -3005,6 +3520,8 @@ async def analyze_image(file: UploadFile = File(...)) -> dict[str, object]:
 async def playground_preview(
     file: UploadFile = File(...),
     use_case_id: str = Form(...),
+    fire_detection_mode: str | None = Form(None),
+    roi_json: str | None = Form(None),
 ) -> dict[str, object]:
     meta = get_metadata(use_case_id)
     if meta is None:
@@ -3034,6 +3551,10 @@ async def playground_preview(
         frame=frame,
         temp_path=temp_path,
         source_name=file.filename or "",
+        preview_options={
+            "fire_detection_mode": fire_detection_mode,
+            "roi": _parse_preview_roi(roi_json),
+        },
     )
 
 
@@ -3041,6 +3562,8 @@ async def playground_preview(
 async def playground_preview_sample(
     sample_name: str = Form(...),
     use_case_id: str = Form(...),
+    fire_detection_mode: str | None = Form(None),
+    roi_json: str | None = Form(None),
 ) -> dict[str, object]:
     meta = get_metadata(use_case_id)
     if meta is None:
@@ -3077,6 +3600,10 @@ async def playground_preview_sample(
         frame=frame,
         temp_path=temp_path,
         source_name=sample_path.name,
+        preview_options={
+            "fire_detection_mode": fire_detection_mode,
+            "roi": _parse_preview_roi(roi_json),
+        },
     )
 
 
@@ -3305,6 +3832,16 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
 def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationOverviewResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
     processing_mode = _normalize_processing_mode(payload.processing_mode)
+    zone_points_normalized = (
+        _normalize_zone_points_normalized(payload.zone_points_normalized)
+        if canonical_use_case_id == "region-alerts"
+        else None
+    )
+    rule_config = (
+        _normalize_region_alert_rule_config(payload.rule_config)
+        if canonical_use_case_id == "region-alerts"
+        else None
+    )
     config, credential_mode, bucket_created = _resolve_minio_connection(payload)
     connected_at = _utc_now_iso()
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
@@ -3329,6 +3866,8 @@ def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationO
         credential_mode=credential_mode,
         processing_mode=processing_mode,
         connection=config,
+        zone_points_normalized=zone_points_normalized,
+        rule_config=rule_config,
     )
 
     if processing_mode == "auto":
@@ -3373,6 +3912,16 @@ def list_minio_input_videos(
 )
 def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> MinioProcessSelectedResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
+    zone_points_normalized = (
+        _normalize_zone_points_normalized(payload.zone_points_normalized)
+        if canonical_use_case_id == "region-alerts"
+        else None
+    )
+    rule_config = (
+        _normalize_region_alert_rule_config(payload.rule_config)
+        if canonical_use_case_id == "region-alerts"
+        else None
+    )
     snapshot = _get_integration_state(canonical_use_case_id)
     config = snapshot.get("connection")
 
@@ -3390,6 +3939,13 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
         validate_bucket_access(client, config.bucket)
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"Unable to access the configured MinIO bucket: {error}") from error
+
+    if canonical_use_case_id == "region-alerts":
+        _set_integration_state(
+            canonical_use_case_id,
+            zone_points_normalized=zone_points_normalized,
+            rule_config=rule_config,
+        )
 
     queued_count = 0
     skipped_count = 0
