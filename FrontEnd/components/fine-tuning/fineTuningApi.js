@@ -47,6 +47,12 @@ export function startSetup(sessionId) {
   });
 }
 
+export function startNewSetup(sessionId) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/start-new-setup`, {
+    method: "POST",
+  });
+}
+
 export function loadDatasets(sessionId) {
   return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/datasets`);
 }
@@ -71,6 +77,15 @@ export function loadDatasetDetail(sessionId, datasetId) {
   );
 }
 
+export function deleteDataset(sessionId, datasetId) {
+  return fineTuningRequest(
+    `/api/fine-tuning/${encodeURIComponent(String(sessionId))}/datasets/${encodeURIComponent(String(datasetId))}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function loadLabelState(sessionId) {
   return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels`);
 }
@@ -90,6 +105,53 @@ export async function importLabelExport(sessionId, file) {
     body: formData,
   });
   return parseApiResponse(response);
+}
+
+export function loadAnnotationWorkspace(sessionId, limit = 30) {
+  return fineTuningRequest(
+    `/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/workspace?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export function saveManualAnnotations(sessionId, payload) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/manual`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function autoLabelDataset(sessionId, payload) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/auto-label`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function assistLabelDataset(sessionId, payload) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/assist`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function trainAssistModel(sessionId) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/train-assist-model`, {
+    method: "POST",
+  });
+}
+
+export function assistPropagateLabels(sessionId, payload) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/assist-propagate`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function segmentAnnotationWithSam(sessionId, payload) {
+  return fineTuningRequest(`/api/fine-tuning/${encodeURIComponent(String(sessionId))}/labels/sam`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function prepareDatasetReadyPayload(sessionId) {

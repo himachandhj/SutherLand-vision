@@ -131,6 +131,123 @@ function IntegrationModeButton({ active, label, onClick }) {
   );
 }
 
+function RegionAlertsRulePanel({ ruleConfig, onChange }) {
+  const safeRuleConfig = ruleConfig ?? {
+    trigger_type: "enter",
+    alert_delay_sec: 0,
+    confidence_threshold: 0.5,
+    alerts_enabled: true,
+  };
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
+      <div className="flex flex-col gap-2">
+        <h3 className="text-lg font-semibold text-slate-900">Alert Rules</h3>
+        <p className="text-sm text-slate-500">
+          These rules apply to Region Alerts processing and use the ROI selected in Model Playground.
+        </p>
+      </div>
+
+      <div className="mt-5 grid gap-4 xl:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Detection Scope</div>
+          <div className="mt-2 text-sm font-semibold text-slate-800">Detection Type: Person Intrusion</div>
+          <p className="mt-2 text-sm text-slate-500">The current backend uses person detection inside the selected restricted zone.</p>
+        </div>
+
+        <label className="block rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <span className="block text-sm font-semibold text-slate-700">Trigger Type</span>
+          <select
+            className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition focus:border-brandBlue"
+            value={safeRuleConfig.trigger_type}
+            onChange={(event) => onChange({ ...safeRuleConfig, trigger_type: event.target.value })}
+          >
+            <option value="enter">Person enters zone</option>
+            <option value="exit">Person exits zone</option>
+          </select>
+          <p className="mt-2 text-xs text-slate-500">Exit is available in the UI now. Processing currently uses enter-style intrusion logic.</p>
+        </label>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-semibold text-slate-700" htmlFor="region-alert-delay">Trigger alert after (seconds)</label>
+            <input
+              id="region-alert-delay-number"
+              className="w-20 rounded-lg border border-slate-200 bg-white px-3 py-2 text-right text-sm text-slate-700 outline-none focus:border-brandBlue"
+              max="10"
+              min="0"
+              step="1"
+              type="number"
+              value={safeRuleConfig.alert_delay_sec}
+              onChange={(event) => onChange({ ...safeRuleConfig, alert_delay_sec: Number(event.target.value) })}
+            />
+          </div>
+          <input
+            id="region-alert-delay"
+            className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-brandBlue"
+            max="10"
+            min="0"
+            step="1"
+            type="range"
+            value={safeRuleConfig.alert_delay_sec}
+            onChange={(event) => onChange({ ...safeRuleConfig, alert_delay_sec: Number(event.target.value) })}
+          />
+          <div className="mt-2 flex justify-between text-xs text-slate-500">
+            <span>0s</span>
+            <span>10s</span>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-semibold text-slate-700" htmlFor="region-alert-confidence">Minimum detection confidence</label>
+            <input
+              id="region-alert-confidence-number"
+              className="w-24 rounded-lg border border-slate-200 bg-white px-3 py-2 text-right text-sm text-slate-700 outline-none focus:border-brandBlue"
+              max="1"
+              min="0.1"
+              step="0.05"
+              type="number"
+              value={safeRuleConfig.confidence_threshold}
+              onChange={(event) => onChange({ ...safeRuleConfig, confidence_threshold: Number(event.target.value) })}
+            />
+          </div>
+          <input
+            id="region-alert-confidence"
+            className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-brandBlue"
+            max="1"
+            min="0.1"
+            step="0.05"
+            type="range"
+            value={safeRuleConfig.confidence_threshold}
+            onChange={(event) => onChange({ ...safeRuleConfig, confidence_threshold: Number(event.target.value) })}
+          />
+          <div className="mt-2 flex justify-between text-xs text-slate-500">
+            <span>0.1</span>
+            <span>1.0</span>
+          </div>
+        </div>
+      </div>
+
+      <label className="mt-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+        <input
+          checked={safeRuleConfig.alerts_enabled}
+          className="h-4 w-4 rounded border-slate-300 text-brandBlue focus:ring-brandBlue"
+          type="checkbox"
+          onChange={(event) => onChange({ ...safeRuleConfig, alerts_enabled: event.target.checked })}
+        />
+        <span className="text-sm font-semibold text-slate-700">Enable Alerts</span>
+      </label>
+
+      <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+        Rules are configurable and applied during processing. Detection model can be improved using fine-tuning.
+      </div>
+    </section>
+  );
+}
+
 function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLabel }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
@@ -322,6 +439,7 @@ export default function Integration({
   integrationFetchMessage,
   integrationProcessMessage,
   expandedRunId,
+  regionAlertsRuleConfig,
   onIntegrationFieldChange,
   onIntegrationConnect,
   onIntegrationModeChange,
@@ -329,6 +447,7 @@ export default function Integration({
   onIntegrationFetchVideos,
   onIntegrationSelectionChange,
   onIntegrationProcessSelected,
+  onRegionAlertsRuleConfigChange,
   onToggleRunAnalysis,
 }) {
   const supportedUseCase = integrationSupportedUseCases.has(activeUseCase.id);
@@ -337,6 +456,7 @@ export default function Integration({
   const recentRuns = integrationOverview?.recent_runs ?? [];
   const activeMode = connection?.processing_mode ?? integrationMode;
   const isAutoMode = activeMode === "auto";
+  const isRegionAlerts = activeUseCase.id === "region-alerts";
 
   return (
     <div className="space-y-6">
@@ -429,6 +549,13 @@ export default function Integration({
           )}
         </div>
       </section>
+
+      {isRegionAlerts && (
+        <RegionAlertsRulePanel
+          ruleConfig={regionAlertsRuleConfig}
+          onChange={onRegionAlertsRuleConfigChange}
+        />
+      )}
 
       {isAutoMode ? (
         <IntegrationAutoPanel connection={connection} isConnected={integrationOverview.connected} isProcessing={integrationOverview.processing} useCaseLabel={useCaseLabel} />

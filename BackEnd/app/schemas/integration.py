@@ -12,6 +12,8 @@ class MinioConnectRequest(BaseModel):
     output_prefix: str = "output/"
     use_case_id: str = "ppe-detection"
     processing_mode: str = "manual"
+    zone_points_normalized: list[list[float]] | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class MinioConnectionDetails(BaseModel):
@@ -24,6 +26,7 @@ class MinioConnectionDetails(BaseModel):
     credential_mode: str = "direct"
     processing_mode: str = "manual"
     connected_at: str | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class IntegrationVideoItem(BaseModel):
@@ -77,6 +80,8 @@ class MinioInputVideoListResponse(BaseModel):
 class MinioProcessSelectedRequest(BaseModel):
     use_case_id: str = "ppe-detection"
     object_keys: list[str] = Field(default_factory=list)
+    zone_points_normalized: list[list[float]] | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class MinioProcessSelectedResponse(BaseModel):

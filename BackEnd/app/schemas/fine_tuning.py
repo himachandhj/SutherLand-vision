@@ -18,6 +18,51 @@ class FineTuningLabelStatusRequest(BaseModel):
     label_status: str
 
 
+class FineTuningAnnotationBox(BaseModel):
+    class_name: str | None = None
+    class_id: int | None = None
+    x_center: float
+    y_center: float
+    width: float
+    height: float
+
+
+class FineTuningAnnotationPoint(BaseModel):
+    x: float
+    y: float
+
+
+class FineTuningManualAnnotationRequest(BaseModel):
+    media_object_key: str | None = None
+    item_id: str | None = None
+    file_name: str | None = None
+    class_names: list[str] = Field(default_factory=list)
+    annotations: list[FineTuningAnnotationBox] = Field(default_factory=list)
+
+
+class FineTuningAutoLabelRequest(BaseModel):
+    mode: str = "yolo"
+    prompts: list[str] = Field(default_factory=list)
+    item_ids: list[str] = Field(default_factory=list)
+    limit: int = 12
+    confidence: float = 0.25
+
+
+class FineTuningAssistLabelRequest(BaseModel):
+    prompts: list[str] = Field(default_factory=list)
+    limit: int = 24
+    confidence: float = 0.25
+
+
+class FineTuningSamAssistRequest(BaseModel):
+    media_object_key: str | None = None
+    item_id: str | None = None
+    file_name: str | None = None
+    class_name: str | None = None
+    point: FineTuningAnnotationPoint | None = None
+    box: FineTuningAnnotationBox | None = None
+
+
 class FineTuningSplitSummary(BaseModel):
     train: int = 0
     val: int = 0

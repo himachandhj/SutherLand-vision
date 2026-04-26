@@ -87,7 +87,7 @@ def _readiness_status(score: int) -> str:
 
 def _recommended_action(score: int, dataset: dict | None, audit: dict | None) -> str:
     if not dataset:
-        return "Connect or select a dataset before starting setup."
+        return "Review the safe fine-tuning path, then choose or register data in Step 2."
     if not audit:
         return "Run data check before continuing setup."
     if score >= 85:
@@ -103,7 +103,7 @@ def ensure_step_one_session(usecase_slug: str) -> dict[str, Any]:
     model = ensure_default_model_version(usecase_slug=usecase_slug)
     dataset = get_latest_dataset(usecase_slug)
     if dataset is None:
-        dataset = upsert_default_dataset(
+        upsert_default_dataset(
             usecase_slug=usecase_slug,
             name=f"{usecase_slug.replace('-', ' ').title()} MinIO dataset",
             source_type="minio",
@@ -117,13 +117,12 @@ def ensure_step_one_session(usecase_slug: str) -> dict[str, Any]:
         session = create_fine_tuning_session(
             usecase_slug=usecase_slug,
             starting_model_name=str(model["version_name"]),
-            selected_dataset_id=int(dataset["id"]),
-            recommended_next_action="Run data check before continuing setup.",
+            selected_dataset_id=None,
+            recommended_next_action=_recommended_action(0, None, None),
         )
-    elif not session.get("selected_dataset_id"):
+    elif not session.get("starting_model_name"):
         session = update_fine_tuning_session(
             int(session["id"]),
-            selected_dataset_id=int(dataset["id"]),
             starting_model_name=session.get("starting_model_name") or model["version_name"],
         )
 
@@ -133,7 +132,14 @@ def ensure_step_one_session(usecase_slug: str) -> dict[str, Any]:
 def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
     session = ensure_step_one_session(usecase_slug)
     model = get_active_model_version(usecase_slug) or ensure_default_model_version(usecase_slug=usecase_slug)
-    dataset = get_dataset(int(session["selected_dataset_id"])) if session.get("selected_dataset_id") else get_latest_dataset(usecase_slug)
+    dataset = get_dataset(int(session["selected_dataset_id"])) if session.get("selected_dataset_id") else None
+    if session.get("selected_dataset_id") and dataset is None:
+        session = update_fine_tuning_session(
+            int(session["id"]),
+            selected_dataset_id=None,
+            readiness_score=None,
+            recommended_next_action=_recommended_action(0, None, None),
+        )
     latest_audit = (
         get_latest_dataset_audit_for_dataset(
             dataset_id=int(dataset["id"]),
@@ -156,6 +162,20 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         except Exception:
             live_check = None
 
+    audit_summary = latest_audit.get("summary_json", {}) if latest_audit else (live_check.get("summary", {}) if live_check else {})
+    file_count = int(
+        audit_summary.get("file_count", audit_summary.get("supported_file_count"))
+        if isinstance(audit_summary, dict)
+        else (dataset.get("file_count") or 0)
+    ) if dataset else 0
+    label_status = (
+        str(audit_summary.get("label_status") or dataset.get("label_status") or "unknown")
+        if dataset
+        else "missing"
+    )
+    if file_count <= 0:
+        label_status = "missing"
+
     readiness_score = int(
         latest_audit.get("readiness_score")
         if latest_audit and latest_audit.get("readiness_score") is not None
@@ -163,7 +183,10 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         if live_check
         else 0
     )
+    if dataset and file_count <= 0:
+        readiness_score = 0
     recommended_next_action = _recommended_action(readiness_score, dataset, latest_audit)
+    selected_dataset_id = int(session["selected_dataset_id"]) if session.get("selected_dataset_id") else None
 
     if session.get("readiness_score") != readiness_score or session.get("recommended_next_action") != recommended_next_action:
         session = update_fine_tuning_session(
@@ -172,11 +195,13 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
             recommended_next_action=recommended_next_action,
         )
 
-    audit_summary = latest_audit.get("summary_json", {}) if latest_audit else (live_check.get("summary", {}) if live_check else {})
     issues = latest_audit.get("issues_json", []) if latest_audit else (live_check.get("issues", []) if live_check else [])
 
     return {
         "session_id": int(session["id"]),
+        "current_step": int(session.get("current_step") or 1),
+        "selected_dataset_id": selected_dataset_id,
+        "resume_message": f"Resuming previous setup: {dataset['name']}" if dataset and selected_dataset_id else "",
         "step": 1,
         "title": "Get started with fine-tuning",
         "subtitle": "Check whether your examples, labels, and baseline model are ready before setup.",
@@ -197,14 +222,18 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         "summary_cards": {
             "data_readiness": {
                 "label": "Data readiness",
-                "score": readiness_score,
-                "status": _readiness_status(readiness_score) if latest_audit or live_check else "not_checked",
-                "file_count": int(dataset.get("file_count") or 0) if dataset else 0,
-                "label_status": dataset.get("label_status", "unknown") if dataset else "missing",
+                "score": readiness_score if dataset else None,
+                "status": (
+                    "not_selected"
+                    if not dataset
+                    else "invalid" if file_count <= 0 else (_readiness_status(readiness_score) if latest_audit or live_check else "not_checked")
+                ),
+                "file_count": file_count,
+                "label_status": label_status,
                 "issues_count": len(issues),
                 "dataset": {
-                    "id": int(dataset["id"]) if dataset else None,
-                    "name": dataset.get("name") if dataset else "No dataset selected",
+                    "id": selected_dataset_id,
+                    "name": dataset.get("name") if dataset else "No dataset selected yet",
                     "source_type": dataset.get("source_type") if dataset else "",
                     "minio_bucket": dataset.get("minio_bucket") if dataset else "",
                     "minio_prefix": dataset.get("minio_prefix") if dataset else "",
@@ -230,8 +259,8 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         "recommended_next_action": recommended_next_action,
         "actions": {
             "can_run_data_check": bool(dataset),
-            "can_start_setup": bool((latest_audit or live_check) and readiness_score >= 70),
-            "can_continue": int(session.get("current_step") or 1) > 1,
+            "can_start_setup": bool((latest_audit or live_check) and file_count > 0 and readiness_score >= 70),
+            "can_continue": bool(selected_dataset_id or int(session.get("current_step") or 1) > 1),
         },
     }
 
@@ -242,12 +271,9 @@ def start_data_check(session_id: int) -> dict[str, Any]:
         raise ValueError("Fine-tuning session not found.")
 
     dataset_id = session.get("selected_dataset_id")
-    dataset = get_dataset(int(dataset_id)) if dataset_id else get_latest_dataset(str(session["usecase_slug"]))
+    dataset = get_dataset(int(dataset_id)) if dataset_id else None
     if not dataset:
         raise ValueError("No dataset is selected for this fine-tuning session.")
-
-    if not session.get("selected_dataset_id"):
-        update_fine_tuning_session(session_id, selected_dataset_id=int(dataset["id"]))
 
     audit = create_dataset_audit(dataset_id=int(dataset["id"]), session_id=session_id, status="running")
     update_dataset_audit_summary(int(dataset["id"]), file_count=int(dataset.get("file_count") or 0), label_status=str(dataset.get("label_status") or "unknown"), audit_status="running")
@@ -458,3 +484,28 @@ def start_setup(session_id: int) -> dict[str, Any]:
     # TODO Parts 2-7: connect this handoff to dataset selection, labeling review,
     # training configuration, training run execution, evaluation, and promotion.
     return {"success": True, "session_id": session_id, "current_step": updated["current_step"], "status": updated["status"]}
+
+
+def start_new_setup(session_id: int) -> dict[str, Any]:
+    session = get_fine_tuning_session(session_id)
+    if not session:
+        raise ValueError("Fine-tuning session not found.")
+    if not session.get("starting_model_name"):
+        model = ensure_default_model_version(usecase_slug=str(session["usecase_slug"]))
+        session["starting_model_name"] = model["version_name"]
+    updated = update_fine_tuning_session(
+        session_id,
+        status="draft",
+        current_step=1,
+        selected_dataset_id=None,
+        readiness_score=None,
+        starting_model_name=session.get("starting_model_name"),
+        recommended_next_action=_recommended_action(0, None, None),
+    )
+    return {
+        "success": True,
+        "session_id": session_id,
+        "current_step": int(updated["current_step"]),
+        "status": updated["status"],
+        "selected_dataset_id": updated.get("selected_dataset_id"),
+    }

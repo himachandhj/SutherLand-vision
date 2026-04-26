@@ -1903,6 +1903,27 @@ def update_dataset_label_status(dataset_id: int, *, label_status: str) -> dict:
         return _row_to_dict(row)
 
 
+def reassign_selected_dataset_for_sessions(previous_dataset_id: int, replacement_dataset_id: int | None) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE fine_tuning_sessions
+            SET selected_dataset_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE selected_dataset_id = ?
+            """,
+            (replacement_dataset_id, previous_dataset_id),
+        )
+        connection.commit()
+
+
+def delete_dataset_registration(dataset_id: int) -> None:
+    with get_connection() as connection:
+        connection.execute("DELETE FROM dataset_audits WHERE dataset_id = ?", (dataset_id,))
+        connection.execute("DELETE FROM fine_tuning_dataset_versions WHERE dataset_id = ?", (dataset_id,))
+        connection.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+        connection.commit()
+
+
 def get_active_model_version(usecase_slug: str) -> dict | None:
     with get_connection() as connection:
         row = connection.execute(

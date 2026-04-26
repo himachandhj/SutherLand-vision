@@ -185,6 +185,7 @@ function normalizeRegionAlertRow(row, index) {
     inputReference: row.inputReference ?? row.input_reference ?? "",
     outputReference: row.outputReference ?? row.output_reference ?? "",
     isLatestDemoIncident: Boolean(row.isLatestDemoIncident ?? row.is_latest_demo_incident),
+    isSyntheticDemo: Boolean(row.isSyntheticDemo ?? row.is_synthetic_demo),
     escalationPriority: 0,
   };
 
@@ -1355,6 +1356,10 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     const latest = byTimestamp(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows).at(-1)?.timestamp;
     return latest ? formatDateTime(latest) : "N/A";
   }, [slug, effectiveSourceRows, effectiveFireRows]);
+  const regionSyntheticCount = useMemo(
+    () => (slug === "region-alerts" ? effectiveSourceRows.filter((row) => row.isSyntheticDemo).length : 0),
+    [slug, effectiveSourceRows],
+  );
 
   const optionsFor = (key, includeAllOption = true) => {
     const values = uniqueOptions(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows, key);
@@ -1480,6 +1485,13 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
         </header>
 
         <div className="space-y-6 px-4 py-6 md:px-8">
+          {slug === "region-alerts" && regionSyntheticCount > 0 ? (
+            <Card className="border-amber-200 bg-amber-50">
+              <CardContent className="p-4 text-sm text-slate-700">
+                <span className="font-semibold text-slate-900">Demo data included in dashboard.</span> Synthetic Region Alerts history is mixed with real processed runs in this view.
+              </CardContent>
+            </Card>
+          ) : null}
           <Card className="border-brand-blue/10">
             <CardContent className="flex items-start gap-4 p-5">
               <div className="rounded-xl bg-brand-red-tint p-3 text-brand-red">

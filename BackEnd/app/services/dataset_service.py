@@ -6,10 +6,12 @@ from typing import Any
 from app.core.config import settings
 from app.core.database import (
     create_dataset,
+    delete_dataset_registration,
     get_dataset,
     get_fine_tuning_session,
     get_latest_dataset_audit_for_dataset,
     list_datasets_for_usecase,
+    reassign_selected_dataset_for_sessions,
     update_dataset_audit_summary,
     update_fine_tuning_session,
 )
@@ -152,18 +154,30 @@ def _dataset_summary(dataset: dict[str, Any], selected_dataset_id: int | None = 
     latest_audit = get_latest_dataset_audit_for_dataset(dataset_id=int(dataset["id"]))
     audit_summary = latest_audit.get("summary_json", {}) if latest_audit else {}
     label_count = audit_summary.get("label_file_count") if isinstance(audit_summary, dict) else None
-    item_count = audit_summary.get("file_count") if isinstance(audit_summary, dict) else None
+    item_count = (
+        audit_summary.get("file_count", audit_summary.get("supported_file_count"))
+        if isinstance(audit_summary, dict)
+        else None
+    )
+    file_count = int(item_count if item_count is not None else (dataset.get("file_count") or 0))
     label_status = resolve_label_status(dataset.get("label_status"), item_count=item_count, label_count=label_count)
+    if file_count <= 0:
+        label_status = "missing"
+    readiness_status = latest_audit.get("status") if latest_audit else None
+    readiness_score = latest_audit.get("readiness_score") if latest_audit else None
+    if file_count <= 0:
+        readiness_status = "invalid"
+        readiness_score = 0
     return {
         "dataset_id": int(dataset["id"]),
         "name": dataset["name"],
         "source_type": dataset["source_type"],
         "media_type": dataset.get("media_type") or "unknown",
-        "file_count": int(dataset.get("file_count") or 0),
+        "file_count": file_count,
         "label_status": label_status,
         "audit_status": _normalize_audit_status(dataset.get("audit_status")),
-        "readiness_status": latest_audit.get("status") if latest_audit else None,
-        "readiness_score": latest_audit.get("readiness_score") if latest_audit else None,
+        "readiness_status": readiness_status,
+        "readiness_score": readiness_score,
         "minio_bucket": dataset.get("minio_bucket"),
         "minio_prefix": dataset.get("minio_prefix"),
         "is_selected": selected_dataset_id == int(dataset["id"]),
@@ -304,6 +318,8 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
     label_count = int(audit_summary.get("label_file_count") or 0) if isinstance(audit_summary, dict) else 0
     item_count = int(audit_summary.get("file_count") or dataset.get("file_count") or 0) if isinstance(audit_summary, dict) else int(dataset.get("file_count") or 0)
     label_status = resolve_label_status(dataset.get("label_status"), item_count=item_count, label_count=(label_count if latest_audit else None))
+    if item_count <= 0:
+        label_status = "missing"
     labels_available = label_status in {"ready", "partial"}
 
     return {
@@ -329,4 +345,42 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
         },
         # TODO Step 3: replace this light signal with label schema/class coverage checks.
         "label_readiness": label_status,
+    }
+
+
+def delete_dataset_for_session(session_id: int, dataset_id: int) -> dict[str, Any]:
+    session = _get_session_or_raise(session_id)
+    dataset = get_dataset(dataset_id)
+    if not dataset:
+        raise ValueError("Dataset not found.")
+    if dataset["usecase_slug"] != session["usecase_slug"]:
+        raise ValueError("Dataset does not belong to this fine-tuning use case.")
+
+    delete_dataset_registration(dataset_id)
+
+    remaining_datasets = list_datasets_for_usecase(str(session["usecase_slug"]))
+    replacement_dataset_id: int | None = None
+    if remaining_datasets:
+        replacement_summaries = [_dataset_summary(item) for item in remaining_datasets]
+        replacement = next((item for item in replacement_summaries if int(item.get("file_count") or 0) > 0), replacement_summaries[0])
+        replacement_dataset_id = int(replacement["dataset_id"])
+
+    reassign_selected_dataset_for_sessions(dataset_id, replacement_dataset_id)
+
+    recommended_next_action = (
+        "Run data check for the selected dataset before continuing."
+        if replacement_dataset_id
+        else "Register or select a dataset before continuing."
+    )
+    updated_session = update_fine_tuning_session(
+        int(session["id"]),
+        selected_dataset_id=replacement_dataset_id,
+        readiness_score=None,
+        recommended_next_action=recommended_next_action,
+    )
+
+    return {
+        **list_datasets_for_session(session_id),
+        "deleted_dataset_id": dataset_id,
+        "selected_dataset_id": updated_session.get("selected_dataset_id"),
     }

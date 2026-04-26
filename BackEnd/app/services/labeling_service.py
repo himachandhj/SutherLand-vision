@@ -95,13 +95,24 @@ def _label_state_response(session: dict[str, Any], dataset: dict[str, Any]) -> d
     guidance = _guidance_for_status(label_status)
     readiness_score = _readiness_score(session, audit)
     audit_status = audit.get("status") if audit else dataset.get("audit_status", "not_run")
+    warnings = [issue.get("message") or issue.get("code") for issue in audit.get("issues_json", [])] if audit else []
+    blocking_issues = [
+        issue.get("message") or issue.get("code")
+        for issue in audit.get("issues_json", [])
+        if issue.get("severity") == "high"
+    ] if audit else []
     return {
         "session_id": int(session["id"]),
         "dataset_id": int(dataset["id"]),
         "dataset_name": dataset["name"],
         "current_label_status": label_status,
+        "item_count": int(item_count or dataset.get("file_count") or 0),
+        "label_count": int(label_count or 0),
+        "label_coverage": audit_summary.get("label_coverage") if isinstance(audit_summary, dict) else None,
         "readiness_score": readiness_score,
         "audit_status": audit_status or "not_run",
+        "warnings": [item for item in warnings if item],
+        "blocking_issues": [item for item in blocking_issues if item],
         **guidance,
     }
 

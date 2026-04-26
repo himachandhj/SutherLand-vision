@@ -143,6 +143,67 @@ def _detect_annotation_format(label_items: list[dict[str, Any]], media_items: li
     return "unknown"
 
 
+def _read_object_bytes(client: Any, bucket: str, object_key: str) -> bytes:
+    response = client.get_object(bucket, object_key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def _valid_yolo_line_count(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 5:
+            continue
+        try:
+            class_id = int(float(parts[0]))
+            x_center = float(parts[1])
+            y_center = float(parts[2])
+            width = float(parts[3])
+            height = float(parts[4])
+        except ValueError:
+            continue
+        if class_id < 0:
+            continue
+        if any(value < 0 or value > 1 for value in [x_center, y_center, width, height]):
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        count += 1
+    return count
+
+
+def _valid_label_stems(
+    client: Any | None,
+    bucket: str,
+    label_items: list[dict[str, Any]],
+    media_items: list[dict[str, Any]],
+) -> set[str]:
+    if client is None:
+        return set()
+
+    media_stems = {PurePosixPath(str(item.get("object_key") or "")).stem for item in media_items}
+    valid_stems: set[str] = set()
+    for item in label_items:
+        if str(item.get("suffix") or "").lower() != ".txt":
+            continue
+        object_key = str(item.get("object_key") or "")
+        stem = PurePosixPath(object_key).stem
+        if stem not in media_stems:
+            continue
+        try:
+            text = _read_object_bytes(client, bucket, object_key).decode("utf-8")
+        except Exception:
+            continue
+        if _valid_yolo_line_count(text) <= 0:
+            continue
+        valid_stems.add(stem)
+    return valid_stems
+
+
 def _task_type(usecase_slug: str) -> str:
     return TASK_TYPE_BY_USE_CASE.get(usecase_slug, "unknown")
 
@@ -295,7 +356,8 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
     annotation_format = _detect_annotation_format(label_items, media_items)
     task_type = _task_type(str(session["usecase_slug"]))
     item_count = len(media_items)
-    label_count = len(label_items)
+    valid_label_stems = _valid_label_stems(client, str(dataset.get("minio_bucket") or settings.minio_bucket), label_items, media_items)
+    label_count = len(valid_label_stems)
     label_status = compute_label_status(item_count, label_count)
     if label_status != _normalize_label_status(dataset.get("label_status")):
         dataset = update_dataset_label_status(int(dataset["id"]), label_status=label_status)

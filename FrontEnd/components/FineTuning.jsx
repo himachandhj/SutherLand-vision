@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, PlayCircle } from "lucide-react";
 
-import { getIntegrationDefaults } from "./visionLabConfig";
+import { getIntegrationDefaults, sectionLabelToParam } from "./visionLabConfig";
 import {
   DEFAULT_ADVANCED_SETTINGS,
   getFineTuningConfig,
@@ -17,6 +18,7 @@ import {
   promoteMockCandidate,
 } from "./fine-tuning/mockFineTuningData";
 import {
+  deleteDataset,
   loadDataCheckStatus,
   loadDatasetDetail,
   loadDatasets,
@@ -27,6 +29,7 @@ import {
   registerDataset,
   runDataCheck,
   selectDataset,
+  startNewSetup,
   startSetup,
   updateLabelStatus,
 } from "./fine-tuning/fineTuningApi";
@@ -110,7 +113,7 @@ function normalizeDatasetName(name) {
 }
 
 function getLabelStatusDisplay(labelStatus, invalid = false) {
-  if (invalid) return "Invalid prefix";
+  if (invalid) return "No supported files";
   if (labelStatus === "ready") return "Labels ready";
   if (labelStatus === "partial") return "Partial labels";
   if (labelStatus === "missing") return "Needs labels";
@@ -135,13 +138,7 @@ function isDatasetInvalid(dataset) {
     dataset?.validation?.prefix_exists === false ||
     dataset?.validation?.bucket_accessible === false;
 
-  return (
-    fileCount === 0 &&
-    (prefixValidationFailed ||
-      dataset?.audit_status === "not_run" ||
-      dataset?.label_status === "unknown" ||
-      dataset?.label_status === undefined)
-  );
+  return fileCount === 0 || prefixValidationFailed;
 }
 
 function getDatasetFileCount(dataset) {
@@ -396,6 +393,8 @@ function getClassBalanceMessage(classRows) {
 
 function buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset, datasetDetail, datasetReadyPayload }) {
   const dataCard = step1Data?.summary_cards?.data_readiness ?? {};
+  const selectedDatasetId = step1Data?.selected_dataset_id ?? dataCard?.dataset?.id ?? selectedDataset?.id ?? "";
+  const hasSelectedDataset = Boolean(selectedDatasetId);
   const auditSummary =
     dataCheckStatus?.summary ??
     datasetDetail?.dataset?.latest_audit?.summary ??
@@ -437,26 +436,38 @@ function buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset,
       "unknown",
   ).toLowerCase();
   const readinessScore = firstFiniteNumber(contract.readiness_score, dataCheckStatus?.readiness_score, dataCard.score);
-  const labelsMissing = labelStatus === "missing" || labelCount === 0;
+  const normalizedReadinessScore = readinessScore === null ? null : Number(readinessScore);
+  const labelsMissing = hasSelectedDataset && (labelStatus === "missing" || labelCount === 0);
+  const readinessStatus = !hasSelectedDataset
+    ? "Choose data"
+    : labelsMissing || (normalizedReadinessScore !== null && normalizedReadinessScore < 50)
+      ? "Blocked"
+      : labelStatus === "partial" || (normalizedReadinessScore !== null && normalizedReadinessScore < 85)
+        ? "Ready with warnings"
+        : "Ready";
 
   let recommendation = "Dataset looks usable. Continue to the next step.";
-  if (labelsMissing) {
+  if (!hasSelectedDataset) {
+    recommendation = step1Data?.recommended_next_action ?? "Review the safe fine-tuning path, then choose or register data in Step 2.";
+  } else if (labelsMissing) {
     recommendation = "Labels are missing. Go to the Labels step before training.";
-  } else if (balance.status === "imbalanced") {
-    recommendation = "Review class balance before continuing.";
-  } else if (balance.status === "unavailable") {
-    recommendation = "Class distribution is not available yet. Run a data check before continuing.";
+  } else if (readinessStatus === "Ready with warnings") {
+    recommendation = "Review dataset warnings before continuing.";
   }
 
   return {
+    datasetName: hasSelectedDataset ? selectedDataset?.name ?? dataCard?.dataset?.name ?? "Selected dataset" : "No dataset selected yet",
     classRows,
     balance,
     itemCount,
     labelCount,
     labelStatus,
+    hasSelectedDataset,
     labelsMissing,
     readinessScore,
+    readinessStatus,
     recommendation,
+    resumeMessage: hasSelectedDataset ? step1Data?.resume_message ?? `Resuming previous setup: ${selectedDataset?.name ?? dataCard?.dataset?.name ?? "selected dataset"}` : "",
   };
 }
 
@@ -491,9 +502,105 @@ function buildTrainingJob(mockTrainingJob, step1Data, dataCheckStatus) {
   };
 }
 
+function buildCurrentPlanState({
+  activeStepId,
+  currentStep,
+  selectedDataset,
+  selectedDatasetDetail,
+  labelState,
+  datasetReadyPayload,
+  dataCheckStatus,
+  trainingJob,
+}) {
+  const selectedDetail = selectedDatasetDetail?.dataset ?? selectedDatasetDetail ?? {};
+  const labelStatus = String(
+    datasetReadyPayload?.label_status ??
+      labelState?.current_label_status ??
+      selectedDatasetDetail?.label_readiness ??
+      selectedDetail?.label_status ??
+      selectedDataset?.label_status ??
+      "unknown",
+  ).toLowerCase();
+  const handoffStatus = String(datasetReadyPayload?.status ?? "").toLowerCase();
+
+  let progressPercent = 10;
+  let status = "blocked";
+
+  if (selectedDataset) {
+    progressPercent = 24;
+    status = selectedDataset.isInvalid ? "blocked" : "normal";
+  }
+
+  if (selectedDataset && !selectedDataset.isInvalid) {
+    progressPercent = Math.max(progressPercent, 38);
+    status = "normal";
+  }
+
+  if (dataCheckStatus?.status === "running") {
+    return {
+      status: "running",
+      progressPercent: 20,
+    };
+  }
+
+  if (dataCheckStatus && dataCheckStatus.status !== "not_started") {
+    if (dataCheckStatus.status === "failed") {
+      progressPercent = Math.max(progressPercent, 18);
+      status = "blocked";
+    } else {
+      progressPercent = Math.max(progressPercent, 46);
+      status = selectedDataset?.isInvalid ? "blocked" : "normal";
+    }
+  }
+
+  if ((currentStep >= 2 || activeStepId === "data") && selectedDataset) {
+    progressPercent = Math.max(progressPercent, selectedDataset?.isInvalid ? 24 : 46);
+  }
+
+  if (currentStep >= 3 || activeStepId === "labels") {
+    progressPercent = Math.max(progressPercent, 58);
+    if (labelStatus === "missing" || !selectedDataset || selectedDataset?.isInvalid) {
+      status = "blocked";
+    } else if (labelStatus === "partial" || labelStatus === "unknown") {
+      progressPercent = Math.max(progressPercent, 66);
+      status = "warning";
+    } else if (labelStatus === "ready") {
+      progressPercent = Math.max(progressPercent, 74);
+      status = "normal";
+    }
+  }
+
+  if (handoffStatus === "ready_with_warnings") {
+    progressPercent = Math.max(progressPercent, 84);
+    status = "warning";
+  } else if (handoffStatus === "ready_for_training") {
+    progressPercent = Math.max(progressPercent, 90);
+    status = "compliant";
+  } else if (handoffStatus === "blocked") {
+    progressPercent = Math.max(progressPercent, 60);
+    status = "blocked";
+  }
+
+  if (["plan", "training", "compare", "rollout"].includes(activeStepId)) {
+    progressPercent = Math.max(progressPercent, Number(trainingJob?.progress_percent ?? 0));
+    status =
+      trainingJob?.status === "complete"
+        ? "compliant"
+        : trainingJob?.status === "running"
+          ? "running"
+          : status;
+  }
+
+  return {
+    status,
+    progressPercent,
+  };
+}
+
 const sleep = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 export default function FineTuning({ activeUseCase }) {
+  const searchParams = useSearchParams();
   const [mockState, setMockState] = useState(() => buildMockFineTuningState(activeUseCase));
   const [formState, setFormState] = useState(() => getInitialFormState(activeUseCase));
   const [registerForm, setRegisterForm] = useState(() => getInitialRegisterForm(activeUseCase));
@@ -514,6 +621,7 @@ export default function FineTuning({ activeUseCase }) {
   const [errors, setErrors] = useState({});
 
   const config = getFineTuningConfig(activeUseCase);
+  const requestedFineTuningStep = searchParams.get("ftStep");
   const mappedDatasets = useMemo(() => sortDatasetsForStep(datasets).map(mapDatasetFromApi), [datasets]);
   const selectedDataset = useMemo(
     () => mappedDatasets.find((dataset) => dataset.id === String(formState.selectedDatasetId)) ?? null,
@@ -537,6 +645,28 @@ export default function FineTuning({ activeUseCase }) {
     [step1Data, dataCheckStatus, selectedDataset, datasetDetail, datasetReadyPayload],
   );
   const trainingJob = useMemo(() => buildTrainingJob(mockState.trainingJob, step1Data, dataCheckStatus), [mockState.trainingJob, step1Data, dataCheckStatus]);
+  const currentPlanState = useMemo(
+    () =>
+      buildCurrentPlanState({
+        activeStepId,
+        currentStep,
+        selectedDataset,
+        selectedDatasetDetail: datasetDetail,
+        labelState,
+        datasetReadyPayload,
+        dataCheckStatus,
+        trainingJob,
+      }),
+    [activeStepId, currentStep, selectedDataset, datasetDetail, labelState, datasetReadyPayload, dataCheckStatus, trainingJob],
+  );
+  const annotationEditorHref = useMemo(() => {
+    if (!sessionId) return "";
+    const params = new URLSearchParams({
+      usecase: activeUseCase.id,
+      section: sectionLabelToParam[activeUseCase.category] ?? "safety-compliance",
+    });
+    return `/fine-tuning/${encodeURIComponent(String(sessionId))}/annotate?${params.toString()}`;
+  }, [activeUseCase.category, activeUseCase.id, sessionId]);
 
   const steps = useMemo(
     () => [
@@ -568,13 +698,11 @@ export default function FineTuning({ activeUseCase }) {
       setError("step1", "");
       try {
         const payload = await loadStepOne(activeUseCase.id);
-        const datasetId = payload?.summary_cards?.data_readiness?.dataset?.id;
+        const datasetId = payload?.selected_dataset_id ?? payload?.summary_cards?.data_readiness?.dataset?.id;
         setStep1Data(payload);
         setSessionId(payload.session_id);
-        setCurrentStep(1);
-        if (datasetId) {
-          setFormState((current) => ({ ...current, selectedDatasetId: String(datasetId) }));
-        }
+        setCurrentStep(payload.current_step ?? 1);
+        setFormState((current) => ({ ...current, selectedDatasetId: datasetId ? String(datasetId) : "" }));
         return payload;
       } catch (error) {
         setError("step1", getErrorMessage(error, "Unable to load fine-tuning setup."));
@@ -594,18 +722,21 @@ export default function FineTuning({ activeUseCase }) {
       try {
         let payload = await loadDatasets(sessionId);
         let list = Array.isArray(payload.datasets) ? payload.datasets : [];
-        let selected = chooseDatasetForStep(list);
-        let selectedId = getDatasetApiId(selected);
         const backendSelectedId =
           payload.selected_dataset_id !== undefined && payload.selected_dataset_id !== null
             ? String(payload.selected_dataset_id)
             : getDatasetApiId(list.find((dataset) => dataset?.is_selected === true));
+        let selected = backendSelectedId ? list.find((dataset) => getDatasetApiId(dataset) === backendSelectedId) ?? null : null;
+        if (backendSelectedId && !selected) {
+          selected = chooseDatasetForStep(list);
+        }
+        let selectedId = getDatasetApiId(selected);
 
-        if (repairBackendSelection && selectedId && selectedId !== backendSelectedId && !isDatasetInvalid(selected)) {
+        if (repairBackendSelection && backendSelectedId && selectedId && selectedId !== backendSelectedId && !isDatasetInvalid(selected)) {
           await selectDataset(sessionId, selectedId);
           payload = await loadDatasets(sessionId);
           list = Array.isArray(payload.datasets) ? payload.datasets : list;
-          selected = chooseDatasetForStep(list);
+          selected = list.find((dataset) => getDatasetApiId(dataset) === selectedId) ?? chooseDatasetForStep(list);
           selectedId = getDatasetApiId(selected);
         }
 
@@ -719,6 +850,13 @@ export default function FineTuning({ activeUseCase }) {
     }
   }, [activeStepId, loadLabelStateFromBackend, sessionId]);
 
+  useEffect(() => {
+    if (!sessionId || requestedFineTuningStep !== "labels") return;
+    setActiveStepId("labels");
+    setCurrentStep((current) => Math.max(current, 3));
+    void loadDatasetsState({ silent: true, repairBackendSelection: true });
+  }, [loadDatasetsState, requestedFineTuningStep, sessionId]);
+
   const updateFormField = (field, value) => {
     setFormState((current) => ({ ...current, [field]: value }));
   };
@@ -820,11 +958,40 @@ export default function FineTuning({ activeUseCase }) {
       setCurrentStep(payload.current_step ?? 2);
       setActiveStepId("data");
       await loadDatasetsState({ silent: true });
-      setPageMessage("Setup started. Choose or register the dataset for this tuning run.");
+      setPageMessage(
+        step1Data?.selected_dataset_id
+          ? "Resuming setup. Review or change the selected dataset in Step 2."
+          : "Review the safe path, then choose or register the dataset for this tuning run.",
+      );
     } catch (error) {
       setError("step1", getErrorMessage(error, "Unable to start setup."));
     } finally {
       setLoadingFlag("startSetup", false);
+    }
+  };
+
+  const handleStartNewSetup = async () => {
+    if (!sessionId) {
+      setError("step1", "Fine-tuning session is not loaded yet.");
+      return;
+    }
+    setLoadingFlag("startNewSetup", true);
+    setError("step1", "");
+    try {
+      await startNewSetup(sessionId);
+      setDatasetDetail(null);
+      setLabelState(null);
+      setDatasetReadyPayload(null);
+      setDataCheckStatus(null);
+      await loadStepOneState({ silent: true });
+      await loadDatasetsState({ silent: true, repairBackendSelection: false });
+      setActiveStepId("start");
+      setCurrentStep(1);
+      setPageMessage("Started a fresh setup for this session. No dataset is selected until you choose one in Step 2.");
+    } catch (error) {
+      setError("step1", getErrorMessage(error, "Unable to start a new setup."));
+    } finally {
+      setLoadingFlag("startNewSetup", false);
     }
   };
 
@@ -892,6 +1059,63 @@ export default function FineTuning({ activeUseCase }) {
     }
   };
 
+  const handleDatasetDeleteRequest = (dataset) => {
+    void (async () => {
+      if (!sessionId) {
+        setError("datasets", "Fine-tuning session is not loaded yet.");
+        return;
+      }
+      const datasetId = Number(dataset?.id ?? dataset?.dataset_id ?? dataset?.raw?.dataset_id ?? dataset?.raw?.id);
+      if (!Number.isFinite(datasetId)) {
+        setError("datasets", "Dataset id is missing.");
+        return;
+      }
+      setLoadingFlag("deleteDataset", true);
+      setError("datasets", "");
+      try {
+        const payload = await deleteDataset(sessionId, datasetId);
+        const selectedId = payload?.selected_dataset_id ? String(payload.selected_dataset_id) : "";
+        await loadDatasetsState({ silent: true, repairBackendSelection: false });
+        if (selectedId) {
+          await loadDatasetDetailState(selectedId, { silent: true });
+          if (activeStepId === "labels") {
+            await loadLabelStateFromBackend({ silent: true });
+          }
+        } else {
+          setDatasetDetail(null);
+          setLabelState(null);
+          setFormState((current) => ({ ...current, selectedDatasetId: "" }));
+        }
+        setDatasetReadyPayload(null);
+        setPageMessage(`${dataset?.name ?? "Dataset"} was removed from the fine-tuning list. MinIO files were not deleted.`);
+      } catch (error) {
+        setError("datasets", getErrorMessage(error, "Unable to remove dataset."));
+      } finally {
+        setLoadingFlag("deleteDataset", false);
+      }
+    })();
+  };
+
+  const handleRefreshDatasets = async () => {
+    if (!sessionId) {
+      setError("datasets", "Fine-tuning session is not loaded yet.");
+      return;
+    }
+    setLoadingFlag("refreshDatasets", true);
+    setError("datasets", "");
+    try {
+      const refreshed = await loadDatasetsState({ silent: true, repairBackendSelection: true });
+      const detailId = refreshed?.selectedDatasetId ?? formState.selectedDatasetId;
+      if (detailId) await loadDatasetDetailState(detailId, { silent: true });
+      await loadStepOneState({ silent: true });
+      setPageMessage("Dataset list refreshed from the latest audit results.");
+    } catch (error) {
+      setError("datasets", getErrorMessage(error, "Unable to refresh datasets."));
+    } finally {
+      setLoadingFlag("refreshDatasets", false);
+    }
+  };
+
   const handleLabelReadinessChange = async (value) => {
     if (!sessionId) {
       setError("labels", "Fine-tuning session is not loaded yet.");
@@ -939,8 +1163,8 @@ export default function FineTuning({ activeUseCase }) {
       await loadLabelStateFromBackend({ silent: true });
       setPageMessage(
         payload.label_status === "ready"
-          ? "Imported labels validated. The dataset can now be prepared for handoff."
-          : "Imported labels validated with partial coverage. Review warnings before training setup.",
+          ? "Imported labels validated. Label readiness has been refreshed."
+          : "Imported labels validated with partial coverage. Continue labeling or review warnings.",
       );
       return payload;
     } catch (error) {
@@ -1029,7 +1253,7 @@ export default function FineTuning({ activeUseCase }) {
   };
 
   const getNextLabel = () => {
-    if (activeStepId === "start") return step1Data?.actions?.can_continue ? "Continue" : "Start setup";
+    if (activeStepId === "start") return step1Data?.selected_dataset_id ? "Continue" : "Choose data";
     if (activeStepId === "labels") return loading.handoff ? "Preparing..." : "Prepare handoff";
     if (activeStepId === "plan") return "Start training";
     if (activeStepId === "training") return "Compare results";
@@ -1038,14 +1262,18 @@ export default function FineTuning({ activeUseCase }) {
     return "Continue";
   };
 
+  const primaryActionDisabled = Boolean(loading.startSetup || loading.startNewSetup || loading.handoff);
+
   const renderActiveStep = () => {
     if (activeStepId === "start") {
       return (
         <GetStartedStep
           activeUseCase={activeUseCase}
-          actionLoading={Boolean(loading.dataCheck || loading.startSetup)}
           config={config}
           datasetHealth={datasetHealth}
+          isCheckingData={Boolean(loading.dataCheck)}
+          isStartingNewSetup={Boolean(loading.startNewSetup)}
+          isStartingSetup={Boolean(loading.startSetup)}
           selectedBaseModel={selectedBaseModel}
           stepOneDatasetState={stepOneDatasetState}
           step1Data={step1Data}
@@ -1054,6 +1282,7 @@ export default function FineTuning({ activeUseCase }) {
           trainingJob={trainingJob}
           onAuditDataset={handleAuditDataset}
           onNext={handleStartSetup}
+          onStartNewSetup={handleStartNewSetup}
         />
       );
     }
@@ -1061,7 +1290,7 @@ export default function FineTuning({ activeUseCase }) {
     if (activeStepId === "data") {
       return (
         <DataStep
-          actionLoading={Boolean(loading.registerDataset || loading.selectDataset)}
+          actionLoading={Boolean(loading.registerDataset || loading.selectDataset || loading.refreshDatasets || loading.deleteDataset)}
           datasetHealth={datasetHealth}
           datasetSource={formState.datasetSource}
           datasets={mappedDatasets}
@@ -1073,6 +1302,8 @@ export default function FineTuning({ activeUseCase }) {
           selectedDatasetId={formState.selectedDatasetId}
           supportedFormats={config.supportedFormats}
           onDatasetRegister={handleDatasetRegister}
+          onDatasetDeleteRequest={handleDatasetDeleteRequest}
+          onRefreshDatasets={handleRefreshDatasets}
           onDatasetSelect={handleDatasetSelect}
           onDatasetSourceChange={(value) => updateFormField("datasetSource", value)}
           onRegisterFormChange={updateRegisterFormField}
@@ -1083,7 +1314,8 @@ export default function FineTuning({ activeUseCase }) {
     if (activeStepId === "labels") {
       return (
         <LabelsStep
-          actionLoading={Boolean(loading.labelStatus || loading.dataCheck || loading.handoff || loading.labelImport)}
+          actionLoading={Boolean(loading.labelStatus || loading.dataCheck || loading.handoff || loading.labelImport || loading.annotationWorkspace || loading.manualAnnotation || loading.autoLabel || loading.assistLabel)}
+          annotationEditorHref={annotationEditorHref}
           datasetHealth={datasetHealth}
           datasetReadyPayload={datasetReadyPayload}
           error={errors.labels}
@@ -1162,8 +1394,8 @@ export default function FineTuning({ activeUseCase }) {
   return (
     <div className="pb-10">
       <div className="mb-5 rounded-[28px] border border-slate-200 bg-gradient-to-br from-[#F8F9FF] via-white to-[#FFF6F8] p-5 shadow-panel">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="max-w-3xl">
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone="normal">Fine-Tuning</Badge>
               <span className="rounded-full border border-white bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 shadow-sm">
@@ -1175,7 +1407,7 @@ export default function FineTuning({ activeUseCase }) {
               A guided setup for adapting the current model with your own examples. Choose data, confirm labels, train, compare, then roll out only when ready.
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[440px]">
+          <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[440px] lg:max-w-[560px]">
             <div className="rounded-2xl border border-white bg-white/90 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Data</div>
               <div className="mt-1 truncate text-sm font-semibold text-slate-900">{selectedDataset?.name ?? "Choose data"}</div>
@@ -1197,6 +1429,7 @@ export default function FineTuning({ activeUseCase }) {
         <FineTuningStepRail
           activeStepId={activeStepId}
           completedStepIds={completedStepIds}
+          currentPlanState={currentPlanState}
           selectedDataset={selectedDataset}
           selectedGoal={selectedGoal}
           selectedTrainingMode={selectedTrainingMode}
@@ -1228,7 +1461,7 @@ export default function FineTuning({ activeUseCase }) {
                 Finish
               </Button>
             ) : (
-              <Button disabled={Boolean(loading.startSetup || loading.handoff)} onClick={handlePrimaryNext} type="button">
+              <Button disabled={primaryActionDisabled} onClick={handlePrimaryNext} type="button">
                 {activeStepId === "plan" ? <PlayCircle className="mr-2 h-4 w-4" /> : null}
                 {getNextLabel()}
                 {activeStepId !== "plan" ? <ArrowRight className="ml-2 h-4 w-4" /> : null}
