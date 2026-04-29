@@ -7,8 +7,12 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  Eye,
+  EyeOff,
   RefreshCcw,
   Trash2,
   Wand2,
@@ -36,6 +40,45 @@ function clamp01(value) {
 
 function makeBoxId(prefix = "box") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const CLASS_COLOR_PALETTE = [
+  "#e11d48",
+  "#2563eb",
+  "#16a34a",
+  "#f59e0b",
+  "#7c3aed",
+  "#0891b2",
+  "#db2777",
+  "#65a30d",
+];
+
+function getClassColor(className) {
+  const normalized = String(className || "unknown").toLowerCase().trim();
+  let hash = 0;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash = normalized.charCodeAt(index) + ((hash << 5) - hash);
+  }
+  return CLASS_COLOR_PALETTE[Math.abs(hash) % CLASS_COLOR_PALETTE.length];
+}
+
+function hexToRgba(hexColor, alpha = 1) {
+  const normalized = String(hexColor || "").replace("#", "").trim();
+  if (normalized.length !== 6) return `rgba(15, 23, 42, ${alpha})`;
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function getReadableTextColor(hexColor) {
+  const normalized = String(hexColor || "").replace("#", "").trim();
+  if (normalized.length !== 6) return "#ffffff";
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+  const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
+  return brightness > 160 ? "#0f172a" : "#ffffff";
 }
 
 function qualityFromConfidence(confidence) {
@@ -144,10 +187,16 @@ function formatCount(value, fallback = "0") {
   return Number(value).toLocaleString();
 }
 
+function annotationClassName(box) {
+  return String(box?.class_name || "object").trim().toLowerCase();
+}
+
 function defaultClassOptions(useCaseId) {
   const defaults = {
+    "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "fire-detection": ["fire", "smoke"],
-    "ppe-detection": ["person", "helmet", "vest", "shoes"],
+    "ppe-detection": ["person", "helmet", "vest"],
+    "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "region-alerts": ["person"],
   };
   return defaults[useCaseId] ?? ["object"];
@@ -218,6 +267,12 @@ function assistPhaseConfig(phase) {
 }
 
 const TEST_AUTO_LABEL_LIMIT = 6;
+const BATCH_FIND_OPTIONS = [
+  { value: "5", label: "5" },
+  { value: "10", label: "10" },
+  { value: "20", label: "20" },
+  { value: "all", label: "All unlabeled" },
+];
 
 export default function AnnotationEditorPage() {
   const params = useParams();
@@ -260,6 +315,13 @@ export default function AnnotationEditorPage() {
   const [advancedToolsOpen, setAdvancedToolsOpen] = useState(false);
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [lastSuggestionContext, setLastSuggestionContext] = useState("");
+  const [showAllSuggestions, setShowAllSuggestions] = useState(false);
+  const [showAllLabels, setShowAllLabels] = useState(true);
+  const [hiddenAnnotationClasses, setHiddenAnnotationClasses] = useState({});
+  const [expandedAnnotationGroups, setExpandedAnnotationGroups] = useState({});
+  const [showAllAnnotationsByClass, setShowAllAnnotationsByClass] = useState({});
+  const [batchFindCount, setBatchFindCount] = useState("5");
+  const [batchOnlyUnlabeled, setBatchOnlyUnlabeled] = useState(true);
   const [hasSavedSampleLabels, setHasSavedSampleLabels] = useState(false);
   const [hasValidatedSuggestions, setHasValidatedSuggestions] = useState(false);
   const [hasApprovedSuggestions, setHasApprovedSuggestions] = useState(false);
@@ -295,8 +357,41 @@ export default function AnnotationEditorPage() {
   const activeKey = itemKey(activeItem) || activeItemId;
   const currentAnnotations = activeKey ? annotationsByItem[activeKey] ?? [] : [];
   const currentSuggestions = activeKey ? suggestionsByItem[activeKey] ?? [] : [];
+  const visibleSuggestions = showAllSuggestions ? currentSuggestions : currentSuggestions.slice(0, 8);
+  const hasMoreSuggestions = currentSuggestions.length > 8;
   const hasCurrentItemSuggestions = currentSuggestions.length > 0;
   const selectedAnnotation = currentAnnotations.find((box) => box.id === selectedBoxId) ?? null;
+  const annotationGroups = useMemo(() => {
+    const groups = new Map();
+    for (const box of currentAnnotations) {
+      const className = annotationClassName(box);
+      if (!groups.has(className)) groups.set(className, []);
+      groups.get(className).push(box);
+    }
+    return Array.from(groups.entries())
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .map(([className, boxes]) => {
+        const showAllForClass = Boolean(showAllAnnotationsByClass[className]);
+        return {
+          className,
+          boxes,
+          count: boxes.length,
+          visibleBoxes: showAllForClass ? boxes : boxes.slice(0, 8),
+          hasMore: boxes.length > 8,
+          showAllForClass,
+          isExpanded: expandedAnnotationGroups[className] ?? boxes.length <= 8,
+          isHidden: Boolean(hiddenAnnotationClasses[className]),
+        };
+      });
+  }, [currentAnnotations, expandedAnnotationGroups, hiddenAnnotationClasses, showAllAnnotationsByClass]);
+  const visibleCanvasSuggestions = useMemo(
+    () => currentSuggestions.filter((box) => !hiddenAnnotationClasses[annotationClassName(box)]),
+    [currentSuggestions, hiddenAnnotationClasses],
+  );
+  const visibleCanvasAnnotations = useMemo(
+    () => currentAnnotations.filter((box) => !hiddenAnnotationClasses[annotationClassName(box)]),
+    [currentAnnotations, hiddenAnnotationClasses],
+  );
   const activeItemIndex = displayItems.findIndex((item) => itemKey(item) === activeKey);
   const lowConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "low").length;
   const mediumConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "medium").length;
@@ -409,6 +504,7 @@ export default function AnnotationEditorPage() {
     setAssistModelStatus(null);
     setAdvancedToolsOpen(false);
     setLastSuggestionContext("");
+    setShowAllSuggestions(false);
     resetValidationFlow();
     return nextActiveItemId;
   };
@@ -454,6 +550,21 @@ export default function AnnotationEditorPage() {
     setHasSavedApprovedSuggestions(!hasDirtyApprovedItems);
   }, [approvedItemKeys, dirtyItems, hasApprovedSuggestions]);
 
+  useEffect(() => {
+    if (!currentAnnotations.length) return;
+    setExpandedAnnotationGroups((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const className of new Set(currentAnnotations.map((box) => annotationClassName(box)))) {
+        if (next[className] === undefined) {
+          next[className] = currentAnnotations.filter((box) => annotationClassName(box) === className).length <= 8;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [currentAnnotations]);
+
   const ensureWorkspaceLoaded = async () => {
     if (workspace?.items?.length) return workspace;
     return loadWorkspace({ preferredItemId: activeKey });
@@ -461,6 +572,7 @@ export default function AnnotationEditorPage() {
 
   const mergeSuggestionPayload = (result, source = "suggestion") => {
     const items = Array.isArray(result?.items) ? result.items : [];
+    setShowAllSuggestions(false);
     if (!items.length) return "";
     setSuggestionsByItem((current) => {
       const next = { ...current };
@@ -638,6 +750,28 @@ export default function AnnotationEditorPage() {
     setSaveResult(null);
   };
 
+  const toggleAnnotationClassVisibility = (className) => {
+    setHiddenAnnotationClasses((current) => ({
+      ...current,
+      [className]: !current[className],
+    }));
+  };
+
+  const toggleAnnotationGroupExpansion = (className) => {
+    const fallbackExpanded = currentAnnotations.filter((box) => annotationClassName(box) === className).length <= 8;
+    setExpandedAnnotationGroups((current) => ({
+      ...current,
+      [className]: !(current[className] ?? fallbackExpanded),
+    }));
+  };
+
+  const toggleAnnotationClassShowAll = (className) => {
+    setShowAllAnnotationsByClass((current) => ({
+      ...current,
+      [className]: !current[className],
+    }));
+  };
+
   const deleteSuggestion = (boxId) => {
     if (!activeKey) return;
     setSuggestionsByItem((current) => ({
@@ -720,6 +854,7 @@ export default function AnnotationEditorPage() {
       return;
     }
     setSuggestionsByItem({});
+    setShowAllSuggestions(false);
     setAutoLabelPreview(null);
     setSaveResult(null);
     if (lastSuggestionContext === "test" && !hasApprovedSuggestions) {
@@ -825,6 +960,75 @@ export default function AnnotationEditorPage() {
       return;
     }
     await handleFindObjects("grounding");
+  };
+
+  const handleBatchFindObjects = async () => {
+    const workspacePayload = await ensureWorkspaceLoaded();
+    const terms = addPromptTermsToClasses(parsePromptTerms(autoLabelPrompt), { announce: false });
+    if (!terms.length) {
+      setMessage("Enter at least one class or prompt before running batch Find Objects.");
+      return;
+    }
+
+    const items = Array.isArray(workspacePayload?.items) ? workspacePayload.items : workspaceItems;
+    const orderedItems = (() => {
+      const currentIndex = items.findIndex((item) => itemKey(item) === activeKey);
+      if (currentIndex <= 0) return items;
+      return [...items.slice(currentIndex), ...items.slice(0, currentIndex)];
+    })();
+    const unlabeledItems = orderedItems.filter((item) => Number(item?.saved_annotation_count ?? item?.annotation_count ?? 0) <= 0);
+    if (batchOnlyUnlabeled && !unlabeledItems.length) {
+      setMessage("No unlabeled images available for batch labeling.");
+      return;
+    }
+
+    const candidateItems = orderedItems.filter((item) => {
+      const key = itemKey(item);
+      if (!key) return false;
+      const isUnlabeled = Number(item?.saved_annotation_count ?? item?.annotation_count ?? 0) <= 0;
+      if (batchOnlyUnlabeled) return isUnlabeled;
+      if (key === activeKey && !isUnlabeled) return false;
+      return true;
+    });
+    const selectedItems = batchFindCount === "all"
+      ? candidateItems
+      : candidateItems.slice(0, Number.parseInt(batchFindCount, 10));
+    const targetItemIds = selectedItems.map((item) => itemKey(item)).filter(Boolean);
+
+    if (!targetItemIds.length) {
+      setMessage(batchOnlyUnlabeled ? "No unlabeled images available for batch labeling." : "No images available for batch labeling.");
+      return;
+    }
+
+    setLoadingFlag("auto", true);
+    setAwaitingSamPoint(false);
+    setSamPreview(null);
+    setError("");
+    setMessage(`Running Find Objects on ${formatCount(targetItemIds.length, "0")} images...`);
+    try {
+      const result = await autoLabelDataset(sessionId, {
+        mode: "grounding",
+        prompts: terms,
+        item_ids: targetItemIds,
+        limit: batchFindCount === "all" ? targetItemIds.length : Number.parseInt(batchFindCount, 10),
+        confidence: 0.25,
+      });
+      mergeSuggestionPayload(result, "suggestion");
+      setAutoLabelPreview(result);
+      setAssistSummary(null);
+      setLastSuggestionContext(Number(result?.suggested_label_count ?? 0) > 0 ? "advanced" : "");
+      if (Number(result?.suggested_label_count ?? 0) > 0) {
+        setMessage(
+          `Suggestions generated for ${formatCount(Number(result?.returned_item_count ?? result?.items?.length ?? targetItemIds.length), "0")} images. Review and save approved labels.`,
+        );
+      } else {
+        setMessage(result?.message ?? "No suggestions were generated.");
+      }
+    } catch (autoError) {
+      setError(autoError?.message || "Unable to auto-label dataset.");
+    } finally {
+      setLoadingFlag("auto", false);
+    }
   };
 
   const trainAssistModelForWorkflow = async () => {
@@ -1308,6 +1512,24 @@ export default function AnnotationEditorPage() {
               </div>
             </div>
           ) : null}
+          <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Class colors</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {classOptions.map((className) => {
+                const color = getClassColor(className);
+                return (
+                  <span
+                    key={`legend-${className}`}
+                    className="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold text-slate-700"
+                    style={{ borderColor: color, backgroundColor: hexToRgba(color, 0.12) }}
+                  >
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
+                    {className}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-950 p-4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-slate-200">
@@ -1316,6 +1538,10 @@ export default function AnnotationEditorPage() {
                 <p className="mt-1 text-xs leading-5 text-slate-400">Zoom scales the image and annotation overlay together.</p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button onClick={() => setShowAllLabels((current) => !current)} type="button" variant="outline">
+                  {showAllLabels ? <EyeOff className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}
+                  {showAllLabels ? "Hide labels" : "Show labels"}
+                </Button>
                 <Button disabled={zoomLevel <= 0.75} onClick={() => updateZoomLevel(zoomLevel - 0.25)} type="button" variant="outline">
                   <ZoomOut className="mr-2 h-4 w-4" />
                   -
@@ -1358,22 +1584,30 @@ export default function AnnotationEditorPage() {
                       onPointerMove={handleCanvasPointerMove}
                       onPointerUp={handleCanvasPointerUp}
                     >
-                      {currentSuggestions.map((box) => (
-                        (() => {
-                          const palette = suggestionPalette(normalizeQuality(box.quality, box.confidence));
-                          return (
-                            <div
-                              key={box.id}
-                              className={`pointer-events-none absolute border-2 border-dashed ${palette.border} ${palette.background}`}
-                              style={annotationStyle(box)}
+                      {showAllLabels ? visibleCanvasSuggestions.map((box) => {
+                        const classColor = getClassColor(box.class_name);
+                        return (
+                          <div
+                            key={box.id}
+                            className="pointer-events-none absolute border-2 border-dashed"
+                            style={{
+                              ...annotationStyle(box),
+                              borderColor: classColor,
+                              backgroundColor: hexToRgba(classColor, 0.14),
+                            }}
+                          >
+                            <span
+                              className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
+                              style={{
+                                backgroundColor: classColor,
+                                color: getReadableTextColor(classColor),
+                              }}
                             >
-                              <span className={`absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold ${palette.label}`}>
-                                {box.class_name}{box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
-                              </span>
-                            </div>
-                          );
-                        })()
-                      ))}
+                              {box.class_name}{box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
+                            </span>
+                          </div>
+                        );
+                      }) : null}
                       {samPreview?.annotation ? (
                         <div
                           className="pointer-events-none absolute border-2 border-dashed border-emerald-300 bg-emerald-300/10"
@@ -1384,24 +1618,56 @@ export default function AnnotationEditorPage() {
                           </span>
                         </div>
                       ) : null}
-                      {currentAnnotations.map((box) => (
-                        <button
-                          key={box.id}
-                          className={`absolute border-2 bg-brandRed/10 text-left ${selectedBoxId === box.id ? "border-white ring-2 ring-brandRed" : "border-brandRed"}`}
-                          style={annotationStyle(box)}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedBoxId(box.id);
-                          }}
-                          onPointerDown={(event) => event.stopPropagation()}
-                          type="button"
-                        >
-                          <span className="absolute left-0 top-0 max-w-full truncate bg-brandRed px-2 py-0.5 text-[11px] font-semibold text-white">{box.class_name}</span>
-                        </button>
-                      ))}
+                      {showAllLabels ? visibleCanvasAnnotations.map((box) => {
+                        const classColor = getClassColor(box.class_name);
+                        const isSelected = selectedBoxId === box.id;
+                        return (
+                          <button
+                            key={box.id}
+                            className="absolute border-2 text-left"
+                            style={{
+                              ...annotationStyle(box),
+                              borderColor: classColor,
+                              backgroundColor: hexToRgba(classColor, 0.14),
+                              boxShadow: isSelected ? `0 0 0 2px #ffffff, 0 0 0 4px ${hexToRgba(classColor, 0.9)}` : "none",
+                            }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedBoxId(box.id);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            type="button"
+                          >
+                            <span
+                              className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
+                              style={{
+                                backgroundColor: classColor,
+                                color: getReadableTextColor(classColor),
+                              }}
+                            >
+                              {box.class_name}
+                            </span>
+                          </button>
+                        );
+                      }) : null}
                       {draftBox ? (
-                        <div className="pointer-events-none absolute border-2 border-white bg-white/10" style={annotationStyle(draftBox)}>
-                          <span className="absolute left-0 top-0 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-900">{selectedClass}</span>
+                        <div
+                          className="pointer-events-none absolute border-2"
+                          style={{
+                            ...annotationStyle(draftBox),
+                            borderColor: getClassColor(selectedClass),
+                            backgroundColor: hexToRgba(getClassColor(selectedClass), 0.14),
+                          }}
+                        >
+                          <span
+                            className="absolute left-0 top-0 px-2 py-0.5 text-[11px] font-semibold"
+                            style={{
+                              backgroundColor: getClassColor(selectedClass),
+                              color: getReadableTextColor(getClassColor(selectedClass)),
+                            }}
+                          >
+                            {selectedClass}
+                          </span>
                         </div>
                       ) : null}
                     </div>
@@ -1427,31 +1693,53 @@ export default function AnnotationEditorPage() {
               </div>
               <Badge tone={currentSuggestions.length ? "warning" : "normal"}>{formatCount(currentSuggestions.length, "0")}</Badge>
             </div>
+            {currentSuggestions.length ? (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-slate-500">
+                <span>Showing {formatCount(visibleSuggestions.length, "0")} of {formatCount(currentSuggestions.length, "0")} suggestions</span>
+                {hasMoreSuggestions ? (
+                  <Button onClick={() => setShowAllSuggestions((current) => !current)} type="button" variant="outline">
+                    {showAllSuggestions ? "Show fewer suggestions" : `Show all suggestions (${formatCount(currentSuggestions.length, "0")})`}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             <div className="mt-4 space-y-2">
-              {currentSuggestions.length ? currentSuggestions.map((box) => (
-                (() => {
-                  const quality = normalizeQuality(box.quality, box.confidence);
-                  const palette = suggestionPalette(quality);
-                  return (
-                    <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${palette.row}`}>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate font-semibold text-slate-700">
-                          {box.class_name}{box.confidence ? ` · ${Math.round(box.confidence * 100)}%` : ""}
-                        </div>
-                        <div className="mt-1">
-                          <Badge tone={palette.badgeTone}>{quality}</Badge>
-                        </div>
+              {currentSuggestions.length ? visibleSuggestions.map((box) => {
+                const quality = normalizeQuality(box.quality, box.confidence);
+                const palette = suggestionPalette(quality);
+                const classColor = getClassColor(box.class_name);
+                return (
+                  <div
+                    key={box.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm"
+                    style={{ borderColor: classColor, backgroundColor: hexToRgba(classColor, 0.08) }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-semibold"
+                          style={{
+                            backgroundColor: classColor,
+                            color: getReadableTextColor(classColor),
+                          }}
+                        >
+                          <span className="truncate">{box.class_name}</span>
+                        </span>
+                        {box.confidence ? <span className="text-xs font-semibold text-slate-500">{Math.round(box.confidence * 100)}%</span> : null}
                       </div>
-                      <button className="rounded-full p-1 text-brandBlue hover:bg-brandBlue/[0.08]" onClick={() => acceptSuggestion(box)} type="button" title="Accept suggestion">
-                        <Check className="h-4 w-4" />
-                      </button>
-                      <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteSuggestion(box.id)} type="button" title="Delete suggestion">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="mt-1">
+                        <Badge tone={palette.badgeTone}>{quality}</Badge>
+                      </div>
                     </div>
-                  );
-                })()
-              )) : (
+                    <button className="rounded-full p-1 text-brandBlue hover:bg-brandBlue/[0.08]" onClick={() => acceptSuggestion(box)} type="button" title="Accept suggestion">
+                      <Check className="h-4 w-4" />
+                    </button>
+                    <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteSuggestion(box.id)} type="button" title="Delete suggestion">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              }) : (
                 <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-500">
                   Suggestions will appear here after you test auto-labeling or use an advanced tool.
                 </div>
@@ -1505,16 +1793,59 @@ export default function AnnotationEditorPage() {
               <Badge tone={currentAnnotations.length ? "normal" : "warning"}>{formatCount(currentAnnotations.length, "0")}</Badge>
             </div>
             <div className="mt-3 space-y-2">
-              {currentAnnotations.length ? currentAnnotations.map((box) => (
-                <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
-                  <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
-                    {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
-                  </button>
-                  <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              )) : (
+              {annotationGroups.length ? annotationGroups.map((group) => {
+                const classColor = getClassColor(group.className);
+                return (
+                  <div key={group.className} className="rounded-2xl border border-slate-200 bg-white">
+                    <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                      <button className="min-w-0 flex-1 text-left" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: classColor }} />
+                          <span className="truncate text-sm font-semibold text-slate-800">{group.className}</span>
+                          <span className="text-xs font-semibold text-slate-500">({formatCount(group.count, "0")})</span>
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          className={`rounded-full p-1.5 transition ${group.isHidden ? "text-slate-400 hover:bg-slate-100" : "text-slate-600 hover:bg-slate-100"}`}
+                          onClick={() => toggleAnnotationClassVisibility(group.className)}
+                          type="button"
+                          title={group.isHidden ? `Show ${group.className}` : `Hide ${group.className}`}
+                        >
+                          {group.isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                        <button className="rounded-full p-1.5 text-slate-600 transition hover:bg-slate-100" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button" title={group.isExpanded ? "Collapse group" : "Expand group"}>
+                          {group.isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    {group.isExpanded ? (
+                      <div className="border-t border-slate-100 px-3 py-3">
+                        {group.hasMore ? (
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                            <span>Showing {formatCount(group.visibleBoxes.length, "0")} of {formatCount(group.count, "0")} annotations</span>
+                            <Button onClick={() => toggleAnnotationClassShowAll(group.className)} type="button" variant="outline">
+                              {group.showAllForClass ? "Show fewer" : `Show more (${formatCount(group.count, "0")})`}
+                            </Button>
+                          </div>
+                        ) : null}
+                        <div className="space-y-2">
+                          {group.visibleBoxes.map((box) => (
+                            <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
+                              <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
+                                {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
+                              </button>
+                              <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }) : (
                 <p className="text-sm leading-6 text-slate-500">No saved boxes for this image yet.</p>
               )}
             </div>
@@ -1586,16 +1917,25 @@ export default function AnnotationEditorPage() {
             <div className="mt-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Class before drawing</div>
               <div className="mt-2 flex flex-wrap gap-2">
-                {classOptions.map((className) => (
-                  <button
-                    key={className}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${selectedClass === className ? "border-brandRed bg-brandRed text-white" : "border-brandBlue/20 bg-white text-brandBlue hover:bg-brandBlue/[0.06]"}`}
-                    onClick={() => setSelectedClass(className)}
-                    type="button"
-                  >
-                    {className}
-                  </button>
-                ))}
+                {classOptions.map((className) => {
+                  const classColor = getClassColor(className);
+                  const isSelected = selectedClass === className;
+                  return (
+                    <button
+                      key={className}
+                      className="rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                      style={{
+                        borderColor: classColor,
+                        backgroundColor: isSelected ? classColor : hexToRgba(classColor, 0.1),
+                        color: isSelected ? getReadableTextColor(classColor) : classColor,
+                      }}
+                      onClick={() => setSelectedClass(className)}
+                      type="button"
+                    >
+                      {className}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -1620,6 +1960,44 @@ export default function AnnotationEditorPage() {
               <Wand2 className="mr-2 h-4 w-4" />
               {loading.auto ? "Finding..." : "Find Objects"}
             </Button>
+          </div>
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-sm font-semibold text-slate-900">Batch Find Objects</div>
+            <p className="mt-1 text-sm leading-6 text-slate-500">Run prompt-based suggestions on a small batch without opening each image one by one.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Images to process
+                <select
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-slate-700 outline-none transition focus:border-brandBlue"
+                  value={batchFindCount}
+                  onChange={(event) => setBatchFindCount(event.target.value)}
+                >
+                  {BATCH_FIND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
+                <input
+                  checked={batchOnlyUnlabeled}
+                  className="h-4 w-4 rounded border-slate-300 text-brandBlue focus:ring-brandBlue"
+                  onChange={(event) => setBatchOnlyUnlabeled(event.target.checked)}
+                  type="checkbox"
+                />
+                Only unlabeled images
+              </label>
+            </div>
+            <div className="mt-4">
+              <Button
+                disabled={!workspaceItems.length || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam}
+                onClick={handleBatchFindObjects}
+                type="button"
+                variant="outline"
+              >
+                <Wand2 className="mr-2 h-4 w-4" />
+                {loading.auto ? "Finding..." : "Find Objects on Batch"}
+              </Button>
+            </div>
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             {promptSuggestions.map((suggestion) => (

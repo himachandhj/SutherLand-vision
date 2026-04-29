@@ -52,6 +52,38 @@ function zonePointsNormalizedFromRoi(roi) {
   ];
 }
 
+function roiFromZonePointsNormalized(zonePoints) {
+  if (!Array.isArray(zonePoints) || zonePoints.length < 4) return null;
+
+  const normalizedPoints = zonePoints
+    .map((point) => (
+      Array.isArray(point) && point.length === 2
+        ? [Number(point[0]), Number(point[1])]
+        : null
+    ))
+    .filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+
+  if (normalizedPoints.length < 4) return null;
+
+  const xs = normalizedPoints.map(([x]) => Math.max(0, Math.min(1, x)));
+  const ys = normalizedPoints.map(([, y]) => Math.max(0, Math.min(1, y)));
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const width = maxX - minX;
+  const height = maxY - minY;
+
+  if (width < 0.01 || height < 0.01) return null;
+
+  return {
+    x: minX,
+    y: minY,
+    width,
+    height,
+  };
+}
+
 function normalizeRegionAlertsRuleConfig(ruleConfig) {
   if (!ruleConfig || typeof ruleConfig !== "object") {
     return DEFAULT_REGION_ALERT_RULE_CONFIG;
@@ -96,6 +128,8 @@ function VisionLabPage() {
   });
   const [regionAlertsRoi, setRegionAlertsRoi] = useState(null);
   const [regionAlertsRuleConfig, setRegionAlertsRuleConfig] = useState(DEFAULT_REGION_ALERT_RULE_CONFIG);
+  const [isRegionAlertsRoiDirty, setIsRegionAlertsRoiDirty] = useState(false);
+  const [isRegionAlertsRuleConfigDirty, setIsRegionAlertsRuleConfigDirty] = useState(false);
   const [integrationForm, setIntegrationForm] = useState({
     endpoint: "http://127.0.0.1:9000",
     access_key: "demo-access-key",
@@ -144,6 +178,25 @@ function VisionLabPage() {
     summary: payload?.summary && typeof payload.summary === "object" ? payload.summary : {},
   });
 
+  const buildRegionAlertsIntegrationPayload = () => (
+    activeUseCaseId === "region-alerts"
+      ? {
+          zone_points_normalized: zonePointsNormalizedFromRoi(regionAlertsRoi),
+          rule_config: normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig),
+        }
+      : {}
+  );
+
+  const handleRegionAlertsRoiChange = (nextRoi) => {
+    setRegionAlertsRoi(nextRoi);
+    setIsRegionAlertsRoiDirty(true);
+  };
+
+  const handleRegionAlertsRuleConfigChange = (nextConfig) => {
+    setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(nextConfig));
+    setIsRegionAlertsRuleConfigDirty(true);
+  };
+
   const fetchIntegrationOverview = async () => {
     if (!integrationSupportedUseCases.has(activeUseCaseId)) {
       setIntegrationOverview(buildEmptyIntegrationOverview());
@@ -164,13 +217,23 @@ function VisionLabPage() {
         }));
         setIntegrationMode(data.connection.processing_mode ?? "manual");
         if (activeUseCaseId === "region-alerts") {
-          setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(data.connection.rule_config));
+          if (!isRegionAlertsRuleConfigDirty) {
+            setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(data.connection.rule_config));
+          }
+          if (!isRegionAlertsRoiDirty) {
+            setRegionAlertsRoi(roiFromZonePointsNormalized(data.connection.zone_points_normalized));
+          }
         }
       } else {
         const defaults = getIntegrationDefaults(activeUseCaseId);
         setIntegrationForm((current) => ({ ...current, input_prefix: defaults.input_prefix, output_prefix: defaults.output_prefix }));
         if (activeUseCaseId === "region-alerts") {
-          setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+          if (!isRegionAlertsRuleConfigDirty) {
+            setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+          }
+          if (!isRegionAlertsRoiDirty) {
+            setRegionAlertsRoi(null);
+          }
         }
       }
       setIntegrationError("");
@@ -188,10 +251,6 @@ function VisionLabPage() {
     setIsConnectingIntegration(true);
     setIntegrationError("");
     try {
-      const regionAlertZonePoints =
-        activeUseCaseId === "region-alerts" ? zonePointsNormalizedFromRoi(regionAlertsRoi) : undefined;
-      const regionAlertRuleConfig =
-        activeUseCaseId === "region-alerts" ? normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig) : undefined;
       const response = await fetch(`${API_BASE_URL}/api/integrations/minio/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -199,12 +258,7 @@ function VisionLabPage() {
           ...integrationForm,
           use_case_id: activeUseCaseId,
           processing_mode: resolvedMode,
-          ...(activeUseCaseId === "region-alerts"
-            ? {
-                zone_points_normalized: regionAlertZonePoints,
-                rule_config: regionAlertRuleConfig,
-              }
-            : {}),
+          ...buildRegionAlertsIntegrationPayload(),
         }),
       });
       if (!response.ok) {
@@ -214,6 +268,10 @@ function VisionLabPage() {
       const data = await response.json();
       setIntegrationOverview(normalizeIntegrationOverview(data));
       setIntegrationMode(data?.connection?.processing_mode ?? resolvedMode);
+      if (activeUseCaseId === "region-alerts") {
+        setIsRegionAlertsRoiDirty(false);
+        setIsRegionAlertsRuleConfigDirty(false);
+      }
     } catch (error) {
       setIntegrationError(error instanceof Error ? error.message : "Unable to connect to MinIO.");
     } finally {
@@ -261,22 +319,13 @@ function VisionLabPage() {
     setIsProcessingIntegrationVideos(true);
     setIntegrationProcessMessage("");
     try {
-      const regionAlertZonePoints =
-        activeUseCaseId === "region-alerts" ? zonePointsNormalizedFromRoi(regionAlertsRoi) : undefined;
-      const regionAlertRuleConfig =
-        activeUseCaseId === "region-alerts" ? normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig) : undefined;
       const response = await fetch(`${API_BASE_URL}/api/integrations/minio/process-selected`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           use_case_id: activeUseCaseId,
           object_keys: selectedIntegrationVideos,
-          ...(activeUseCaseId === "region-alerts"
-            ? {
-                zone_points_normalized: regionAlertZonePoints,
-                rule_config: regionAlertRuleConfig,
-              }
-            : {}),
+          ...buildRegionAlertsIntegrationPayload(),
         }),
       });
       if (!response.ok) {
@@ -291,6 +340,10 @@ function VisionLabPage() {
       }
       setIntegrationProcessMessage(data?.message ?? "Selected videos have been queued.");
       setSelectedIntegrationVideos([]);
+      if (activeUseCaseId === "region-alerts") {
+        setIsRegionAlertsRoiDirty(false);
+        setIsRegionAlertsRuleConfigDirty(false);
+      }
       await handleIntegrationFetchVideos();
     } catch (error) {
       setIntegrationProcessMessage(`✗ ${error instanceof Error ? error.message : "Unable to queue selected videos."}`);
@@ -308,7 +361,7 @@ function VisionLabPage() {
     if (!integrationSupportedUseCases.has(activeUseCaseId) || !integrationOverview.connected) return;
     const poller = setInterval(fetchIntegrationOverview, 5000);
     return () => clearInterval(poller);
-  }, [activeUseCaseId, integrationOverview.connected, integrationOverview.processing]);
+  }, [activeUseCaseId, integrationOverview.connected, integrationOverview.processing, isRegionAlertsRoiDirty, isRegionAlertsRuleConfigDirty]);
 
   useEffect(() => {
     setIntegrationFetchedVideos([]);
@@ -340,6 +393,8 @@ function VisionLabPage() {
     setIntegrationFetchMessage("");
     setIntegrationProcessMessage("");
     setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+    setIsRegionAlertsRoiDirty(false);
+    setIsRegionAlertsRuleConfigDirty(false);
   }, [activeUseCaseId]);
 
   const navigateTo = (nextView, nextTab, method = "push", nextSection = activeSection, useCaseId) => {
@@ -476,9 +531,11 @@ function VisionLabPage() {
           selectedSample={selectedSample}
           sampleMedia={sampleMedia}
           persistedRegionAlertsRoi={regionAlertsRoi}
-          onRegionAlertsRoiChange={setRegionAlertsRoi}
+          regionAlertsRoi={regionAlertsRoi}
+          regionAlertsZonePointsNormalized={zonePointsNormalizedFromRoi(regionAlertsRoi)}
+          onRegionAlertsRoiChange={handleRegionAlertsRoiChange}
           regionAlertsRuleConfig={regionAlertsRuleConfig}
-          onRegionAlertsRuleConfigChange={(nextConfig) => setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(nextConfig))}
+          onRegionAlertsRuleConfigChange={handleRegionAlertsRuleConfigChange}
           setActiveTab={(tab) => navigateTo("detail", tab, "push", activeSection, activeUseCaseId)}
           integrationForm={integrationForm}
           integrationOverview={integrationOverview}

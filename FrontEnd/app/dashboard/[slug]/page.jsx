@@ -10,7 +10,7 @@ export default function DashboardRoute({ params }) {
     redirect("/dashboard/ppe-detection");
   }
 
-  const usesLiveRows = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts";
+  const usesLiveRows = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts" || slug === "speed-estimation";
   const rows = usesLiveRows ? [] : dashboardData[slug];
   const info = dashboardInfo[slug];
 

@@ -16,7 +16,10 @@ export default function FineTuningStepRail({
   onStepSelect,
 }) {
   const planStatus = currentPlanState?.status ?? trainingJob.status ?? "normal";
-  const progressPercent = Number(currentPlanState?.progressPercent ?? trainingJob.progress_percent ?? 0);
+  const totalSteps = Math.max(steps.length, 1);
+  const activeStepIndex = Math.max(steps.findIndex((step) => step.id === activeStepId), 0);
+  const stepProgressCount = Math.max(completedStepIds.length, activeStepIndex) + 1;
+  const progressPercent = Math.round((Math.min(stepProgressCount, totalSteps) / totalSteps) * 100);
 
   return (
     <aside className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-panel lg:sticky lg:top-5 lg:self-start">
@@ -93,7 +96,11 @@ export default function FineTuningStepRail({
             <span className="max-w-[150px] truncate font-semibold text-slate-800">{selectedTrainingMode?.label ?? "Recommended"}</span>
           </div>
         </div>
-        <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-200">
+        <div className="mt-4 flex items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+          <span>Step progress</span>
+          <span>{Math.min(stepProgressCount, totalSteps)} of {totalSteps}</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
           <div className="h-full rounded-full bg-brandBlue transition-all" style={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }} />
         </div>
       </div>

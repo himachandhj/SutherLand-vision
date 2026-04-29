@@ -33,6 +33,7 @@ import { PillCheckboxRow } from "../ui/pill-checkbox";
 import { useFireData } from "../../src/hooks/useFireData";
 import { usePPEData } from "../../src/hooks/usePPEData";
 import { useRegionAlertsData } from "../../src/hooks/useRegionAlertsData";
+import { useSpeedEstimationData } from "../../src/hooks/useSpeedEstimationData";
 import { average, byTimestamp, formatDate, formatDateTime, formatSeconds, groupBy, shiftFromTimestamp, sortRows, sum, toneForStatus, uniqueOptions } from "./helpers";
 
 const chartPalette = ["#27235C", "#DE1B54", "#3D3880", "#F04E7A", "#6B6B8A", "#C8C6E8"];
@@ -148,6 +149,8 @@ function regionEscalationScore(row) {
 function normalizeRegionAlertRow(row, index) {
   const entryTime = row.entryTime || row.entry_time;
   const durationSec = Number(row.durationSec ?? row.duration_sec ?? 0);
+  const rawAlertType = String(row.alertType || row.alert_type || "").trim();
+  const alertType = rawAlertType && rawAlertType !== "None" ? "Person Intrusion" : "None";
   const explicitStatus = String(row.status || "").toLowerCase();
   const status =
     explicitStatus === "open" || explicitStatus === "active"
@@ -175,7 +178,7 @@ function normalizeRegionAlertRow(row, index) {
     entryTime,
     exitTime,
     durationSec,
-    alertType: row.alertType || row.alert_type,
+    alertType,
     severity: row.severity,
     status,
     confidenceScore: row.confidenceScore ?? row.confidence_score ?? Number((0.84 + ((index % 7) * 0.018)).toFixed(2)),
@@ -342,10 +345,18 @@ function normalizeFireVideoSummary(row, index) {
 
 function normalizeSpeedRow(row, index) {
   const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
-  const speedLimit = Number(row.speed_limit_kmh ?? row.speedLimitKmh ?? row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? 0);
-  const detectedSpeed = Number(row.detected_speed_kmh ?? row.detectedSpeedKmh ?? 0);
+  const speedLimit = Number(row.speed_limit ?? row.speed_limit_kmh ?? row.speedLimitKmh ?? row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? 0);
+  const detectedSpeed = Number(row.estimated_speed ?? row.detected_speed_kmh ?? row.detectedSpeedKmh ?? 0);
   const excessSpeed = Number(row.excess_speed_kmh ?? row.excessSpeed ?? Math.max(detectedSpeed - speedLimit, 0));
-  const isOverspeeding = String(row.is_overspeeding ?? row.isOverspeeding ?? (excessSpeed > 0 ? "Yes" : "No"));
+  const rawOverspeeding = row.is_overspeeding ?? row.isOverspeeding;
+  const isOverspeeding =
+    rawOverspeeding === true || rawOverspeeding === 1 || String(rawOverspeeding).toLowerCase() === "true" || String(rawOverspeeding).toLowerCase() === "yes"
+      ? "Yes"
+      : rawOverspeeding === false || rawOverspeeding === 0 || String(rawOverspeeding).toLowerCase() === "false" || String(rawOverspeeding).toLowerCase() === "no"
+        ? "No"
+        : excessSpeed > 0
+          ? "Yes"
+          : "No";
   const severity =
     excessSpeed > 7
       ? "High"
@@ -365,7 +376,7 @@ function normalizeSpeedRow(row, index) {
     location: row.location ?? "Warehouse A",
     zone: row.zone ?? "Storage Bay",
     zoneSpeedLimitKmh: Number(row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? speedLimit),
-    minioVideoLink: row.minio_video_link ?? "",
+    minioVideoLink: row.minio_video_link ?? row.output_video_url ?? "",
     loadTimeSec: Number(row.load_time_sec ?? row.loadTimeSec ?? 0),
     objectId: row.object_id ?? row.objectId ?? `TRK-${index + 1}`,
     objectType: String(row.object_type ?? row.objectType ?? "car"),
@@ -374,6 +385,7 @@ function normalizeSpeedRow(row, index) {
     isOverspeeding,
     excessSpeedKmh: excessSpeed,
     confidenceScore: Number(row.confidence_score ?? row.confidence ?? row.confidenceScore ?? 0),
+    violationType: row.violation_type ?? row.violationType ?? (isOverspeeding === "Yes" ? "overspeed" : ""),
     status: row.status ?? (isOverspeeding === "Yes" ? "Violation" : "Normal"),
     severity,
     speedPriority: (severity === "High" ? 1000 : severity === "Medium" ? 500 : severity === "Low" ? 200 : 0) + excessSpeed * 10 + detectedSpeed,
@@ -443,9 +455,7 @@ function getInitialExtraFilters(slug, extraFilterDefs, rows = []) {
   const multiSelectKeys = getMultiSelectKeys(slug);
   const initial = {};
   for (const def of extraFilterDefs) {
-    if (slug === "speed-estimation" && def.key === "status") {
-      initial[def.key] = "Violation";
-    } else if (slug === "ppe-detection" && def.key === "shift" && rows.length) {
+    if (slug === "ppe-detection" && def.key === "shift" && rows.length) {
       const latest = [...rows]
         .sort((a, b) => new Date(a.processed_at || a.timestamp || 0) - new Date(b.processed_at || b.timestamp || 0))
         .at(-1);
@@ -818,6 +828,7 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           Low: items.filter((item) => item.severity === "Low").length,
         }));
       const alertTypeColors = {
+        "Person Intrusion": "#27235C",
         "Unauthorized Entry": "#DE1B54",
         Loitering: "#F06A8F",
         "Hazard Zone Breach": "#A01240",
@@ -1200,7 +1211,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const resolvedExtraFilterDefs = resolvedDefinition.extraFilterDefs;
   const Icon = icons[slug] ?? LayoutDashboard;
   const skeletonLoading = useLoadingSkeleton();
-  const usesLiveDashboardData = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts";
+  const usesLiveDashboardData = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts" || slug === "speed-estimation";
   const initialRows = usesLiveDashboardData ? [] : rows;
   const [filters, setFilters] = useState(() => getGlobalFilters(initialRows, slug));
   const [extraFilters, setExtraFilters] = useState(() => getInitialExtraFilters(slug, resolvedExtraFilterDefs, initialRows));
@@ -1216,10 +1227,11 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const { data: fireApiData, loading: fireApiLoading, error: fireApiError } = useFireData({}, slug === "fire-detection");
   const { data: ppeApiData, loading: ppeApiLoading, error: ppeApiError } = usePPEData({}, slug === "ppe-detection");
   const { data: regionApiData, loading: regionApiLoading, error: regionApiError } = useRegionAlertsData({}, slug === "region-alerts");
+  const { data: speedApiData, loading: speedApiLoading, error: speedApiError } = useSpeedEstimationData({}, slug === "speed-estimation");
 
   const sourceRows = useMemo(() => {
     if (slug === "ppe-detection") return ppeApiData.map(normalizePPERecord);
-    if (slug === "speed-estimation") return rows.map(normalizeSpeedRow);
+    if (slug === "speed-estimation") return speedApiData.map(normalizeSpeedRow);
     if (slug === "fire-detection") {
       return fireApiData.map(normalizeFireVideoSummary);
     }
@@ -1227,7 +1239,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       return regionApiData.map(normalizeRegionAlertRow);
     }
     return rows;
-  }, [slug, fireApiData, ppeApiData, regionApiData, rows]);
+  }, [slug, fireApiData, ppeApiData, regionApiData, speedApiData, rows]);
 
   const effectiveSourceRows = useMemo(() => {
     if (slug !== "region-alerts" || usesLiveDashboardData) return sourceRows;
@@ -1261,8 +1273,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
 
   useEffect(() => {
     if (!usesLiveDashboardData || liveFiltersInitialized) return;
-    const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : ppeApiLoading;
-    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : ppeApiData;
+    const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : ppeApiLoading;
+    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : slug === "speed-estimation" ? speedApiData : ppeApiData;
     if (liveLoading || liveRows.length === 0) return;
     setFilters(getGlobalFilters(liveRows, slug));
     setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, liveRows));
@@ -1275,15 +1287,17 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     fireApiLoading,
     ppeApiLoading,
     regionApiLoading,
+    speedApiLoading,
     fireApiData,
     ppeApiData,
     regionApiData,
+    speedApiData,
     resolvedExtraFilterDefs,
     resolvedColumns,
   ]);
 
-  const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : ppeApiLoading) : false;
-  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : ppeApiError) : "";
+  const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : ppeApiLoading) : false;
+  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : ppeApiError) : "";
   const loading = skeletonLoading || dataLoading;
 
   const filterDefs = [
@@ -1485,10 +1499,24 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
         </header>
 
         <div className="space-y-6 px-4 py-6 md:px-8">
+          {slug === "speed-estimation" ? (
+            <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
+              <CardContent className="p-4 text-sm text-slate-700">
+                <span className="font-semibold text-slate-900">Speed Estimation note.</span> Speed values depend on camera calibration and scene geometry.
+              </CardContent>
+            </Card>
+          ) : null}
           {slug === "region-alerts" && regionSyntheticCount > 0 ? (
             <Card className="border-amber-200 bg-amber-50">
               <CardContent className="p-4 text-sm text-slate-700">
-                <span className="font-semibold text-slate-900">Demo data included in dashboard.</span> Synthetic Region Alerts history is mixed with real processed runs in this view.
+                <span className="font-semibold text-slate-900">Demo data is included for visualization.</span> Real results will appear after processing videos.
+              </CardContent>
+            </Card>
+          ) : null}
+          {slug === "region-alerts" ? (
+            <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
+              <CardContent className="p-4 text-sm text-slate-700">
+                <span className="font-semibold text-slate-900">Region Alerts note.</span> Current system detects person intrusion into a defined zone. Additional alert types are planned.
               </CardContent>
             </Card>
           ) : null}
@@ -1623,14 +1651,22 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 <Card className="border-brand-blue/10">
                   <CardContent className="p-8">
                     <p className="text-lg font-semibold text-brand-blue">
-                      {slug === "ppe-detection" ? "No PPE records available yet" : slug === "region-alerts" ? "No Region Alerts records available yet" : "No fire or smoke alerts available yet"}
+                      {slug === "ppe-detection"
+                        ? "No PPE records available yet"
+                        : slug === "region-alerts"
+                          ? "No Region Alerts records available yet"
+                          : slug === "speed-estimation"
+                            ? "No Speed Estimation records available yet"
+                            : "No fire or smoke alerts available yet"}
                     </p>
                     <p className="mt-2 text-sm text-muted">
                       {slug === "ppe-detection"
                         ? "Process a PPE video to populate the database. The dashboard will refresh automatically every 5 seconds."
                         : slug === "region-alerts"
                           ? "Process a Region Alerts video to populate the database. The dashboard will refresh automatically every 5 seconds."
-                        : "Process a fire or smoke video to populate the database. The dashboard will refresh automatically every 5 seconds."}
+                          : slug === "speed-estimation"
+                            ? "Process a Speed Estimation video to populate the database. The dashboard will refresh automatically every 5 seconds."
+                          : "Process a fire or smoke video to populate the database. The dashboard will refresh automatically every 5 seconds."}
                     </p>
                   </CardContent>
                 </Card>

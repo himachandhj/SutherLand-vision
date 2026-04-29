@@ -1,0 +1,6 @@
+path: /home/chandu/SutherLand Hub/BackEnd/models/assist/session_10_dataset
+train: images/train
+val: images/val
+nc: 1
+names:
+  0: "person"

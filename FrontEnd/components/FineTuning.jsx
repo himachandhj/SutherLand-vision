@@ -435,24 +435,35 @@ function buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset,
       dataCard.label_status ??
       "unknown",
   ).toLowerCase();
-  const readinessScore = firstFiniteNumber(contract.readiness_score, dataCheckStatus?.readiness_score, dataCard.score);
-  const normalizedReadinessScore = readinessScore === null ? null : Number(readinessScore);
   const labelsMissing = hasSelectedDataset && (labelStatus === "missing" || labelCount === 0);
+  const warningCount =
+    (Array.isArray(dataCheckStatus?.issues) ? dataCheckStatus.issues.length : 0) +
+    (Array.isArray(dataCheckStatus?.warnings) ? dataCheckStatus.warnings.length : 0) +
+    (Array.isArray(datasetDetail?.dataset?.latest_audit?.issues) ? datasetDetail.dataset.latest_audit.issues.length : 0);
+  const hasWarnings =
+    Boolean(selectedDataset?.isInvalid) === false &&
+    (labelStatus === "partial" ||
+      warningCount > 0 ||
+      String(dataCheckStatus?.summary?.readiness_status ?? selectedDataset?.raw?.readiness_status ?? "").toLowerCase().includes("warning"));
   const readinessStatus = !hasSelectedDataset
-    ? "Choose data"
-    : labelsMissing || (normalizedReadinessScore !== null && normalizedReadinessScore < 50)
-      ? "Blocked"
-      : labelStatus === "partial" || (normalizedReadinessScore !== null && normalizedReadinessScore < 85)
-        ? "Ready with warnings"
-        : "Ready";
+    ? "Not checked"
+    : selectedDataset?.isInvalid
+      ? "Invalid dataset"
+      : labelsMissing
+        ? "Needs labels"
+        : hasWarnings
+          ? "Has warnings"
+          : "Ready";
 
   let recommendation = "Dataset looks usable. Continue to the next step.";
   if (!hasSelectedDataset) {
-    recommendation = step1Data?.recommended_next_action ?? "Review the safe fine-tuning path, then choose or register data in Step 2.";
+    recommendation = step1Data?.recommended_next_action ?? "Choose or register a dataset, then run a data check.";
+  } else if (selectedDataset?.isInvalid) {
+    recommendation = "Recommended: choose a dataset with supported files or fix the MinIO prefix.";
   } else if (labelsMissing) {
-    recommendation = "Labels are missing. Go to the Labels step before training.";
-  } else if (readinessStatus === "Ready with warnings") {
-    recommendation = "Review dataset warnings before continuing.";
+    recommendation = "Recommended: add more labels before training.";
+  } else if (readinessStatus === "Has warnings") {
+    recommendation = "Recommended: review the warnings, then refresh the dataset before training.";
   }
 
   return {
@@ -463,8 +474,8 @@ function buildStepOneDatasetState({ step1Data, dataCheckStatus, selectedDataset,
     labelCount,
     labelStatus,
     hasSelectedDataset,
+    hasWarnings,
     labelsMissing,
-    readinessScore,
     readinessStatus,
     recommendation,
     resumeMessage: hasSelectedDataset ? step1Data?.resume_message ?? `Resuming previous setup: ${selectedDataset?.name ?? dataCard?.dataset?.name ?? "selected dataset"}` : "",
@@ -522,67 +533,42 @@ function buildCurrentPlanState({
       "unknown",
   ).toLowerCase();
   const handoffStatus = String(datasetReadyPayload?.status ?? "").toLowerCase();
-
-  let progressPercent = 10;
   let status = "blocked";
-
-  if (selectedDataset) {
-    progressPercent = 24;
-    status = selectedDataset.isInvalid ? "blocked" : "normal";
-  }
-
-  if (selectedDataset && !selectedDataset.isInvalid) {
-    progressPercent = Math.max(progressPercent, 38);
-    status = "normal";
-  }
+  if (selectedDataset) status = selectedDataset.isInvalid ? "blocked" : "normal";
 
   if (dataCheckStatus?.status === "running") {
     return {
       status: "running",
-      progressPercent: 20,
     };
   }
 
   if (dataCheckStatus && dataCheckStatus.status !== "not_started") {
     if (dataCheckStatus.status === "failed") {
-      progressPercent = Math.max(progressPercent, 18);
       status = "blocked";
     } else {
-      progressPercent = Math.max(progressPercent, 46);
       status = selectedDataset?.isInvalid ? "blocked" : "normal";
     }
   }
 
-  if ((currentStep >= 2 || activeStepId === "data") && selectedDataset) {
-    progressPercent = Math.max(progressPercent, selectedDataset?.isInvalid ? 24 : 46);
-  }
-
   if (currentStep >= 3 || activeStepId === "labels") {
-    progressPercent = Math.max(progressPercent, 58);
     if (labelStatus === "missing" || !selectedDataset || selectedDataset?.isInvalid) {
       status = "blocked";
     } else if (labelStatus === "partial" || labelStatus === "unknown") {
-      progressPercent = Math.max(progressPercent, 66);
       status = "warning";
     } else if (labelStatus === "ready") {
-      progressPercent = Math.max(progressPercent, 74);
       status = "normal";
     }
   }
 
   if (handoffStatus === "ready_with_warnings") {
-    progressPercent = Math.max(progressPercent, 84);
     status = "warning";
   } else if (handoffStatus === "ready_for_training") {
-    progressPercent = Math.max(progressPercent, 90);
     status = "compliant";
   } else if (handoffStatus === "blocked") {
-    progressPercent = Math.max(progressPercent, 60);
     status = "blocked";
   }
 
   if (["plan", "training", "compare", "rollout"].includes(activeStepId)) {
-    progressPercent = Math.max(progressPercent, Number(trainingJob?.progress_percent ?? 0));
     status =
       trainingJob?.status === "complete"
         ? "compliant"
@@ -593,7 +579,6 @@ function buildCurrentPlanState({
 
   return {
     status,
-    progressPercent,
   };
 }
 

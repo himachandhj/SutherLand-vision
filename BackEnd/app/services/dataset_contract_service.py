@@ -38,11 +38,12 @@ TASK_TYPE_BY_USE_CASE = {
     "class-wise-object-counting": "object_detection",
     "speed-estimation": "tracking",
     "queue-management": "tracking",
-    "object-tracking": "tracking",
+    "object-tracking": "object_detection",
 }
 
 ANNOTATION_FORMATS = {"yolo", "coco", "classification", "unknown"}
 LABEL_REQUIRED_TASK_TYPES = {"object_detection"}
+OBJECT_TRACKING_HANDOFF_GUIDANCE = "Prepared dataset fine-tunes the detector used by Object Tracking. Tracking logic is configured separately."
 
 
 def _model_dump(model: FineTuningDatasetReadyPayload) -> dict[str, Any]:
@@ -208,6 +209,12 @@ def _task_type(usecase_slug: str) -> str:
     return TASK_TYPE_BY_USE_CASE.get(usecase_slug, "unknown")
 
 
+def _handoff_guidance(usecase_slug: str) -> str | None:
+    if usecase_slug == "object-tracking":
+        return OBJECT_TRACKING_HANDOFF_GUIDANCE
+    return None
+
+
 def _split_summary(item_count: int) -> dict[str, int]:
     # Step 4 can replace this with a real split planner. For now the handoff
     # stays honest: no split artifacts exist yet, so all selected items are train.
@@ -354,7 +361,9 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
     label_items = [item for item in objects if _is_label(item)]
     supported_items = sorted([*media_items, *label_items], key=lambda item: item["object_key"])
     annotation_format = _detect_annotation_format(label_items, media_items)
-    task_type = _task_type(str(session["usecase_slug"]))
+    usecase_slug = str(session["usecase_slug"])
+    task_type = _task_type(usecase_slug)
+    handoff_guidance = _handoff_guidance(usecase_slug)
     item_count = len(media_items)
     valid_label_stems = _valid_label_stems(client, str(dataset.get("minio_bucket") or settings.minio_bucket), label_items, media_items)
     label_count = len(valid_label_stems)
@@ -409,6 +418,8 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
         "status": status,
         "generated_at": generated_at,
     }
+    if handoff_guidance:
+        manifest["handoff_guidance"] = handoff_guidance
 
     if client is None:
         blocking_issues.append("manifest_generation_failed: MinIO client is unavailable.")
@@ -442,6 +453,8 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
         status=status,
     )
     payload = _model_dump(payload_model)
+    if handoff_guidance:
+        payload["handoff_guidance"] = handoff_guidance
 
     # Store enough immutable metadata for Step 4 to refer back to this exact
     # content version. This is intentionally lightweight, not a DVC-style layer.
@@ -463,14 +476,18 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
         payload=payload,
     )
 
+    recommended_next_action = (
+        "Dataset version is frozen and ready for training setup."
+        if status == "ready_for_training"
+        else "Review the dataset handoff warnings or blockers before training setup."
+    )
+    if handoff_guidance:
+        recommended_next_action = f"{handoff_guidance} {recommended_next_action}"
+
     update_fine_tuning_session(
         int(session["id"]),
         current_step=max(int(session.get("current_step") or 1), 3),
-        recommended_next_action=(
-            "Dataset version is frozen and ready for training setup."
-            if status == "ready_for_training"
-            else "Review the dataset handoff warnings or blockers before training setup."
-        ),
+        recommended_next_action=recommended_next_action,
     )
 
     return payload
