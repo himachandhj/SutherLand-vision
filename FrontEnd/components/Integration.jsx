@@ -131,6 +131,17 @@ function IntegrationModeButton({ active, label, onClick }) {
   );
 }
 
+function hasSelectedRegionAlertZone(regionRoi, zonePointsNormalized) {
+  if (regionRoi && typeof regionRoi === "object") {
+    const width = Number(regionRoi.width);
+    const height = Number(regionRoi.height);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return true;
+    }
+  }
+  return Array.isArray(zonePointsNormalized) && zonePointsNormalized.length >= 4;
+}
+
 function RegionAlertsRulePanel({ ruleConfig, onChange }) {
   const safeRuleConfig = ruleConfig ?? {
     trigger_type: "enter",
@@ -148,6 +159,10 @@ function RegionAlertsRulePanel({ ruleConfig, onChange }) {
         </p>
       </div>
 
+      <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+        Current supported scope: person intrusion in one rectangle zone, with configurable confidence threshold and alert delay.
+      </div>
+
       <div className="mt-5 grid gap-4 xl:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Detection Scope</div>
@@ -163,9 +178,9 @@ function RegionAlertsRulePanel({ ruleConfig, onChange }) {
             onChange={(event) => onChange({ ...safeRuleConfig, trigger_type: event.target.value })}
           >
             <option value="enter">Person enters zone</option>
-            <option value="exit">Person exits zone</option>
+            <option disabled value="exit">Person exits zone (not supported)</option>
           </select>
-          <p className="mt-2 text-xs text-slate-500">Exit is available in the UI now. Processing currently uses enter-style intrusion logic.</p>
+          <p className="mt-2 text-xs text-slate-500">Exit trigger is not supported in current processing. Only entry-based intrusion detection is active.</p>
         </label>
       </div>
 
@@ -244,6 +259,51 @@ function RegionAlertsRulePanel({ ruleConfig, onChange }) {
       <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
         Rules are configurable and applied during processing. Detection model can be improved using fine-tuning.
       </div>
+    </section>
+  );
+}
+
+function RegionAlertsSummaryCard({ regionRoi, zonePointsNormalized, ruleConfig }) {
+  const safeRuleConfig = ruleConfig ?? {
+    trigger_type: "enter",
+    alert_delay_sec: 0,
+    confidence_threshold: 0.5,
+    alerts_enabled: true,
+  };
+  const zoneSelected = hasSelectedRegionAlertZone(regionRoi, zonePointsNormalized);
+  const triggerLabel = safeRuleConfig.trigger_type === "exit" ? "Person exits zone" : "Person enters zone";
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
+      <div className="flex flex-col gap-2">
+        <h3 className="text-lg font-semibold text-slate-900">Active Region Alert Configuration</h3>
+        <p className="text-sm text-slate-500">
+          The selected ROI and alert rules are applied when processing Region Alerts videos.
+        </p>
+      </div>
+
+      <div className="mt-5 grid gap-3">
+        {[
+          ["Detection", "Person Intrusion"],
+          ["Zone", zoneSelected ? "Selected" : "Not selected"],
+          ["Zone type", "Single rectangle zone"],
+          ["Confidence", `${safeRuleConfig.confidence_threshold}`],
+          ["Alert delay", `${safeRuleConfig.alert_delay_sec} seconds`],
+          ["Alerts", safeRuleConfig.alerts_enabled ? "Enabled" : "Disabled"],
+          ["Trigger", triggerLabel],
+        ].map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+            <div className="text-sm font-semibold text-slate-800">{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {safeRuleConfig.trigger_type === "exit" ? (
+        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-slate-700">
+          Exit trigger is UI-ready; current processing uses entry-style intrusion.
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -439,6 +499,8 @@ export default function Integration({
   integrationFetchMessage,
   integrationProcessMessage,
   expandedRunId,
+  regionAlertsRoi,
+  regionAlertsZonePointsNormalized,
   regionAlertsRuleConfig,
   onIntegrationFieldChange,
   onIntegrationConnect,
@@ -457,6 +519,9 @@ export default function Integration({
   const activeMode = connection?.processing_mode ?? integrationMode;
   const isAutoMode = activeMode === "auto";
   const isRegionAlerts = activeUseCase.id === "region-alerts";
+  const isSpeedEstimation = activeUseCase.id === "speed-estimation";
+  const activeRegionZonePoints = regionAlertsZonePointsNormalized ?? connection?.zone_points_normalized ?? null;
+  const activeRegionRuleConfig = regionAlertsRuleConfig ?? connection?.rule_config ?? null;
 
   return (
     <div className="space-y-6">
@@ -550,11 +615,27 @@ export default function Integration({
         </div>
       </section>
 
+      {isSpeedEstimation && (
+        <section className="rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] p-5 shadow-panel">
+          <div className="text-sm font-semibold text-slate-900">Speed Estimation Processing</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Upload or select traffic/road videos. Processed outputs will include speed overlays and analytics when motion is detected.
+          </p>
+        </section>
+      )}
+
       {isRegionAlerts && (
-        <RegionAlertsRulePanel
-          ruleConfig={regionAlertsRuleConfig}
-          onChange={onRegionAlertsRuleConfigChange}
-        />
+        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+          <RegionAlertsRulePanel
+            ruleConfig={activeRegionRuleConfig}
+            onChange={onRegionAlertsRuleConfigChange}
+          />
+          <RegionAlertsSummaryCard
+            regionRoi={regionAlertsRoi}
+            ruleConfig={activeRegionRuleConfig}
+            zonePointsNormalized={activeRegionZonePoints}
+          />
+        </div>
       )}
 
       {isAutoMode ? (

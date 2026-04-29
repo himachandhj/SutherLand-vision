@@ -96,13 +96,13 @@ const useCaseConfigs = {
   "ppe-detection": {
     heroTitle: "Improve this PPE model with your own site data",
     heroSummary:
-      "Start from the current PPE model, add examples from your factory or warehouse, and let the platform learn your helmets, vests, boots, lighting, and camera angles.",
+      "Start from the current PPE model, add examples from your factory or warehouse, and let the platform learn your helmets, vests, lighting, and camera angles.",
     supportedFormats: sharedFormats,
     datasetChecklist: sharedChecklist,
     baseModels: [
       { value: "ppe-fast", label: "PPE Fast", tradeoff: "Faster", helper: "Good for quick pilots and edge devices." },
       { value: "ppe-balanced", label: "PPE Balanced", tradeoff: "Recommended", helper: "Best overall tradeoff for most industrial sites." },
-      { value: "ppe-accurate", label: "PPE Accurate", tradeoff: "Highest accuracy", helper: "Stronger recall for hard hats, vests, and boots under difficult conditions." },
+      { value: "ppe-accurate", label: "PPE Accurate", tradeoff: "Highest accuracy", helper: "Stronger recall for hard hats and vests under difficult conditions." },
     ],
     recommendedBaseModelId: "ppe-balanced",
     recommendedGoalId: "fewer-false-alarms",
@@ -112,7 +112,7 @@ const useCaseConfigs = {
     extensionDefaults: {
       cameraProfile: "factory-floor",
       lightingProfile: "mixed-indoor",
-      policyFocus: "helmet-vest-boots",
+      policyFocus: "helmet-vest",
       notes: "",
     },
   },

@@ -428,6 +428,7 @@ def _build_connection_details(
     connected_at: str | None,
     credential_mode: str,
     processing_mode: str,
+    zone_points_normalized: list[list[float]] | None = None,
     rule_config: dict[str, Any] | None = None,
 ) -> MinioConnectionDetails:
     normalized = config.normalized()
@@ -440,8 +441,16 @@ def _build_connection_details(
         credential_mode=credential_mode,
         processing_mode=processing_mode,
         connected_at=connected_at,
+        zone_points_normalized=zone_points_normalized,
         rule_config=rule_config,
     )
+
+
+def _payload_field_provided(payload: BaseModel, field_name: str) -> bool:
+    fields_set = getattr(payload, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(payload, "__fields_set__", set())
+    return field_name in fields_set
 
 
 def _build_connection_candidates(payload: MinioConnectRequest) -> list[tuple[str, MinioConnectionConfig]]:
@@ -1398,6 +1407,7 @@ def _build_integration_overview(
             connected_at=connected_at,
             credential_mode=credential_mode,
             processing_mode=processing_mode,
+            zone_points_normalized=snapshot.get("zone_points_normalized") if canonical_use_case_id == "region-alerts" else None,
             rule_config=snapshot.get("rule_config") if canonical_use_case_id == "region-alerts" else None,
         ) if config else None,
     )
@@ -2286,7 +2296,108 @@ def _bbox_center_inside_polygon(bbox: list[int], polygon: np.ndarray) -> bool:
     return point_in_polygon(cx, cy, polygon)
 
 
-def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+def _normalize_ppe_detection_mode(value: Any) -> str:
+    normalized = str(value or "helmet_vest").strip().lower()
+    return normalized if normalized in {"helmet", "vest", "helmet_vest"} else "helmet_vest"
+
+
+def _normalize_speed_detection_class(value: Any) -> str:
+    normalized = str(value or "all").strip().lower()
+    aliases = {
+        "motorbike": "motorcycle",
+        "bike": "bicycle",
+        "cycle": "bicycle",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"all", "car", "bus", "truck", "motorcycle", "bicycle"} else "all"
+
+
+def _format_ppe_preview_value(value: Any) -> str:
+    return "Present" if bool(value) else "Missing"
+
+
+def _build_ppe_preview_label(status: dict[str, Any], detection_mode: str) -> tuple[str, tuple[int, int, int]]:
+    if detection_mode == "helmet":
+        helmet_present = bool(status.get("helmet"))
+        return f"Helmet: {'Present' if helmet_present else 'Missing'}", ((46, 204, 113) if helmet_present else (52, 73, 235))
+    if detection_mode == "vest":
+        vest_present = bool(status.get("vest"))
+        return f"Vest: {'Present' if vest_present else 'Missing'}", ((46, 204, 113) if vest_present else (52, 73, 235))
+
+    helmet_present = bool(status.get("helmet"))
+    vest_present = bool(status.get("vest"))
+    color = (46, 204, 113) if helmet_present and vest_present else (52, 73, 235)
+    return (
+        f"Helmet: {'Present' if helmet_present else 'Missing'} | Vest: {'Present' if vest_present else 'Missing'}",
+        color,
+    )
+
+
+def _normalize_speed_object_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "motorbike": "motorcycle",
+        "bike": "bicycle",
+        "cycle": "bicycle",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _speed_summary_matches_class(summary: dict[str, Any], speed_detection_class: str) -> bool:
+    if speed_detection_class == "all":
+        return True
+    return _normalize_speed_object_type(summary.get("object_type")) == speed_detection_class
+
+
+def _build_speed_preview_detections(
+    result: dict[str, Any],
+    speed_detection_class: str,
+) -> list[dict[str, str | float | int | bool]]:
+    metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+    analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
+    raw_summaries = analytics.get("speed_summaries", []) if isinstance(analytics, dict) and isinstance(analytics.get("speed_summaries"), list) else []
+    matched_summaries = [summary for summary in raw_summaries if isinstance(summary, dict) and _speed_summary_matches_class(summary, speed_detection_class)]
+
+    if speed_detection_class == "all":
+        return [
+            {"class": "vehicles scanned", "confidence": float(metrics.get("total_vehicles", 0))},
+            {"class": "avg speed km/h", "confidence": float(metrics.get("avg_speed_kmh", 0))},
+            {"class": "max speed km/h", "confidence": float(metrics.get("max_speed_kmh", 0))},
+            {"class": "speeding violations", "confidence": float(metrics.get("speeding_violations", 0))},
+        ]
+
+    speeds = [float(summary.get("detected_speed_kmh") or 0) for summary in matched_summaries]
+    violations = [summary for summary in matched_summaries if bool(summary.get("is_overspeeding"))]
+    detections: list[dict[str, str | float | int | bool]] = [
+        {"class": "vehicles scanned", "confidence": float(len(matched_summaries))},
+        {"class": "avg speed km/h", "confidence": round(sum(speeds) / len(speeds), 1) if speeds else 0.0},
+        {"class": "max speed km/h", "confidence": round(max(speeds), 1) if speeds else 0.0},
+        {"class": "speeding violations", "confidence": float(len(violations))},
+    ]
+
+    for summary in matched_summaries:
+        object_type = _normalize_speed_object_type(summary.get("object_type")) or speed_detection_class
+        object_id = summary.get("object_id")
+        detections.append(
+            {
+                "class": f"{object_type.title()} #{object_id}" if object_id is not None else object_type.title(),
+                "confidence": float(summary.get("confidence_score") or 0),
+                "object_type": object_type,
+                "detected_speed_kmh": round(float(summary.get("detected_speed_kmh") or 0), 1),
+                "speed_limit_kmh": round(float(summary.get("speed_limit_kmh") or 0), 1),
+                "status": str(summary.get("status") or ("overspeed" if summary.get("is_overspeeding") else "normal")).replace("_", " "),
+                "is_overspeeding": bool(summary.get("is_overspeeding")),
+            }
+        )
+
+    return detections
+
+
+def run_ppe_preview(
+    frame: np.ndarray,
+    *,
+    detection_mode: str = "helmet_vest",
+) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     if PPE_PREVIEW_PERSON_MODEL is None or PPE_PREVIEW_DETECTOR is None:
         raise HTTPException(
             status_code=503,
@@ -2295,6 +2406,7 @@ def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str |
 
     annotated = frame.copy()
     fh, fw = frame.shape[:2]
+    normalized_mode = _normalize_ppe_detection_mode(detection_mode)
 
     try:
         results = PPE_PREVIEW_PERSON_MODEL.track(
@@ -2326,22 +2438,22 @@ def run_ppe_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str |
         if index >= len(vis_list) or not vis_list[index]["ok"]:
             continue
         tid = tids[index] if index < len(tids) else index
-        worker = ppe_engine.WorkerState(tid, window=1)
-        worker.update(1, ppe_list[index])
-        ppe_engine.draw_person(annotated, bbox, worker, lw=2)
-
         status = ppe_list[index]
         x1, y1, x2, y2 = map(int, bbox.tolist())
-        detections.append(
-            {
-                "class": f"person #{tid}",
-                "confidence": 1.0,
-                "bbox": [x1, y1, x2, y2],
-                "helmet": status["helmet"],
-                "vest": status["vest"],
-                "shoes": status["shoes"],
-            }
-        )
+        label, color = _build_ppe_preview_label(status, normalized_mode)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(annotated, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+
+        detection: dict[str, str | float | list[int]] = {
+            "class": f"person #{tid}",
+            "confidence": 1.0,
+            "bbox": [x1, y1, x2, y2],
+        }
+        if normalized_mode in {"helmet", "helmet_vest"}:
+            detection["helmet"] = _format_ppe_preview_value(status.get("helmet"))
+        if normalized_mode in {"vest", "helmet_vest"}:
+            detection["vest"] = _format_ppe_preview_value(status.get("vest"))
+        detections.append(detection)
 
     return annotated, detections
 
@@ -2487,11 +2599,16 @@ def run_fire_detection_preview(
     return annotated, detections
 
 
-def run_speed_estimation_preview(video_path: Path) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+def run_speed_estimation_preview(
+    video_path: Path,
+    *,
+    speed_detection_class: str = "all",
+) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
         output_path = Path(temp_output.name)
 
     model_path = str(BEST_MODEL_PATH) if BEST_MODEL_PATH.exists() else str(LOCAL_FALLBACK_MODEL_PATH)
+    normalized_speed_class = _normalize_speed_detection_class(speed_detection_class)
 
     try:
         result = speed_process_video(
@@ -2502,13 +2619,7 @@ def run_speed_estimation_preview(video_path: Path) -> tuple[np.ndarray, list[dic
             show=False,
         )
         preview_frame = extract_preview_frame(output_path)
-        metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
-        detections = [
-            {"class": "vehicles scanned", "confidence": float(metrics.get("total_vehicles", 0))},
-            {"class": "avg speed km/h", "confidence": float(metrics.get("avg_speed_kmh", 0))},
-            {"class": "max speed km/h", "confidence": float(metrics.get("max_speed_kmh", 0))},
-            {"class": "speeding violations", "confidence": float(metrics.get("speeding_violations", 0))},
-        ]
+        detections = _build_speed_preview_detections(result if isinstance(result, dict) else {}, normalized_speed_class)
         return preview_frame, detections
     finally:
         output_path.unlink(missing_ok=True)
@@ -2612,9 +2723,11 @@ def build_playground_preview_response(
     preview_options = preview_options or {}
     roi = preview_options.get("roi")
     fire_detection_mode = _normalize_fire_detection_mode(preview_options.get("fire_detection_mode"))
+    ppe_detection_mode = _normalize_ppe_detection_mode(preview_options.get("ppe_detection_mode"))
+    speed_detection_class = _normalize_speed_detection_class(preview_options.get("speed_detection_class"))
     try:
         if use_case_id == "ppe-detection":
-            annotated_image, detections = run_ppe_preview(frame)
+            annotated_image, detections = run_ppe_preview(frame, detection_mode=ppe_detection_mode)
             model_source = PPE_PREVIEW_MODEL_SOURCE
         elif use_case_id == "object-counting":
             annotated_image, detections = run_object_counting_preview(frame)
@@ -2641,7 +2754,7 @@ def build_playground_preview_response(
                     status_code=400,
                     detail="Speed Estimation playground preview requires a video upload.",
                 )
-            annotated_image, detections = run_speed_estimation_preview(temp_path)
+            annotated_image, detections = run_speed_estimation_preview(temp_path, speed_detection_class=speed_detection_class)
             model_source = "use_cases.speed_estimation"
         else:
             annotated_image, detections = run_yolo_inference(frame)
@@ -2659,6 +2772,8 @@ def build_playground_preview_response(
         "model_source": model_source,
         "preview_options": {
             "fire_detection_mode": fire_detection_mode,
+            "ppe_detection_mode": ppe_detection_mode,
+            "speed_detection_class": speed_detection_class,
             "roi_applied": bool(roi),
         },
     }
@@ -3206,6 +3321,100 @@ def _filter_fire_dashboard_records(
     ]
 
 
+def _build_speed_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.zone_speed_limit_kmh,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            o.output_id,
+            o.object_id,
+            o.object_type,
+            o.detected_speed_kmh,
+            o.speed_limit_kmh,
+            o.is_overspeeding,
+            o.excess_speed_kmh,
+            o.confidence_score,
+            o.status,
+            o.notes,
+            o.metadata_json AS output_metadata_json
+        FROM speed_estimation_outputs o
+        JOIN speed_estimation_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        timestamp = str(row["simulated_timestamp"] or _utc_now_iso())
+        estimated_speed = round(float(row["detected_speed_kmh"] or 0), 1)
+        speed_limit = round(float(row["speed_limit_kmh"] or row["zone_speed_limit_kmh"] or 0), 1)
+        overspeed_value = row["is_overspeeding"]
+        is_overspeeding = bool(int(overspeed_value)) if overspeed_value is not None else estimated_speed > speed_limit
+        output_video_url = _build_integration_proxy_url("speed-estimation", row["output_object_key"]) or str(row["output_video_link"] or "")
+
+        records.append(
+            {
+                "input_id": int(row["input_id"]),
+                "output_id": int(row["output_id"]),
+                "camera_id": str(row["camera_id"]),
+                "location": str(row["location"]),
+                "zone": str(row["zone"]),
+                "object_id": str(row["object_id"]),
+                "object_type": str(row["object_type"] or "vehicle"),
+                "estimated_speed": estimated_speed,
+                "speed_limit": speed_limit,
+                "violation_type": "overspeed" if is_overspeeding else "within_limit",
+                "status": str(row["status"] or ("Violation" if is_overspeeding else "Normal")),
+                "confidence_score": round(float(row["confidence_score"] or 0), 4),
+                "timestamp": timestamp,
+                "output_video_url": output_video_url,
+                "is_overspeeding": is_overspeeding,
+                "excess_speed_kmh": round(float(row["excess_speed_kmh"] or max(estimated_speed - speed_limit, 0)), 1),
+                "first_seen_sec": output_meta.get("first_seen_sec"),
+                "last_seen_sec": output_meta.get("last_seen_sec"),
+                "notes": str(row["notes"] or ""),
+            }
+        )
+    return records
+
+
+def _filter_speed_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    object_type: list[str] | None,
+    status: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(status or "").strip().lower()
+    return [
+        record
+        for record in records
+        if _within_date_range(record["timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["object_type"], object_type)
+        and (
+            not normalized_status
+            or normalized_status == "all"
+            or str(record["status"]).lower() == normalized_status
+        )
+    ]
+
+
 def _build_region_dashboard_records() -> list[dict[str, Any]]:
     query = """
         SELECT
@@ -3464,6 +3673,42 @@ def get_fire_metrics(
     }
 
 
+@app.get("/api/speed-estimation/metrics", tags=["Dashboard"])
+def get_speed_estimation_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    object_type: list[str] | None = Query(default=None),
+    status: str | None = None,
+) -> dict[str, Any]:
+    records = _filter_speed_dashboard_records(
+        _build_speed_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        object_type=object_type,
+        status=status,
+    )
+
+    speeds = [float(record["estimated_speed"]) for record in records if record.get("estimated_speed") is not None]
+    violations = [record for record in records if record["violation_type"] == "overspeed"]
+    summary = {
+        "total_records": len(records),
+        "violations": len(violations),
+        "avg_speed": round(sum(speeds) / len(speeds), 1) if speeds else 0.0,
+        "max_speed": round(max(speeds), 1) if speeds else 0.0,
+    }
+
+    return {
+        "records": records,
+        "summary": summary,
+    }
+
+
 # ── Root & Health ─────────────────────────────────────────────────────────
 
 @app.get("/", tags=["Root"])
@@ -3521,6 +3766,8 @@ async def playground_preview(
     file: UploadFile = File(...),
     use_case_id: str = Form(...),
     fire_detection_mode: str | None = Form(None),
+    ppe_detection_mode: str | None = Form(None),
+    speed_detection_class: str | None = Form(None),
     roi_json: str | None = Form(None),
 ) -> dict[str, object]:
     meta = get_metadata(use_case_id)
@@ -3553,6 +3800,8 @@ async def playground_preview(
         source_name=file.filename or "",
         preview_options={
             "fire_detection_mode": fire_detection_mode,
+            "ppe_detection_mode": ppe_detection_mode,
+            "speed_detection_class": speed_detection_class,
             "roi": _parse_preview_roi(roi_json),
         },
     )
@@ -3563,6 +3812,8 @@ async def playground_preview_sample(
     sample_name: str = Form(...),
     use_case_id: str = Form(...),
     fire_detection_mode: str | None = Form(None),
+    ppe_detection_mode: str | None = Form(None),
+    speed_detection_class: str | None = Form(None),
     roi_json: str | None = Form(None),
 ) -> dict[str, object]:
     meta = get_metadata(use_case_id)
@@ -3602,6 +3853,8 @@ async def playground_preview_sample(
         source_name=sample_path.name,
         preview_options={
             "fire_detection_mode": fire_detection_mode,
+            "ppe_detection_mode": ppe_detection_mode,
+            "speed_detection_class": speed_detection_class,
             "roi": _parse_preview_roi(roi_json),
         },
     )
@@ -3832,16 +4085,20 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
 def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationOverviewResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
     processing_mode = _normalize_processing_mode(payload.processing_mode)
-    zone_points_normalized = (
-        _normalize_zone_points_normalized(payload.zone_points_normalized)
-        if canonical_use_case_id == "region-alerts"
-        else None
-    )
-    rule_config = (
-        _normalize_region_alert_rule_config(payload.rule_config)
-        if canonical_use_case_id == "region-alerts"
-        else None
-    )
+    snapshot = _get_integration_state(canonical_use_case_id)
+    zone_points_normalized = None
+    rule_config = None
+    if canonical_use_case_id == "region-alerts":
+        zone_points_normalized = (
+            _normalize_zone_points_normalized(payload.zone_points_normalized)
+            if _payload_field_provided(payload, "zone_points_normalized")
+            else snapshot.get("zone_points_normalized")
+        )
+        rule_config = (
+            _normalize_region_alert_rule_config(payload.rule_config)
+            if _payload_field_provided(payload, "rule_config")
+            else snapshot.get("rule_config")
+        )
     config, credential_mode, bucket_created = _resolve_minio_connection(payload)
     connected_at = _utc_now_iso()
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
@@ -3912,17 +4169,20 @@ def list_minio_input_videos(
 )
 def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> MinioProcessSelectedResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
-    zone_points_normalized = (
-        _normalize_zone_points_normalized(payload.zone_points_normalized)
-        if canonical_use_case_id == "region-alerts"
-        else None
-    )
-    rule_config = (
-        _normalize_region_alert_rule_config(payload.rule_config)
-        if canonical_use_case_id == "region-alerts"
-        else None
-    )
     snapshot = _get_integration_state(canonical_use_case_id)
+    zone_points_normalized = None
+    rule_config = None
+    if canonical_use_case_id == "region-alerts":
+        zone_points_normalized = (
+            _normalize_zone_points_normalized(payload.zone_points_normalized)
+            if _payload_field_provided(payload, "zone_points_normalized")
+            else snapshot.get("zone_points_normalized")
+        )
+        rule_config = (
+            _normalize_region_alert_rule_config(payload.rule_config)
+            if _payload_field_provided(payload, "rule_config")
+            else snapshot.get("rule_config")
+        )
     config = snapshot.get("connection")
 
     if not snapshot.get("connected") or config is None:

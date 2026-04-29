@@ -168,6 +168,12 @@ def _dataset_summary(dataset: dict[str, Any], selected_dataset_id: int | None = 
     if file_count <= 0:
         readiness_status = "invalid"
         readiness_score = 0
+    else:
+        readiness_score, _ = _apply_label_coverage_readiness(
+            readiness_score,
+            total_images=file_count,
+            labeled_images=int(label_count or 0),
+        )
     return {
         "dataset_id": int(dataset["id"]),
         "name": dataset["name"],
@@ -183,6 +189,38 @@ def _dataset_summary(dataset: dict[str, Any], selected_dataset_id: int | None = 
         "is_selected": selected_dataset_id == int(dataset["id"]),
         "created_at": dataset.get("created_at"),
     }
+
+
+def _apply_label_coverage_readiness(
+    score: int | float | None,
+    *,
+    total_images: int,
+    labeled_images: int,
+) -> tuple[int | float | None, list[str]]:
+    if total_images <= 0:
+        return score, []
+
+    bounded_labeled_images = max(0, min(labeled_images, total_images))
+    label_coverage = bounded_labeled_images / total_images
+    warnings: list[str] = []
+
+    if bounded_labeled_images < total_images:
+        warnings = [
+            f"Only {bounded_labeled_images}/{total_images} images labeled",
+            "Add more labels before training",
+        ]
+
+    if score is None:
+        return score, warnings
+
+    if label_coverage < 0.1:
+        score = min(score, 40)
+    elif label_coverage < 0.3:
+        score = min(score, 60)
+    elif label_coverage < 0.6:
+        score = min(score, 80)
+
+    return score, warnings
 
 
 def _refresh_minio_dataset_state(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -321,6 +359,25 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
     if item_count <= 0:
         label_status = "missing"
     labels_available = label_status in {"ready", "partial"}
+    readiness_score = latest_audit.get("readiness_score") if latest_audit else None
+    readiness_warnings: list[str] = []
+    if latest_audit:
+        readiness_score, readiness_warnings = _apply_label_coverage_readiness(
+            readiness_score,
+            total_images=item_count,
+            labeled_images=label_count,
+        )
+    summary = dict(audit_summary) if isinstance(audit_summary, dict) else {}
+    existing_warnings = summary.get("warnings", [])
+    if isinstance(existing_warnings, list):
+        warnings = [str(warning) for warning in existing_warnings]
+    else:
+        warnings = []
+    for warning in readiness_warnings:
+        if warning not in warnings:
+            warnings.append(warning)
+    if warnings:
+        summary["warnings"] = warnings
 
     return {
         **_session_state(session),
@@ -332,10 +389,10 @@ def get_dataset_detail(session_id: int, dataset_id: int) -> dict[str, Any]:
                 {
                     "audit_id": int(latest_audit["id"]),
                     "status": latest_audit["status"],
-                    "readiness_score": latest_audit.get("readiness_score"),
+                    "readiness_score": readiness_score,
                     "issues": latest_audit.get("issues_json", []),
                     "recommendations": latest_audit.get("recommendations_json", []),
-                    "summary": latest_audit.get("summary_json", {}),
+                    "summary": summary,
                     "created_at": latest_audit.get("created_at"),
                     "completed_at": latest_audit.get("completed_at"),
                 }

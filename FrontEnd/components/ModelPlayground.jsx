@@ -3,8 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 function formatPlaygroundDetection(detection) {
-  if (detection.helmet || detection.vest || detection.shoes) {
-    return `${detection.class} | Helmet: ${detection.helmet ?? "?"} | Vest: ${detection.vest ?? "?"} | Shoes: ${detection.shoes ?? "?"}`;
+  if (detection.helmet !== undefined || detection.vest !== undefined || detection.shoes !== undefined) {
+    const parts = [];
+    if (detection.helmet !== undefined) parts.push(`Helmet: ${detection.helmet}`);
+    if (detection.vest !== undefined) parts.push(`Vest: ${detection.vest}`);
+    if (detection.shoes !== undefined) parts.push(`Shoes: ${detection.shoes}`);
+    return `${detection.class} | ${parts.join(" | ")}`;
+  }
+  if (detection.object_type || detection.detected_speed_kmh !== undefined) {
+    const speed = detection.detected_speed_kmh !== undefined ? ` | Speed: ${detection.detected_speed_kmh} km/h` : "";
+    const limit = detection.speed_limit_kmh !== undefined ? ` | Limit: ${detection.speed_limit_kmh} km/h` : "";
+    const status = detection.status ? ` | Status: ${detection.status}` : "";
+    return `${detection.class}${speed}${limit}${status}`;
   }
   if (detection.zone_status) {
     const severity = detection.severity ? ` | Severity: ${detection.severity}` : "";
@@ -65,12 +75,17 @@ export default function ModelPlayground({
   const [loadedSampleVideos, setLoadedSampleVideos] = useState({});
   const [currentInput, setCurrentInput] = useState(null);
   const [fireDetectionMode, setFireDetectionMode] = useState("both");
+  const [ppeDetectionMode, setPpeDetectionMode] = useState("helmet_vest");
+  const [speedDetectionClass, setSpeedDetectionClass] = useState("all");
   const [roiRect, setRoiRect] = useState(null);
   const [roiStart, setRoiStart] = useState(null);
   const [roiDraft, setRoiDraft] = useState(null);
 
   const supportsFireMode = activeUseCase.id === "fire-detection";
+  const supportsPpeMode = activeUseCase.id === "ppe-detection";
   const supportsRoi = activeUseCase.id === "fire-detection" || activeUseCase.id === "region-alerts";
+  const isSpeedEstimation = activeUseCase.id === "speed-estimation";
+  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation;
   const activeSampleId = currentInput?.kind === "sample" ? currentInput.sampleId : selectedSample;
 
   useEffect(() => {
@@ -84,6 +99,8 @@ export default function ModelPlayground({
   useEffect(() => {
     setCurrentInput(null);
     setFireDetectionMode("both");
+    setPpeDetectionMode("helmet_vest");
+    setSpeedDetectionClass("all");
     setRoiRect(activeUseCase.id === "region-alerts" ? persistedRegionAlertsRoi ?? null : null);
     setRoiStart(null);
     setRoiDraft(null);
@@ -98,9 +115,11 @@ export default function ModelPlayground({
   const previewOptions = useMemo(
     () => ({
       fireDetectionMode: supportsFireMode ? fireDetectionMode : undefined,
+      ppe_detection_mode: supportsPpeMode ? ppeDetectionMode : undefined,
+      speed_detection_class: isSpeedEstimation ? speedDetectionClass : undefined,
       roi: supportsRoi && roiRect ? roiRect : undefined,
     }),
-    [fireDetectionMode, roiRect, supportsFireMode, supportsRoi],
+    [fireDetectionMode, isSpeedEstimation, ppeDetectionMode, roiRect, speedDetectionClass, supportsFireMode, supportsPpeMode, supportsRoi],
   );
 
   const replaceCurrentInput = (nextInput) => {
@@ -259,12 +278,45 @@ export default function ModelPlayground({
             </div>
           </div>
         )}
-        {(supportsFireMode || supportsRoi) ? (
+        {showsPreviewGuidance ? (
           <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-semibold text-slate-900">Custom preview options</div>
+            <div className="text-sm font-semibold text-slate-900">{isSpeedEstimation ? "Preview guidance" : "Custom preview options"}</div>
             <p className="mt-1 text-sm leading-6 text-slate-500">
-              Upload your own input or pick a sample, then re-run the preview with the settings below.
+              {isSpeedEstimation
+                ? "Upload your own input or pick a sample, then re-run the preview with motion-aware expectations in mind."
+                : "Upload your own input or pick a sample, then re-run the preview with the settings below."}
             </p>
+
+            {isSpeedEstimation ? (
+              <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+                <p>Speed Estimation tracks moving objects across frames and estimates speed from motion. Use video input for the most meaningful results.</p>
+                <p className="mt-2">Image previews may only show object detection; speed requires motion across video frames.</p>
+              </div>
+            ) : null}
+
+            {supportsPpeMode ? (
+              <div className="mt-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">PPE detection mode</div>
+                <div className="mt-2 inline-flex flex-wrap rounded-xl border border-slate-200 bg-white p-1">
+                  {[
+                    { value: "helmet", label: "Detect helmet only" },
+                    { value: "vest", label: "Detect vest only" },
+                    { value: "helmet_vest", label: "Detect helmet + vest" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
+                        ppeDetectionMode === option.value ? "bg-slate-50 text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                      }`}
+                      onClick={() => setPpeDetectionMode(option.value)}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             {supportsFireMode ? (
               <div className="mt-4">
@@ -290,6 +342,33 @@ export default function ModelPlayground({
               </div>
             ) : null}
 
+            {isSpeedEstimation ? (
+              <div className="mt-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Vehicle filter</div>
+                <div className="mt-2 inline-flex flex-wrap rounded-xl border border-slate-200 bg-white p-1">
+                  {[
+                    { value: "all", label: "All vehicles" },
+                    { value: "car", label: "Car only" },
+                    { value: "bus", label: "Bus only" },
+                    { value: "truck", label: "Truck only" },
+                    { value: "motorcycle", label: "Motorcycle only" },
+                    { value: "bicycle", label: "Bicycle only" },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
+                        speedDetectionClass === option.value ? "bg-slate-50 text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                      }`}
+                      onClick={() => setSpeedDetectionClass(option.value)}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             {supportsRoi ? (
               <div className="mt-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -300,6 +379,12 @@ export default function ModelPlayground({
                         ? "Drag a rectangle on the current input preview. Region Alerts will treat it as the restricted zone."
                         : "Drag a rectangle on the current input preview. Fire Detection will keep detections only inside that ROI."}
                     </p>
+                    {activeUseCase.id === "region-alerts" ? (
+                      <div className="mt-3 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+                        <p>Region Alerts currently detects person intrusion inside one selected region. Draw a region and rerun preview to test the rule.</p>
+                        <p className="mt-2">Objects outside the selected region are ignored for alerts.</p>
+                      </div>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {roiRect ? (

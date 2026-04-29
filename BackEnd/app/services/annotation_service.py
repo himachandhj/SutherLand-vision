@@ -40,7 +40,7 @@ MANUAL_LABEL_FOLDER = "_manual_labels"
 AUTO_LABEL_FOLDER = "_auto_labels"
 ANNOTATION_META_FOLDER = "_annotation_meta"
 DEFAULT_CLASSES_BY_USE_CASE = {
-    "ppe-detection": ["person", "helmet", "vest", "shoes"],
+    "ppe-detection": ["person", "helmet", "vest"],
     "fire-detection": ["fire", "smoke"],
     "region-alerts": ["person"],
     "class-wise-object-counting": ["person", "car", "truck", "bus"],

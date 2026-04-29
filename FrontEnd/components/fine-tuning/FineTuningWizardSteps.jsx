@@ -132,8 +132,9 @@ function getMatchingDatasetDetail(selectedDataset, selectedDatasetDetail) {
 
 function readinessTone(status) {
   if (status === "Ready") return "compliant";
-  if (status === "Ready with warnings") return "warning";
-  if (status === "Choose data") return "normal";
+  if (status === "Has warnings") return "warning";
+  if (status === "Not checked") return "normal";
+  if (status === "Needs labels" || status === "Invalid dataset") return "alert";
   return "alert";
 }
 
@@ -435,22 +436,22 @@ export function GetStartedStep({
     labelStatus: dataCard?.label_status ?? "unknown",
     hasSelectedDataset: Boolean(step1Data?.selected_dataset_id),
     labelsMissing: Boolean(step1Data?.selected_dataset_id) && dataCard?.label_status === "missing",
-    readinessScore: dataCard?.score ?? datasetHealth.score,
-    readinessStatus: step1Data?.selected_dataset_id ? "Ready with warnings" : "Choose data",
+    hasWarnings: false,
+    readinessStatus: step1Data?.selected_dataset_id ? "Has warnings" : "Not checked",
     recommendation: step1Data?.recommended_next_action ?? trainingJob.next_up,
     resumeMessage: step1Data?.resume_message ?? "",
     datasetName: step1Data?.selected_dataset_id ? dataCard?.dataset?.name ?? "Selected dataset" : "No dataset selected yet",
   };
   const hasSelectedDataset = Boolean(step1Data?.selected_dataset_id ?? datasetState.hasSelectedDataset);
-  const labelValue = datasetState.labelsMissing
-    ? "Missing"
-    : datasetState.labelCount !== null && datasetState.labelCount !== undefined
-      ? `${formatCount(datasetState.labelCount)} labels`
-      : datasetState.labelStatus === "ready"
-        ? "Present"
-        : "Needs check";
   const examplesValue = datasetState.itemCount === null || datasetState.itemCount === undefined ? "Not checked" : `${formatCount(datasetState.itemCount)} examples`;
-  const readinessStatus = datasetState.readinessStatus ?? (hasSelectedDataset ? (datasetState.labelsMissing ? "Blocked" : "Ready with warnings") : "Choose data");
+  const readinessStatus = datasetState.readinessStatus ?? (hasSelectedDataset ? (datasetState.labelsMissing ? "Needs labels" : "Has warnings") : "Not checked");
+  const labelsFoundSummary =
+    datasetState.itemCount !== null &&
+    datasetState.itemCount !== undefined &&
+    datasetState.labelCount !== null &&
+    datasetState.labelCount !== undefined
+      ? `Labels found: ${formatCount(datasetState.labelCount)} of ${formatCount(datasetState.itemCount)} images`
+      : `Current label status: ${humanizeLabelStatus(datasetState.labelStatus)}`;
   const safePathSteps = [
     "Choose data",
     "Confirm labels",
@@ -490,16 +491,43 @@ export function GetStartedStep({
         </div>
       </div>
 
-      <div className={`mt-5 rounded-3xl border p-5 ${!hasSelectedDataset ? "border-slate-200 bg-slate-50" : readinessStatus === "Blocked" ? "border-brandRed/20 bg-brandRed/[0.04]" : "border-brandBlue/15 bg-brandBlue/[0.04]"}`}>
+      {activeUseCase.id === "region-alerts" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Region Alerts fine-tuning improves the person detector. The restricted zone, confidence threshold, alert delay, and alert rules are configured separately in the Integration tab.
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Can improve</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">person detection accuracy</div>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Configured separately</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>ROI / restricted zone</div>
+                <div>alert delay</div>
+                <div>confidence threshold</div>
+                <div>intrusion rule</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {activeUseCase.id === "speed-estimation" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Fine-tuning improves the object detector used by Speed Estimation. Speed calculation, calibration, and thresholds are configured separately during processing.
+          </p>
+        </div>
+      ) : null}
+
+      <div className={`mt-5 rounded-3xl border p-5 ${!hasSelectedDataset ? "border-slate-200 bg-slate-50" : readinessStatus === "Needs labels" || readinessStatus === "Invalid dataset" ? "border-brandRed/20 bg-brandRed/[0.04]" : "border-brandBlue/15 bg-brandBlue/[0.04]"}`}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={readinessTone(readinessStatus)}>{readinessStatus}</Badge>
-              {hasSelectedDataset && datasetState.readinessScore !== null && datasetState.readinessScore !== undefined ? (
-                <span className="rounded-full border border-white bg-white px-3 py-1 text-xs font-semibold text-slate-500">
-                  Score {datasetState.readinessScore}/100
-                </span>
-              ) : null}
             </div>
             <div className="mt-4 text-lg font-semibold text-slate-900">Dataset status</div>
             {hasSelectedDataset ? (
@@ -510,12 +538,19 @@ export function GetStartedStep({
                   </div>
                 ) : null}
                 <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-                  Preparing <span className="font-semibold text-slate-900">{datasetState.datasetName}</span>. The selected data currently has {examplesValue.toLowerCase()} and {labelValue.toLowerCase()}.
+                  Dataset check: <span className="font-semibold text-slate-900">{readinessStatus}</span>. Preparing <span className="font-semibold text-slate-900">{datasetState.datasetName}</span> with {examplesValue.toLowerCase()}.
                 </p>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{labelsFoundSummary}</p>
                 {datasetState.labelsMissing ? (
                   <div className="mt-4 rounded-2xl border border-brandRed/20 bg-white/80 p-4 text-sm leading-6 text-slate-700">
                     <div className="font-semibold text-brandRed">Labels are missing.</div>
                     <p>Please continue to the Labels step before training.</p>
+                  </div>
+                ) : null}
+                {!datasetState.labelsMissing && datasetState.hasWarnings ? (
+                  <div className="mt-4 rounded-2xl border border-amber-200 bg-white/80 p-4 text-sm leading-6 text-slate-700">
+                    <div className="font-semibold text-slate-900">Warnings found.</div>
+                    <p>Review the latest dataset check details before training.</p>
                   </div>
                 ) : null}
               </>
@@ -578,27 +613,37 @@ export function DataStep({
   const selectedDetail = getMatchingDatasetDetail(selectedDataset, selectedDatasetDetail);
   const selectedLabelStatus = selectedDetail?.label_readiness ?? selectedDetail?.dataset?.label_status ?? selectedDataset?.label_status;
   const selectedLabelSummary = getDatasetLabelSummary(selectedDataset, selectedLabelStatus);
-  const selectedReadinessScore =
-    selectedDetail?.latest_audit?.readiness_score ??
-    selectedDetail?.dataset?.latest_audit?.readiness_score ??
-    selectedDataset?.raw?.readiness_score ??
-    datasetHealth.score;
-  const selectedReadinessValue = selectedDataset
-    ? Number.isFinite(Number(selectedReadinessScore))
-      ? `${Number(selectedReadinessScore)}/100`
-      : "Not checked"
-    : "Choose data";
-  const selectedReadinessHelper = selectedDataset
-    ? selectedDataset.isInvalid
-      ? selectedDataset.invalidReason
-      : selectedDetail?.dataset?.readiness_status ?? selectedDataset?.raw?.readiness_status ?? selectedDataset?.raw?.audit_status ?? datasetHealth.readiness
-    : "No dataset selected";
   const selectedDetailDataset = selectedDetail?.dataset ?? {};
   const latestAudit = selectedDetailDataset.latest_audit ?? {};
   const auditSummary = latestAudit.summary ?? {};
   const labelFileCount = detailValue(auditSummary.label_file_count ?? selectedDataset?.raw?.label_file_count, "Not checked");
   const totalObjects = detailValue(auditSummary.total_objects ?? selectedDataset?.file_count, "Not checked");
   const labelCoverage = auditSummary.label_coverage !== undefined && auditSummary.label_coverage !== null ? `${Math.round(Number(auditSummary.label_coverage) * 100)}%` : "Not checked";
+  const selectedReadinessValue = !selectedDataset
+    ? "Not checked"
+    : selectedDataset.isInvalid
+      ? "Invalid dataset"
+      : selectedLabelSummary.status === "missing"
+        ? "Needs labels"
+        : selectedLabelSummary.status === "partial"
+          ? "Has warnings"
+          : "Ready";
+  const selectedReadinessHelper = !selectedDataset
+    ? "Choose a dataset to run checks."
+    : selectedDataset.isInvalid
+      ? selectedDataset.invalidReason
+      : labelCoverage !== "Not checked"
+        ? `Label coverage: ${labelCoverage}`
+        : selectedDetail?.dataset?.readiness_status ?? selectedDataset?.raw?.readiness_status ?? selectedDataset?.raw?.audit_status ?? datasetHealth.readiness;
+  const selectedRecommendation = !selectedDataset
+    ? "Recommended: choose data and run a data check."
+    : selectedDataset.isInvalid
+      ? "Recommended: fix the MinIO prefix or choose another dataset."
+      : selectedLabelSummary.status === "missing"
+        ? "Recommended: start labeling before training."
+        : selectedLabelSummary.status === "partial"
+          ? "Recommended: add more labels before training."
+          : "Recommended: refresh the dataset after any label changes.";
   const issueMessages = [
     ...(Array.isArray(latestAudit.issues) ? latestAudit.issues : []),
     ...(selectedDataset?.isInvalid ? [{ message: selectedDataset.invalidReason }] : []),
@@ -619,7 +664,8 @@ export function DataStep({
             tone="accent"
             value={selectedDataset?.name ?? "Choose data"}
           />
-          <SmallCard helper={selectedReadinessHelper} title="Readiness" value={selectedReadinessValue} />
+          <SmallCard helper={selectedReadinessHelper} title="Dataset check" value={selectedReadinessValue} />
+          <SmallCard helper={selectedRecommendation} title="Next action" value={selectedDataset ? `${labelFileCount} labeled files` : "Choose data"} />
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Accepted examples</div>
             <div className="mt-3 flex flex-wrap gap-2">

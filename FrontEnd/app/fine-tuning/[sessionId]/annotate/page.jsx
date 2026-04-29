@@ -7,8 +7,12 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  Eye,
+  EyeOff,
   RefreshCcw,
   Trash2,
   Wand2,
@@ -183,10 +187,14 @@ function formatCount(value, fallback = "0") {
   return Number(value).toLocaleString();
 }
 
+function annotationClassName(box) {
+  return String(box?.class_name || "object").trim().toLowerCase();
+}
+
 function defaultClassOptions(useCaseId) {
   const defaults = {
     "fire-detection": ["fire", "smoke"],
-    "ppe-detection": ["person", "helmet", "vest", "shoes"],
+    "ppe-detection": ["person", "helmet", "vest"],
     "region-alerts": ["person"],
   };
   return defaults[useCaseId] ?? ["object"];
@@ -306,7 +314,10 @@ export default function AnnotationEditorPage() {
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [lastSuggestionContext, setLastSuggestionContext] = useState("");
   const [showAllSuggestions, setShowAllSuggestions] = useState(false);
-  const [showAllAnnotations, setShowAllAnnotations] = useState(false);
+  const [showAllLabels, setShowAllLabels] = useState(true);
+  const [hiddenAnnotationClasses, setHiddenAnnotationClasses] = useState({});
+  const [expandedAnnotationGroups, setExpandedAnnotationGroups] = useState({});
+  const [showAllAnnotationsByClass, setShowAllAnnotationsByClass] = useState({});
   const [batchFindCount, setBatchFindCount] = useState("5");
   const [batchOnlyUnlabeled, setBatchOnlyUnlabeled] = useState(true);
   const [hasSavedSampleLabels, setHasSavedSampleLabels] = useState(false);
@@ -344,12 +355,41 @@ export default function AnnotationEditorPage() {
   const activeKey = itemKey(activeItem) || activeItemId;
   const currentAnnotations = activeKey ? annotationsByItem[activeKey] ?? [] : [];
   const currentSuggestions = activeKey ? suggestionsByItem[activeKey] ?? [] : [];
-  const visibleAnnotations = showAllAnnotations ? currentAnnotations : currentAnnotations.slice(0, 8);
-  const hasMoreAnnotations = currentAnnotations.length > 8;
   const visibleSuggestions = showAllSuggestions ? currentSuggestions : currentSuggestions.slice(0, 8);
   const hasMoreSuggestions = currentSuggestions.length > 8;
   const hasCurrentItemSuggestions = currentSuggestions.length > 0;
   const selectedAnnotation = currentAnnotations.find((box) => box.id === selectedBoxId) ?? null;
+  const annotationGroups = useMemo(() => {
+    const groups = new Map();
+    for (const box of currentAnnotations) {
+      const className = annotationClassName(box);
+      if (!groups.has(className)) groups.set(className, []);
+      groups.get(className).push(box);
+    }
+    return Array.from(groups.entries())
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .map(([className, boxes]) => {
+        const showAllForClass = Boolean(showAllAnnotationsByClass[className]);
+        return {
+          className,
+          boxes,
+          count: boxes.length,
+          visibleBoxes: showAllForClass ? boxes : boxes.slice(0, 8),
+          hasMore: boxes.length > 8,
+          showAllForClass,
+          isExpanded: expandedAnnotationGroups[className] ?? boxes.length <= 8,
+          isHidden: Boolean(hiddenAnnotationClasses[className]),
+        };
+      });
+  }, [currentAnnotations, expandedAnnotationGroups, hiddenAnnotationClasses, showAllAnnotationsByClass]);
+  const visibleCanvasSuggestions = useMemo(
+    () => currentSuggestions.filter((box) => !hiddenAnnotationClasses[annotationClassName(box)]),
+    [currentSuggestions, hiddenAnnotationClasses],
+  );
+  const visibleCanvasAnnotations = useMemo(
+    () => currentAnnotations.filter((box) => !hiddenAnnotationClasses[annotationClassName(box)]),
+    [currentAnnotations, hiddenAnnotationClasses],
+  );
   const activeItemIndex = displayItems.findIndex((item) => itemKey(item) === activeKey);
   const lowConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "low").length;
   const mediumConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "medium").length;
@@ -509,8 +549,19 @@ export default function AnnotationEditorPage() {
   }, [approvedItemKeys, dirtyItems, hasApprovedSuggestions]);
 
   useEffect(() => {
-    setShowAllAnnotations(false);
-  }, [activeKey]);
+    if (!currentAnnotations.length) return;
+    setExpandedAnnotationGroups((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const className of new Set(currentAnnotations.map((box) => annotationClassName(box)))) {
+        if (next[className] === undefined) {
+          next[className] = currentAnnotations.filter((box) => annotationClassName(box) === className).length <= 8;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [currentAnnotations]);
 
   const ensureWorkspaceLoaded = async () => {
     if (workspace?.items?.length) return workspace;
@@ -695,6 +746,28 @@ export default function AnnotationEditorPage() {
     markItemDirty(activeKey, true);
     setSelectedBoxId((current) => (current === boxId ? "" : current));
     setSaveResult(null);
+  };
+
+  const toggleAnnotationClassVisibility = (className) => {
+    setHiddenAnnotationClasses((current) => ({
+      ...current,
+      [className]: !current[className],
+    }));
+  };
+
+  const toggleAnnotationGroupExpansion = (className) => {
+    const fallbackExpanded = currentAnnotations.filter((box) => annotationClassName(box) === className).length <= 8;
+    setExpandedAnnotationGroups((current) => ({
+      ...current,
+      [className]: !(current[className] ?? fallbackExpanded),
+    }));
+  };
+
+  const toggleAnnotationClassShowAll = (className) => {
+    setShowAllAnnotationsByClass((current) => ({
+      ...current,
+      [className]: !current[className],
+    }));
   };
 
   const deleteSuggestion = (boxId) => {
@@ -1463,6 +1536,10 @@ export default function AnnotationEditorPage() {
                 <p className="mt-1 text-xs leading-5 text-slate-400">Zoom scales the image and annotation overlay together.</p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button onClick={() => setShowAllLabels((current) => !current)} type="button" variant="outline">
+                  {showAllLabels ? <EyeOff className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}
+                  {showAllLabels ? "Hide labels" : "Show labels"}
+                </Button>
                 <Button disabled={zoomLevel <= 0.75} onClick={() => updateZoomLevel(zoomLevel - 0.25)} type="button" variant="outline">
                   <ZoomOut className="mr-2 h-4 w-4" />
                   -
@@ -1505,7 +1582,7 @@ export default function AnnotationEditorPage() {
                       onPointerMove={handleCanvasPointerMove}
                       onPointerUp={handleCanvasPointerUp}
                     >
-                      {currentSuggestions.map((box) => {
+                      {showAllLabels ? visibleCanvasSuggestions.map((box) => {
                         const classColor = getClassColor(box.class_name);
                         return (
                           <div
@@ -1528,7 +1605,7 @@ export default function AnnotationEditorPage() {
                             </span>
                           </div>
                         );
-                      })}
+                      }) : null}
                       {samPreview?.annotation ? (
                         <div
                           className="pointer-events-none absolute border-2 border-dashed border-emerald-300 bg-emerald-300/10"
@@ -1539,7 +1616,7 @@ export default function AnnotationEditorPage() {
                           </span>
                         </div>
                       ) : null}
-                      {currentAnnotations.map((box) => {
+                      {showAllLabels ? visibleCanvasAnnotations.map((box) => {
                         const classColor = getClassColor(box.class_name);
                         const isSelected = selectedBoxId === box.id;
                         return (
@@ -1570,7 +1647,7 @@ export default function AnnotationEditorPage() {
                             </span>
                           </button>
                         );
-                      })}
+                      }) : null}
                       {draftBox ? (
                         <div
                           className="pointer-events-none absolute border-2"
@@ -1713,27 +1790,60 @@ export default function AnnotationEditorPage() {
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Annotations</div>
               <Badge tone={currentAnnotations.length ? "normal" : "warning"}>{formatCount(currentAnnotations.length, "0")}</Badge>
             </div>
-            {currentAnnotations.length ? (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-slate-500">
-                <span>Showing {formatCount(visibleAnnotations.length, "0")} of {formatCount(currentAnnotations.length, "0")} annotations</span>
-                {hasMoreAnnotations ? (
-                  <Button onClick={() => setShowAllAnnotations((current) => !current)} type="button" variant="outline">
-                    {showAllAnnotations ? "Show fewer annotations" : `Show all annotations (${formatCount(currentAnnotations.length, "0")})`}
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
             <div className="mt-3 space-y-2">
-              {currentAnnotations.length ? visibleAnnotations.map((box) => (
-                <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
-                  <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
-                    {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
-                  </button>
-                  <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              )) : (
+              {annotationGroups.length ? annotationGroups.map((group) => {
+                const classColor = getClassColor(group.className);
+                return (
+                  <div key={group.className} className="rounded-2xl border border-slate-200 bg-white">
+                    <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                      <button className="min-w-0 flex-1 text-left" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: classColor }} />
+                          <span className="truncate text-sm font-semibold text-slate-800">{group.className}</span>
+                          <span className="text-xs font-semibold text-slate-500">({formatCount(group.count, "0")})</span>
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          className={`rounded-full p-1.5 transition ${group.isHidden ? "text-slate-400 hover:bg-slate-100" : "text-slate-600 hover:bg-slate-100"}`}
+                          onClick={() => toggleAnnotationClassVisibility(group.className)}
+                          type="button"
+                          title={group.isHidden ? `Show ${group.className}` : `Hide ${group.className}`}
+                        >
+                          {group.isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                        <button className="rounded-full p-1.5 text-slate-600 transition hover:bg-slate-100" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button" title={group.isExpanded ? "Collapse group" : "Expand group"}>
+                          {group.isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    {group.isExpanded ? (
+                      <div className="border-t border-slate-100 px-3 py-3">
+                        {group.hasMore ? (
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                            <span>Showing {formatCount(group.visibleBoxes.length, "0")} of {formatCount(group.count, "0")} annotations</span>
+                            <Button onClick={() => toggleAnnotationClassShowAll(group.className)} type="button" variant="outline">
+                              {group.showAllForClass ? "Show fewer" : `Show more (${formatCount(group.count, "0")})`}
+                            </Button>
+                          </div>
+                        ) : null}
+                        <div className="space-y-2">
+                          {group.visibleBoxes.map((box) => (
+                            <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
+                              <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
+                                {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
+                              </button>
+                              <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }) : (
                 <p className="text-sm leading-6 text-slate-500">No saved boxes for this image yet.</p>
               )}
             </div>

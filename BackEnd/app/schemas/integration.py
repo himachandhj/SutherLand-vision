@@ -26,6 +26,7 @@ class MinioConnectionDetails(BaseModel):
     credential_mode: str = "direct"
     processing_mode: str = "manual"
     connected_at: str | None = None
+    zone_points_normalized: list[list[float]] | None = None
     rule_config: dict[str, Any] | None = None
 
 
