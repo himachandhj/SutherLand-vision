@@ -193,8 +193,10 @@ function annotationClassName(box) {
 
 function defaultClassOptions(useCaseId) {
   const defaults = {
+    "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "fire-detection": ["fire", "smoke"],
     "ppe-detection": ["person", "helmet", "vest"],
+    "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "region-alerts": ["person"],
   };
   return defaults[useCaseId] ?? ["object"];

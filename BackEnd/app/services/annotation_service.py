@@ -43,9 +43,9 @@ DEFAULT_CLASSES_BY_USE_CASE = {
     "ppe-detection": ["person", "helmet", "vest"],
     "fire-detection": ["fire", "smoke"],
     "region-alerts": ["person"],
-    "class-wise-object-counting": ["person", "car", "truck", "bus"],
-    "class-wise-counting": ["person", "car", "truck", "bus"],
-    "object-tracking": ["person", "car", "truck", "bus"],
+    "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
+    "class-wise-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
+    "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "queue-management": ["person"],
     "speed-estimation": ["car", "truck", "bus", "motorcycle"],
 }

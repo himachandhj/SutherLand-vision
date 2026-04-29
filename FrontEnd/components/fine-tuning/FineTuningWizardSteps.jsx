@@ -514,6 +514,57 @@ export function GetStartedStep({
           </div>
         </div>
       ) : null}
+      {activeUseCase.id === "class-wise-object-counting" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Fine-tuning improves the object detector used for counting. Object counts are derived from detections and are not trained directly.
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Can improve</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>object detection accuracy</div>
+                <div>missed or false detections</div>
+                <div>better counting reliability</div>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Configured separately</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>counting logic</div>
+                <div>aggregation rules</div>
+                <div>region-based counting</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {activeUseCase.id === "object-tracking" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Fine-tuning improves the object detector used by Object Tracking. Tracking IDs, re-identification behavior, and trajectory logic are handled separately during processing.
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Can improve</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>person and vehicle detection accuracy</div>
+                <div>missed or false object detections</div>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Configured separately</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>tracking IDs</div>
+                <div>trajectory/path logic</div>
+                <div>re-identification behavior</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {activeUseCase.id === "speed-estimation" ? (
         <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
           <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
@@ -614,6 +665,18 @@ export function DataStep({
   const selectedLabelStatus = selectedDetail?.label_readiness ?? selectedDetail?.dataset?.label_status ?? selectedDataset?.label_status;
   const selectedLabelSummary = getDatasetLabelSummary(selectedDataset, selectedLabelStatus);
   const selectedDetailDataset = selectedDetail?.dataset ?? {};
+  const isClassWiseObjectCountingUseCase = [
+    selectedDetailDataset.usecase_slug,
+    selectedDataset?.usecase_slug,
+    selectedDataset?.raw?.usecase_slug,
+    registerForm?.minio_prefix,
+    registerForm?.name,
+  ].some((value) => String(value || "").toLowerCase().includes("counting"));
+  const isObjectTrackingUseCase = [
+    selectedDetailDataset.usecase_slug,
+    selectedDataset?.usecase_slug,
+    selectedDataset?.raw?.usecase_slug,
+  ].some((value) => value === "object-tracking");
   const latestAudit = selectedDetailDataset.latest_audit ?? {};
   const auditSummary = latestAudit.summary ?? {};
   const labelFileCount = detailValue(auditSummary.label_file_count ?? selectedDataset?.raw?.label_file_count, "Not checked");
@@ -689,6 +752,16 @@ export function DataStep({
       <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-slate-700">
         <span className="font-semibold text-slate-900">Step 3 currently supports image datasets only.</span> Video or mixed datasets can still be registered here, but the dedicated annotation editor only works on image items today.
       </div>
+      {isClassWiseObjectCountingUseCase ? (
+        <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-4 text-sm leading-6 text-slate-700">
+          Class-wise Object Counting fine-tuning uses labeled images or extracted video frames. Pure video datasets can be processed in Integration, but Step 3 annotation requires image frames.
+        </div>
+      ) : null}
+      {isObjectTrackingUseCase ? (
+        <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-4 text-sm leading-6 text-slate-700">
+          Object Tracking fine-tuning uses labeled images or extracted video frames. Pure video datasets can be processed in Integration, but Step 3 annotation requires image frames.
+        </div>
+      ) : null}
 
       <div className="grid gap-3 md:grid-cols-3">
         {sourceOptions.map((option) => (
