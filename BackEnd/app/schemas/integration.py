@@ -14,6 +14,8 @@ class MinioConnectRequest(BaseModel):
     processing_mode: str = "manual"
     model_mode: str = "active"
     model_version_id: str | None = None
+    zone_points_normalized: list[list[float]] | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class MinioConnectionDetails(BaseModel):
@@ -32,6 +34,8 @@ class MinioConnectionDetails(BaseModel):
     fallback_used: bool = False
     fallback_reason: str | None = None
     connected_at: str | None = None
+    zone_points_normalized: list[list[float]] | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class IntegrationVideoItem(BaseModel):
@@ -87,6 +91,8 @@ class MinioProcessSelectedRequest(BaseModel):
     object_keys: list[str] = Field(default_factory=list)
     model_mode: str = "active"
     model_version_id: str | None = None
+    zone_points_normalized: list[list[float]] | None = None
+    rule_config: dict[str, Any] | None = None
 
 
 class MinioProcessSelectedResponse(BaseModel):

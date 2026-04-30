@@ -496,6 +496,137 @@ def init_db() -> None:
             connection.execute("ALTER TABLE jobs ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'")
             connection.commit()
 
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fine_tuning_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usecase_slug TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step INTEGER NOT NULL DEFAULT 1,
+                selected_dataset_id INTEGER,
+                starting_model_name TEXT,
+                readiness_score INTEGER,
+                recommended_next_action TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS datasets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usecase_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                minio_bucket TEXT,
+                minio_prefix TEXT,
+                media_type TEXT NOT NULL,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                label_status TEXT NOT NULL DEFAULT 'unknown',
+                audit_status TEXT NOT NULL DEFAULT 'not_run',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        # Migration: keep older Part-1 databases compatible with the Step-2
+        # dataset picker without rebuilding the table.
+        cursor = connection.execute("PRAGMA table_info(datasets)")
+        dataset_columns = {row[1] for row in cursor.fetchall()}
+        dataset_migrations = {
+            "source_type": "TEXT NOT NULL DEFAULT 'minio'",
+            "minio_bucket": "TEXT",
+            "minio_prefix": "TEXT",
+            "media_type": "TEXT NOT NULL DEFAULT 'unknown'",
+            "file_count": "INTEGER NOT NULL DEFAULT 0",
+            "label_status": "TEXT NOT NULL DEFAULT 'unknown'",
+            "audit_status": "TEXT NOT NULL DEFAULT 'not_run'",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        }
+        for column, column_definition in dataset_migrations.items():
+            if column not in dataset_columns:
+                connection.execute(f"ALTER TABLE datasets ADD COLUMN {column} {column_definition}")
+                connection.commit()
+        connection.execute(
+            """
+            UPDATE datasets
+            SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
+                updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                session_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                readiness_score INTEGER,
+                issues_json TEXT NOT NULL DEFAULT '[]',
+                recommendations_json TEXT NOT NULL DEFAULT '[]',
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES fine_tuning_sessions(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS model_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usecase_slug TEXT NOT NULL,
+                version_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                quality_score REAL,
+                latency_ms REAL,
+                false_alarm_rate REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fine_tuning_dataset_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id INTEGER NOT NULL,
+                dataset_version_id TEXT NOT NULL,
+                session_id INTEGER NOT NULL,
+                data_fingerprint TEXT NOT NULL,
+                manifest_uri TEXT NOT NULL,
+                prepared_dataset_uri TEXT NOT NULL,
+                annotation_format TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                label_count INTEGER NOT NULL DEFAULT 0,
+                readiness_score INTEGER,
+                label_status TEXT NOT NULL,
+                status TEXT NOT NULL,
+                schema_version TEXT NOT NULL DEFAULT 'v1',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES fine_tuning_sessions(id) ON DELETE CASCADE,
+                UNIQUE(session_id, dataset_version_id)
+            )
+            """
+        )
+        connection.commit()
+
 
 @contextmanager
 def get_connection():
@@ -1630,13 +1761,462 @@ def replace_object_tracking_outputs(
         return [_row_to_dict(row) for row in rows]
 
 
+def get_open_fine_tuning_session(usecase_slug: str) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM fine_tuning_sessions
+            WHERE usecase_slug = ? AND status IN ('draft', 'setup_started', 'in_progress')
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (usecase_slug,),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def create_fine_tuning_session(
+    *,
+    usecase_slug: str,
+    starting_model_name: str | None,
+    selected_dataset_id: int | None = None,
+    readiness_score: int | None = None,
+    recommended_next_action: str = "Run data check before setup.",
+) -> dict:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO fine_tuning_sessions (
+                usecase_slug, status, current_step, selected_dataset_id,
+                starting_model_name, readiness_score, recommended_next_action
+            )
+            VALUES (?, 'draft', 1, ?, ?, ?, ?)
+            """,
+            (usecase_slug, selected_dataset_id, starting_model_name, readiness_score, recommended_next_action),
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT * FROM fine_tuning_sessions WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_fine_tuning_session(session_id: int) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM fine_tuning_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def update_fine_tuning_session(session_id: int, **fields) -> dict:
+    allowed = {
+        "status",
+        "current_step",
+        "selected_dataset_id",
+        "starting_model_name",
+        "readiness_score",
+        "recommended_next_action",
+    }
+    assignments = []
+    values = []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        assignments.append(f"{key} = ?")
+        values.append(value)
+    assignments.append("updated_at = CURRENT_TIMESTAMP")
+
+    with get_connection() as connection:
+        if values:
+            connection.execute(
+                f"UPDATE fine_tuning_sessions SET {', '.join(assignments)} WHERE id = ?",
+                (*values, session_id),
+            )
+            connection.commit()
+        row = connection.execute(
+            "SELECT * FROM fine_tuning_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_latest_dataset(usecase_slug: str) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM datasets
+            WHERE usecase_slug = ?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (usecase_slug,),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def list_datasets_for_usecase(usecase_slug: str) -> list[dict]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM datasets
+            WHERE usecase_slug = ?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            """,
+            (usecase_slug,),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+
+def get_dataset(dataset_id: int) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def create_dataset(
+    *,
+    usecase_slug: str,
+    name: str,
+    source_type: str,
+    minio_bucket: str | None,
+    minio_prefix: str | None,
+    media_type: str,
+    file_count: int = 0,
+    label_status: str = "unknown",
+    audit_status: str = "not_run",
+) -> dict:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO datasets (
+                usecase_slug, name, source_type, minio_bucket, minio_prefix,
+                media_type, file_count, label_status, audit_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                usecase_slug,
+                name,
+                source_type,
+                minio_bucket,
+                minio_prefix,
+                media_type,
+                file_count,
+                label_status,
+                audit_status,
+            ),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM datasets WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_dict(row)
+
+
+def upsert_default_dataset(
+    *,
+    usecase_slug: str,
+    name: str,
+    source_type: str,
+    minio_bucket: str | None,
+    minio_prefix: str | None,
+    media_type: str,
+) -> dict:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM datasets
+            WHERE usecase_slug = ? AND source_type = ? AND COALESCE(minio_bucket, '') = COALESCE(?, '')
+              AND COALESCE(minio_prefix, '') = COALESCE(?, '')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (usecase_slug, source_type, minio_bucket, minio_prefix),
+        ).fetchone()
+        if row:
+            return _row_to_dict(row)
+
+        cursor = connection.execute(
+            """
+            INSERT INTO datasets (
+                usecase_slug, name, source_type, minio_bucket, minio_prefix,
+                media_type, label_status, audit_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'unknown', 'not_run')
+            """,
+            (usecase_slug, name, source_type, minio_bucket, minio_prefix, media_type),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM datasets WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_dict(row)
+
+
+def update_dataset_audit_summary(
+    dataset_id: int,
+    *,
+    file_count: int,
+    label_status: str,
+    audit_status: str,
+) -> dict:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE datasets
+            SET file_count = ?, label_status = ?, audit_status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (file_count, label_status, audit_status, dataset_id),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        return _row_to_dict(row)
+
+
+def update_dataset_label_status(dataset_id: int, *, label_status: str) -> dict:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE datasets
+            SET label_status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (label_status, dataset_id),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        return _row_to_dict(row)
+
+
+def reassign_selected_dataset_for_sessions(previous_dataset_id: int, replacement_dataset_id: int | None) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE fine_tuning_sessions
+            SET selected_dataset_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE selected_dataset_id = ?
+            """,
+            (replacement_dataset_id, previous_dataset_id),
+        )
+        connection.commit()
+
+
+def delete_dataset_registration(dataset_id: int) -> None:
+    with get_connection() as connection:
+        connection.execute("DELETE FROM dataset_audits WHERE dataset_id = ?", (dataset_id,))
+        connection.execute("DELETE FROM fine_tuning_dataset_versions WHERE dataset_id = ?", (dataset_id,))
+        connection.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+        connection.commit()
+
+
+def get_active_model_version(usecase_slug: str) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM model_versions
+            WHERE usecase_slug = ? AND role = 'production' AND is_active = 1
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (usecase_slug,),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def ensure_default_model_version(
+    *,
+    usecase_slug: str,
+    version_name: str = "YOLOv8n baseline",
+) -> dict:
+    existing = get_active_model_version(usecase_slug)
+    if existing:
+        return existing
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO model_versions (
+                usecase_slug, version_name, role, is_active, quality_score,
+                latency_ms, false_alarm_rate
+            )
+            VALUES (?, ?, 'production', 1, NULL, NULL, NULL)
+            """,
+            (usecase_slug, version_name),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM model_versions WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_dict(row)
+
+
+def create_dataset_audit(
+    *,
+    dataset_id: int,
+    session_id: int,
+    status: str = "running",
+) -> dict:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO dataset_audits (
+                dataset_id, session_id, status, issues_json,
+                recommendations_json, summary_json
+            )
+            VALUES (?, ?, ?, '[]', '[]', '{}')
+            """,
+            (dataset_id, session_id, status),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM dataset_audits WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_dict(row)
+
+
+def complete_dataset_audit(
+    audit_id: int,
+    *,
+    status: str,
+    readiness_score: int,
+    issues: list[dict],
+    recommendations: list[dict],
+    summary: dict,
+) -> dict:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE dataset_audits
+            SET status = ?, readiness_score = ?, issues_json = ?,
+                recommendations_json = ?, summary_json = ?, completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                status,
+                readiness_score,
+                json.dumps(issues),
+                json.dumps(recommendations),
+                json.dumps(summary),
+                audit_id,
+            ),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM dataset_audits WHERE id = ?", (audit_id,)).fetchone()
+        return _row_to_dict(row)
+
+
+def get_latest_dataset_audit(*, session_id: int, completed_only: bool = False) -> dict | None:
+    query = "SELECT * FROM dataset_audits WHERE session_id = ?"
+    params: list = [session_id]
+    if completed_only:
+        query += " AND status IN ('ready', 'mostly_ready', 'needs_cleanup', 'not_ready', 'failed')"
+    query += " ORDER BY datetime(created_at) DESC, id DESC LIMIT 1"
+    with get_connection() as connection:
+        row = connection.execute(query, params).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def get_latest_dataset_audit_for_dataset(
+    *,
+    dataset_id: int,
+    session_id: int | None = None,
+    completed_only: bool = False,
+) -> dict | None:
+    query = "SELECT * FROM dataset_audits WHERE dataset_id = ?"
+    params: list = [dataset_id]
+    if session_id is not None:
+        query += " AND session_id = ?"
+        params.append(session_id)
+    if completed_only:
+        query += " AND status IN ('ready', 'mostly_ready', 'needs_cleanup', 'not_ready', 'failed')"
+    query += " ORDER BY datetime(created_at) DESC, id DESC LIMIT 1"
+    with get_connection() as connection:
+        row = connection.execute(query, params).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def get_dataset_audit(audit_id: int) -> dict | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM dataset_audits WHERE id = ?",
+            (audit_id,),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def upsert_fine_tuning_dataset_version(
+    *,
+    dataset_id: int,
+    dataset_version_id: str,
+    session_id: int,
+    data_fingerprint: str,
+    manifest_uri: str,
+    prepared_dataset_uri: str,
+    annotation_format: str,
+    task_type: str,
+    item_count: int,
+    label_count: int,
+    readiness_score: int | None,
+    label_status: str,
+    status: str,
+    schema_version: str,
+    payload: dict,
+) -> dict:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO fine_tuning_dataset_versions (
+                dataset_id, dataset_version_id, session_id, data_fingerprint,
+                manifest_uri, prepared_dataset_uri, annotation_format, task_type,
+                item_count, label_count, readiness_score, label_status, status,
+                schema_version, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, dataset_version_id) DO UPDATE SET
+                data_fingerprint = excluded.data_fingerprint,
+                manifest_uri = excluded.manifest_uri,
+                prepared_dataset_uri = excluded.prepared_dataset_uri,
+                annotation_format = excluded.annotation_format,
+                task_type = excluded.task_type,
+                item_count = excluded.item_count,
+                label_count = excluded.label_count,
+                readiness_score = excluded.readiness_score,
+                label_status = excluded.label_status,
+                status = excluded.status,
+                schema_version = excluded.schema_version,
+                payload_json = excluded.payload_json
+            """,
+            (
+                dataset_id,
+                dataset_version_id,
+                session_id,
+                data_fingerprint,
+                manifest_uri,
+                prepared_dataset_uri,
+                annotation_format,
+                task_type,
+                item_count,
+                label_count,
+                readiness_score,
+                label_status,
+                status,
+                schema_version,
+                json.dumps(payload),
+            ),
+        )
+        connection.commit()
+        row = connection.execute(
+            """
+            SELECT * FROM fine_tuning_dataset_versions
+            WHERE session_id = ? AND dataset_version_id = ?
+            """,
+            (session_id, dataset_version_id),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
 def _row_to_dict(row) -> dict:
     """Convert a sqlite Row to dict, parsing JSON-ish columns."""
     d = dict(row)
-    for json_key in ("metrics", "metadata_json"):
+    for json_key in ("metrics", "metadata_json", "issues_json", "recommendations_json", "summary_json", "payload_json"):
         if json_key in d and isinstance(d[json_key], str):
             try:
                 d[json_key] = json.loads(d[json_key])
             except (json.JSONDecodeError, TypeError):
-                d[json_key] = {}
+                d[json_key] = [] if json_key in {"issues_json", "recommendations_json"} else {}
     return d

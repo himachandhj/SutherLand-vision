@@ -65,3 +65,10 @@ BackEnd/runs/
 *.db
 *.pt
 *.cache
+BackEnd/models/assist/
+BackEnd/models/**/*.pt
+BackEnd/data/
+BackEnd/runs/
+*.db
+*.cache
+BackEnd/static/processed/*.mp4

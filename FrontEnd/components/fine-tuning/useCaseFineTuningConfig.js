@@ -96,13 +96,13 @@ const useCaseConfigs = {
   "ppe-detection": {
     heroTitle: "Improve this PPE model with your own site data",
     heroSummary:
-      "Start from the current PPE model, add examples from your factory or warehouse, and let the platform learn your helmets, vests, boots, lighting, and camera angles.",
+      "Start from the current PPE model, add examples from your factory or warehouse, and let the platform learn your helmets, vests, lighting, and camera angles.",
     supportedFormats: sharedFormats,
     datasetChecklist: sharedChecklist,
     baseModels: [
       { value: "ppe-fast", label: "PPE Fast", tradeoff: "Faster", helper: "Good for quick pilots and edge devices." },
       { value: "ppe-balanced", label: "PPE Balanced", tradeoff: "Recommended", helper: "Best overall tradeoff for most industrial sites." },
-      { value: "ppe-accurate", label: "PPE Accurate", tradeoff: "Highest accuracy", helper: "Stronger recall for hard hats, vests, and boots under difficult conditions." },
+      { value: "ppe-accurate", label: "PPE Accurate", tradeoff: "Highest accuracy", helper: "Stronger recall for hard hats and vests under difficult conditions." },
     ],
     recommendedBaseModelId: "ppe-balanced",
     recommendedGoalId: "fewer-false-alarms",
@@ -112,7 +112,7 @@ const useCaseConfigs = {
     extensionDefaults: {
       cameraProfile: "factory-floor",
       lightingProfile: "mixed-indoor",
-      policyFocus: "helmet-vest-boots",
+      policyFocus: "helmet-vest",
       notes: "",
     },
   },
@@ -212,7 +212,7 @@ const useCaseConfigs = {
   "class-wise-object-counting": {
     heroTitle: "Adapt class-wise counting to your traffic mix",
     heroSummary:
-      "Fine-tune the detector on your road or yard conditions so counts by class stay reliable across camera positions, lighting, and traffic mix.",
+      "Fine-tune the detector on your road or yard conditions so better detections lead to more accurate counts across camera positions, lighting, and traffic mix.",
     supportedFormats: sharedFormats,
     datasetChecklist: [...sharedChecklist, "Include every important class you expect to count in production."],
     baseModels: [
@@ -233,11 +233,11 @@ const useCaseConfigs = {
     },
   },
   "object-tracking": {
-    heroTitle: "Improve tracking quality for your scene",
+    heroTitle: "Improve detector inputs for object tracking",
     heroSummary:
-      "Tune for steadier tracking and cleaner path quality using footage from your actual cameras. The flow stays simple up front while still leaving room for deeper controls later.",
+      "Fine-tune the detector used inside the tracking pipeline with footage from your real cameras. Better person and vehicle detections improve downstream tracking without claiming to tune IDs, re-identification, or trajectory logic.",
     supportedFormats: sharedFormats,
-    datasetChecklist: [...sharedChecklist, "Include clips with occlusion, crossing paths, and long dwell behavior."],
+    datasetChecklist: [...sharedChecklist, "Include clips with occlusion, overlapping objects, and the person or vehicle classes you expect to track."],
     baseModels: [
       { value: "tracking-fast", label: "Tracking Fast", tradeoff: "Faster", helper: "Better for lighter workloads and shorter tracks." },
       { value: "tracking-balanced", label: "Tracking Balanced", tradeoff: "Recommended", helper: "Good starting point for most object tracking tasks." },
@@ -246,13 +246,13 @@ const useCaseConfigs = {
     recommendedBaseModelId: "tracking-balanced",
     recommendedGoalId: "best-accuracy",
     recommendedTrainingModeId: "balanced",
-    extensionTitle: "Tracking-specific settings",
-    extensionDescription: "Prepare the UI for identity consistency, occlusion tolerance, lost-track settings, and path inference options without exposing all of that by default.",
+    extensionTitle: "Detector-focused guidance",
+    extensionDescription: "Capture scene conditions that affect detector quality inside the tracking pipeline, such as target classes, crowding, and typical object distance.",
     extensionDefaults: {
-      identityPriority: "balanced",
-      occlusionTolerance: "medium",
-      lostTrackFrames: "24",
-      pathMode: "zones-and-paths",
+      targetClasses: "person-vehicle",
+      sceneDensity: "mixed",
+      occlusionLevel: "medium",
+      distanceProfile: "near-mid-range",
     },
   },
 };

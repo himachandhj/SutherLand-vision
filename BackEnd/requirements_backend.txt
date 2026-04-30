@@ -7,3 +7,5 @@ numpy
 ultralytics
 torch
 dill
+transformers
+Pillow

@@ -15,6 +15,10 @@ export default function DetailPage({
   playgroundState,
   selectedSample,
   sampleMedia,
+  persistedRegionAlertsRoi,
+  onRegionAlertsRoiChange,
+  regionAlertsRuleConfig,
+  onRegionAlertsRuleConfigChange,
   setActiveTab,
   integrationForm,
   integrationOverview,
@@ -44,6 +48,30 @@ export default function DetailPage({
   onToggleRunAnalysis,
   onOpenAnalyticsDashboard,
 }) {
+  const leftTabs = tabs.filter((tab) => tab !== "Fine-Tuning");
+  const rightTab = tabs.find((tab) => tab === "Fine-Tuning");
+
+  const renderTabButton = (tab) => {
+    const active = activeTab === tab;
+
+    return (
+      <button
+        key={tab}
+        className={`border-b-2 px-4 py-3 text-sm font-semibold transition ${active ? "border-brandRed text-brandBlue" : "border-transparent text-slate-500 hover:text-slate-800"}`}
+        onClick={() => {
+          if (tab === "Dashboard") {
+            onOpenAnalyticsDashboard?.();
+            return;
+          }
+          setActiveTab(tab);
+        }}
+        type="button"
+      >
+        {tab}
+      </button>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-white">
       <header className="border-b border-slate-200 bg-white px-10 py-6">
@@ -62,29 +90,27 @@ export default function DetailPage({
       </header>
 
       <div className="px-10 pt-6">
-        <div className="mb-8 flex gap-3 border-b border-slate-200">
-          {tabs.map((tab) => {
-            const active = activeTab === tab;
-            return (
-              <button
-                key={tab}
-                className={`border-b-2 px-4 py-3 text-sm font-semibold transition ${active ? "border-brandRed text-brandBlue" : "border-transparent text-slate-500 hover:text-slate-800"}`}
-                onClick={() => {
-                  if (tab === "Dashboard") {
-                    onOpenAnalyticsDashboard?.();
-                    return;
-                  }
-                  setActiveTab(tab);
-                }}
-              >
-                {tab}
-              </button>
-            );
-          })}
+        <div className="mb-8 flex w-full items-center border-b border-slate-200">
+          <div className="flex items-center gap-3">
+            {leftTabs.map(renderTabButton)}
+          </div>
+          {rightTab ? (
+            <div className="ml-auto flex items-center">
+              {renderTabButton(rightTab)}
+            </div>
+          ) : null}
         </div>
 
         {activeTab === "Model Playground" && (
-          <ModelPlayground activeUseCase={activeUseCase} onProcessInput={onProcessInput} playgroundState={playgroundState} selectedSample={selectedSample} sampleMedia={sampleMedia} />
+          <ModelPlayground
+            activeUseCase={activeUseCase}
+            onProcessInput={onProcessInput}
+            playgroundState={playgroundState}
+            selectedSample={selectedSample}
+            sampleMedia={sampleMedia}
+            persistedRegionAlertsRoi={persistedRegionAlertsRoi}
+            onRegionAlertsRoiChange={onRegionAlertsRoiChange}
+          />
         )}
         {activeTab === "Integration" && (
           <Integration
@@ -105,6 +131,7 @@ export default function DetailPage({
             integrationFetchMessage={integrationFetchMessage}
             integrationProcessMessage={integrationProcessMessage}
             expandedRunId={expandedRunId}
+            regionAlertsRuleConfig={regionAlertsRuleConfig}
             onIntegrationFieldChange={onIntegrationFieldChange}
             onIntegrationConnect={onIntegrationConnect}
             onIntegrationModeChange={onIntegrationModeChange}
@@ -114,6 +141,7 @@ export default function DetailPage({
             onIntegrationFetchVideos={onIntegrationFetchVideos}
             onIntegrationSelectionChange={onIntegrationSelectionChange}
             onIntegrationProcessSelected={onIntegrationProcessSelected}
+            onRegionAlertsRuleConfigChange={onRegionAlertsRuleConfigChange}
             onToggleRunAnalysis={onToggleRunAnalysis}
           />
         )}

@@ -47,6 +47,76 @@ function buildEmptyIntegrationModelState() {
   };
 }
 
+const DEFAULT_REGION_ALERT_RULE_CONFIG = {
+  trigger_type: "enter",
+  alert_delay_sec: 0,
+  confidence_threshold: 0.5,
+  alerts_enabled: true,
+};
+
+function zonePointsNormalizedFromRoi(roi) {
+  if (!roi) return null;
+  return [
+    [roi.x, roi.y],
+    [roi.x + roi.width, roi.y],
+    [roi.x + roi.width, roi.y + roi.height],
+    [roi.x, roi.y + roi.height],
+  ];
+}
+
+function roiFromZonePointsNormalized(zonePoints) {
+  if (!Array.isArray(zonePoints) || zonePoints.length < 4) return null;
+
+  const normalizedPoints = zonePoints
+    .map((point) => (
+      Array.isArray(point) && point.length === 2
+        ? [Number(point[0]), Number(point[1])]
+        : null
+    ))
+    .filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+
+  if (normalizedPoints.length < 4) return null;
+
+  const xs = normalizedPoints.map(([x]) => Math.max(0, Math.min(1, x)));
+  const ys = normalizedPoints.map(([, y]) => Math.max(0, Math.min(1, y)));
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const width = maxX - minX;
+  const height = maxY - minY;
+
+  if (width < 0.01 || height < 0.01) return null;
+
+  return {
+    x: minX,
+    y: minY,
+    width,
+    height,
+  };
+}
+
+function normalizeRegionAlertsRuleConfig(ruleConfig) {
+  if (!ruleConfig || typeof ruleConfig !== "object") {
+    return DEFAULT_REGION_ALERT_RULE_CONFIG;
+  }
+
+  const triggerType = ruleConfig.trigger_type === "exit" ? "exit" : "enter";
+  const alertDelay = Number(ruleConfig.alert_delay_sec);
+  const confidenceThreshold = Number(ruleConfig.confidence_threshold);
+
+  return {
+    trigger_type: triggerType,
+    alert_delay_sec: Number.isFinite(alertDelay) ? Math.max(0, Math.min(10, Math.round(alertDelay))) : 0,
+    confidence_threshold: Number.isFinite(confidenceThreshold)
+      ? Math.max(0.1, Math.min(1, Math.round(confidenceThreshold * 100) / 100))
+      : 0.5,
+    alerts_enabled: typeof ruleConfig.alerts_enabled === "boolean"
+      ? ruleConfig.alerts_enabled
+      : true,
+  };
+}
+
 export default function Page() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-white" />}>
@@ -68,6 +138,10 @@ function VisionLabPage() {
     sourceLabel: "",
     error: "",
   });
+  const [regionAlertsRoi, setRegionAlertsRoi] = useState(null);
+  const [regionAlertsRuleConfig, setRegionAlertsRuleConfig] = useState(DEFAULT_REGION_ALERT_RULE_CONFIG);
+  const [isRegionAlertsRoiDirty, setIsRegionAlertsRoiDirty] = useState(false);
+  const [isRegionAlertsRuleConfigDirty, setIsRegionAlertsRuleConfigDirty] = useState(false);
   const [integrationForm, setIntegrationForm] = useState({
     endpoint: "http://127.0.0.1:9000",
     access_key: "demo-access-key",
@@ -119,6 +193,25 @@ function VisionLabPage() {
     summary: payload?.summary && typeof payload.summary === "object" ? payload.summary : {},
   });
 
+  const buildRegionAlertsIntegrationPayload = () => (
+    activeUseCaseId === "region-alerts"
+      ? {
+          zone_points_normalized: zonePointsNormalizedFromRoi(regionAlertsRoi),
+          rule_config: normalizeRegionAlertsRuleConfig(regionAlertsRuleConfig),
+        }
+      : {}
+  );
+
+  const handleRegionAlertsRoiChange = (nextRoi) => {
+    setRegionAlertsRoi(nextRoi);
+    setIsRegionAlertsRoiDirty(true);
+  };
+
+  const handleRegionAlertsRuleConfigChange = (nextConfig) => {
+    setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(nextConfig));
+    setIsRegionAlertsRuleConfigDirty(true);
+  };
+
   const fetchIntegrationOverview = async () => {
     if (!integrationSupportedUseCases.has(activeUseCaseId)) {
       setIntegrationOverview(buildEmptyIntegrationOverview());
@@ -139,9 +232,25 @@ function VisionLabPage() {
           output_prefix: data.connection.output_prefix ?? current.output_prefix,
         }));
         setIntegrationMode(data.connection.processing_mode ?? "manual");
+        if (activeUseCaseId === "region-alerts") {
+          if (!isRegionAlertsRuleConfigDirty) {
+            setRegionAlertsRuleConfig(normalizeRegionAlertsRuleConfig(data.connection.rule_config));
+          }
+          if (!isRegionAlertsRoiDirty) {
+            setRegionAlertsRoi(roiFromZonePointsNormalized(data.connection.zone_points_normalized));
+          }
+        }
       } else {
         const defaults = getIntegrationDefaults(activeUseCaseId);
         setIntegrationForm((current) => ({ ...current, input_prefix: defaults.input_prefix, output_prefix: defaults.output_prefix }));
+        if (activeUseCaseId === "region-alerts") {
+          if (!isRegionAlertsRuleConfigDirty) {
+            setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+          }
+          if (!isRegionAlertsRoiDirty) {
+            setRegionAlertsRoi(null);
+          }
+        }
       }
 
       try {
@@ -185,6 +294,7 @@ function VisionLabPage() {
           processing_mode: resolvedMode,
           model_mode: requestedModelMode,
           model_version_id: requestedModelVersionId,
+          ...buildRegionAlertsIntegrationPayload(),
         }),
       });
       if (!response.ok) {
@@ -194,6 +304,10 @@ function VisionLabPage() {
       const data = await response.json();
       setIntegrationOverview(normalizeIntegrationOverview(data));
       setIntegrationMode(data?.connection?.processing_mode ?? resolvedMode);
+      if (activeUseCaseId === "region-alerts") {
+        setIsRegionAlertsRoiDirty(false);
+        setIsRegionAlertsRuleConfigDirty(false);
+      }
     } catch (error) {
       setIntegrationError(error instanceof Error ? error.message : "Unable to connect to MinIO.");
     } finally {
@@ -260,6 +374,9 @@ function VisionLabPage() {
           object_keys: selectedIntegrationVideos,
           model_mode: requestedModelMode,
           model_version_id: requestedModelVersionId,
+          model_mode: requestedModelMode,
+          model_version_id: requestedModelVersionId,
+          ...buildRegionAlertsIntegrationPayload(),
         }),
       });
       if (!response.ok) {
@@ -281,6 +398,10 @@ function VisionLabPage() {
         : "";
       setIntegrationProcessMessage(`${data?.message ?? "Selected videos have been queued."} ${modelModeMessage}${fallbackMessage}`.trim());
       setSelectedIntegrationVideos([]);
+      if (activeUseCaseId === "region-alerts") {
+        setIsRegionAlertsRoiDirty(false);
+        setIsRegionAlertsRuleConfigDirty(false);
+      }
       await handleIntegrationFetchVideos();
     } catch (error) {
       setIntegrationProcessMessage(`✗ ${error instanceof Error ? error.message : "Unable to queue selected videos."}`);
@@ -298,7 +419,7 @@ function VisionLabPage() {
     if (!integrationSupportedUseCases.has(activeUseCaseId) || !integrationOverview.connected) return;
     const poller = setInterval(fetchIntegrationOverview, 5000);
     return () => clearInterval(poller);
-  }, [activeUseCaseId, integrationOverview.connected, integrationOverview.processing]);
+  }, [activeUseCaseId, integrationOverview.connected, integrationOverview.processing, isRegionAlertsRoiDirty, isRegionAlertsRuleConfigDirty]);
 
   useEffect(() => {
     setIntegrationFetchedVideos([]);
@@ -332,6 +453,9 @@ function VisionLabPage() {
     setIntegrationError("");
     setIntegrationFetchMessage("");
     setIntegrationProcessMessage("");
+    setRegionAlertsRuleConfig(DEFAULT_REGION_ALERT_RULE_CONFIG);
+    setIsRegionAlertsRoiDirty(false);
+    setIsRegionAlertsRuleConfigDirty(false);
   }, [activeUseCaseId]);
 
   const navigateTo = (nextView, nextTab, method = "push", nextSection = activeSection, useCaseId) => {
@@ -357,13 +481,19 @@ function VisionLabPage() {
     router[method](href, { scroll: false });
   };
 
-  const runPlaygroundPreview = async (file, sourceLabel) => {
+  const runPlaygroundPreview = async (file, sourceLabel, previewOptions = {}) => {
     setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
     navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("use_case_id", activeUseCaseId);
+      if (previewOptions.fireDetectionMode) {
+        formData.append("fire_detection_mode", previewOptions.fireDetectionMode);
+      }
+      if (previewOptions.roi) {
+        formData.append("roi_json", JSON.stringify(previewOptions.roi));
+      }
       const response = await fetch(`${API_BASE_URL}/api/playground-preview`, { method: "POST", body: formData });
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
@@ -390,12 +520,12 @@ function VisionLabPage() {
     }
   };
 
-  const handleProcessInput = async (sampleId, fileOverride) => {
+  const handleProcessInput = async (sampleId, fileOverride, previewOptions = {}) => {
     const matchingSample = sampleMedia.find((sample) => sample.id === sampleId);
     const sourceLabel = fileOverride?.name ?? matchingSample?.label ?? "Uploaded File";
     setSelectedSample(sampleId);
     if (fileOverride) {
-      await runPlaygroundPreview(fileOverride, sourceLabel);
+      await runPlaygroundPreview(fileOverride, sourceLabel, previewOptions);
       return;
     }
     if (!matchingSample) return;
@@ -406,6 +536,12 @@ function VisionLabPage() {
       const formData = new FormData();
       formData.append("sample_name", matchingSample.label);
       formData.append("use_case_id", activeUseCaseId);
+      if (previewOptions.fireDetectionMode) {
+        formData.append("fire_detection_mode", previewOptions.fireDetectionMode);
+      }
+      if (previewOptions.roi) {
+        formData.append("roi_json", JSON.stringify(previewOptions.roi));
+      }
       const response = await fetch(`${API_BASE_URL}/api/playground-preview-sample`, { method: "POST", body: formData });
       if (!response.ok) {
         const errorData = await response.json().catch(() => null);
@@ -455,6 +591,12 @@ function VisionLabPage() {
           playgroundState={playgroundState}
           selectedSample={selectedSample}
           sampleMedia={sampleMedia}
+          persistedRegionAlertsRoi={regionAlertsRoi}
+          regionAlertsRoi={regionAlertsRoi}
+          regionAlertsZonePointsNormalized={zonePointsNormalizedFromRoi(regionAlertsRoi)}
+          onRegionAlertsRoiChange={handleRegionAlertsRoiChange}
+          regionAlertsRuleConfig={regionAlertsRuleConfig}
+          onRegionAlertsRuleConfigChange={handleRegionAlertsRuleConfigChange}
           setActiveTab={(tab) => navigateTo("detail", tab, "push", activeSection, activeUseCaseId)}
           integrationForm={integrationForm}
           integrationOverview={integrationOverview}
