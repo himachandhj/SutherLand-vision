@@ -32,6 +32,9 @@ DETECTION_CLASSES = {
     5: "bus",
     7: "truck",
 }
+# Backward-compatibility alias expected by app/main.py and older call sites.
+# Person remains COCO class id 0.
+PERSON_CLASS = 0
 REQUIRED_REGION_CLASSES = {
     "person",
     "bicycle",
