@@ -12,6 +12,8 @@ class MinioConnectRequest(BaseModel):
     output_prefix: str = "output/"
     use_case_id: str = "ppe-detection"
     processing_mode: str = "manual"
+    model_mode: str = "active"
+    model_version_id: str | None = None
 
 
 class MinioConnectionDetails(BaseModel):
@@ -23,6 +25,12 @@ class MinioConnectionDetails(BaseModel):
     use_case_id: str
     credential_mode: str = "direct"
     processing_mode: str = "manual"
+    model_mode: str = "active"
+    model_version_id: str | None = None
+    model_mode_used: str | None = None
+    model_path_used: str | None = None
+    fallback_used: bool = False
+    fallback_reason: str | None = None
     connected_at: str | None = None
 
 
@@ -77,13 +85,29 @@ class MinioInputVideoListResponse(BaseModel):
 class MinioProcessSelectedRequest(BaseModel):
     use_case_id: str = "ppe-detection"
     object_keys: list[str] = Field(default_factory=list)
+    model_mode: str = "active"
+    model_version_id: str | None = None
 
 
 class MinioProcessSelectedResponse(BaseModel):
     queued_count: int = 0
     skipped_count: int = 0
     message: str = ""
+    model_mode_used: str = "active"
+    model_path_used: str = ""
+    fallback_used: bool = False
+    fallback_reason: str | None = None
     overview: MinioIntegrationOverviewResponse
+
+
+class IntegrationModelStateResponse(BaseModel):
+    use_case_id: str
+    has_staged_model: bool = False
+    staged_model_version_id: str | None = None
+    staged_model_path: str | None = None
+    has_active_model: bool = False
+    active_model_path: str | None = None
+    default_model_available: bool = True
 
 
 class MinioUploadItem(BaseModel):

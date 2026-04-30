@@ -1,13 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
-  BarChart3,
   CheckCircle2,
   Database,
   HelpCircle,
-  PlayCircle,
   Rocket,
   ShieldCheck,
   Tag,
@@ -16,6 +14,7 @@ import {
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { API_BASE_URL } from "../visionLabConfig";
 import AdvancedSettings from "./AdvancedSettings";
 import UseCaseExtensionSection from "./UseCaseExtensionSection";
 
@@ -377,7 +376,6 @@ export function TrainingPlanStep({
   currentModel,
   baseModels,
   selectedBaseModelId,
-  selectedGoalId,
   selectedTrainingModeId,
   selectedStopConditionId,
   advancedOpen,
@@ -385,14 +383,12 @@ export function TrainingPlanStep({
   advancedSettings,
   extensionSettings,
   onBaseModelChange,
-  onGoalChange,
   onTrainingModeChange,
   onStopConditionChange,
   onToggleAdvanced,
   onToggleScene,
   onAdvancedSettingChange,
   onExtensionSettingChange,
-  goalOptions,
   trainingModeOptions,
   stopConditionOptions,
 }) {
@@ -401,7 +397,7 @@ export function TrainingPlanStep({
   return (
     <StepShell
       eyebrow="Step 4"
-      helper="Pick a starting point and choose what matters most. Advanced controls stay hidden."
+      helper="Pick a starting point, choose how broad the run should be, and keep advanced controls hidden until needed."
       title="Choose your plan"
       aside={
         <>
@@ -410,36 +406,19 @@ export function TrainingPlanStep({
         </>
       }
     >
-      <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
-        <div>
-          <div className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Pick a starting model</div>
-          <div className="grid gap-3">
-            {baseModels.map((model) => (
-              <ChoiceCard
-                key={model.value}
-                active={selectedBaseModelId === model.value}
-                badge={model.tradeoff}
-                helper={model.helper}
-                title={model.label}
-                onClick={() => onBaseModelChange(model.value)}
-              />
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Choose what matters most</div>
-          <div className="grid gap-3 md:grid-cols-2">
-            {goalOptions.map((goal) => (
-              <ChoiceCard
-                key={goal.value}
-                active={selectedGoalId === goal.value}
-                helper={goal.helper}
-                title={goal.label}
-                onClick={() => onGoalChange(goal.value)}
-              />
-            ))}
-          </div>
+      <div>
+        <div className="mb-3 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Pick a starting model</div>
+        <div className="grid gap-3">
+          {baseModels.map((model) => (
+            <ChoiceCard
+              key={model.value}
+              active={selectedBaseModelId === model.value}
+              badge={model.tradeoff}
+              helper={model.helper}
+              title={model.label}
+              onClick={() => onBaseModelChange(model.value)}
+            />
+          ))}
         </div>
       </div>
 
@@ -498,181 +477,712 @@ export function TrainingPlanStep({
   );
 }
 
-export function WatchTrainingStep({ trainingJob, onAdvanceTraining }) {
+function getTrainingStatusMessage(status) {
+  if (status === "running") return "Training is running. This may take a few minutes.";
+  if (status === "completed") return "Training completed successfully.";
+  if (status === "failed") return "Training failed. Check backend logs.";
+  return "Training job is ready to start.";
+}
+
+export function WatchTrainingStep({ trainingJob, onTrainingJobSync }) {
+  const [trainingRunning, setTrainingRunning] = useState(false);
+  const [trainingError, setTrainingError] = useState("");
+  const [jobDetails, setJobDetails] = useState(trainingJob);
+
+  useEffect(() => {
+    setJobDetails(trainingJob);
+    setTrainingRunning(false);
+    setTrainingError("");
+  }, [trainingJob]);
+
+  const displayStatus = trainingRunning ? "running" : jobDetails?.status || "queued";
+  const displayMessage = trainingError || getTrainingStatusMessage(displayStatus);
+  const displayOutputPath = jobDetails?.output_model_path || "";
+
+  async function refreshJobDetails(jobId) {
+    const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${jobId}`);
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.detail || "Failed to refresh training job");
+    }
+
+    setJobDetails(data);
+    onTrainingJobSync?.(data);
+    return data;
+  }
+
+  async function handleRunTraining() {
+    if (!jobDetails?.id || trainingRunning || displayStatus === "completed") return;
+
+    try {
+      setTrainingRunning(true);
+      setTrainingError("");
+      onTrainingJobSync?.({ id: jobDetails.id, status: "running" });
+
+      const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${jobDetails.id}/run`, {
+        method: "POST",
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.detail || "Training failed");
+      }
+
+      try {
+        await refreshJobDetails(jobDetails.id);
+      } catch (refreshError) {
+        console.error(refreshError);
+        const fallbackJob = {
+          ...jobDetails,
+          status: data?.status || "completed",
+        };
+        setJobDetails(fallbackJob);
+        onTrainingJobSync?.(fallbackJob);
+      }
+    } catch (error) {
+      console.error(error);
+      setTrainingError(error instanceof Error ? error.message : "Training failed");
+      const failedJob = {
+        ...jobDetails,
+        status: "failed",
+      };
+      setJobDetails(failedJob);
+      onTrainingJobSync?.(failedJob);
+    } finally {
+      setTrainingRunning(false);
+    }
+  }
+
   return (
     <StepShell
       eyebrow="Step 5"
-      helper="This is ready for backend progress updates later. For now, the mock button moves the staged flow forward."
+      helper="Start the training run when you are ready. This step shows the real backend job state. Training artifacts are available in Step 6."
       title="Watch training"
       aside={
         <>
-          <SmallCard helper={trainingJob.next_up} title="Current stage" tone="accent" value={trainingJob.current_stage} />
-          <SmallCard helper={trainingJob.eta} title="Progress" value={`${trainingJob.progress_percent}%`} />
+          <SmallCard
+            helper={jobDetails?.id ? "Use this ID for backend checks." : "Create a training plan first."}
+            title="Training job"
+            tone="accent"
+            value={jobDetails?.id ?? "Not created"}
+          />
+          <SmallCard helper={displayMessage} title="Status" value={displayStatus} />
+          {displayOutputPath ? <SmallCard helper="Saved YOLO best.pt path." title="Output model" value={displayOutputPath} /> : null}
         </>
       }
     >
       <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <div className="text-2xl font-semibold text-slate-900">{trainingJob.current_stage}</div>
-            <p className="mt-2 text-sm leading-6 text-slate-600">{trainingJob.plain_english_status}</p>
+            <div className="text-2xl font-semibold capitalize text-slate-900">{displayStatus}</div>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{displayMessage}</p>
           </div>
-          <Button onClick={onAdvanceTraining} type="button">
-            Advance mock stage
+          <Button disabled={trainingRunning || !jobDetails?.id || displayStatus === "completed"} onClick={handleRunTraining} type="button">
+            {trainingRunning ? "Training..." : "Start Training"}
           </Button>
         </div>
-        <div className="mt-5 h-3 overflow-hidden rounded-full bg-slate-200">
-          <div className="h-full rounded-full bg-brandBlue transition-all" style={{ width: `${trainingJob.progress_percent}%` }} />
-        </div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-3">
-          <SmallCard title="Elapsed" value={trainingJob.elapsed} />
-          <SmallCard title="ETA" value={trainingJob.eta} />
-          <SmallCard title="Best so far" value={trainingJob.best_metric} />
-        </div>
-      </div>
 
-      <div className="mt-5 grid gap-3 lg:grid-cols-2">
-        {trainingJob.timeline.map((item, index) => (
-          <div key={item.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${item.status === "complete" ? "bg-brandBlue text-white" : item.status === "running" ? "bg-brandRed text-white" : "bg-slate-100 text-slate-500"}`}>
-                  {index + 1}
-                </span>
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">{item.label}</div>
-                  <p className="mt-1 text-sm leading-6 text-slate-500">{item.detail}</p>
-                </div>
-              </div>
-              <Badge tone={item.status === "complete" ? "compliant" : item.status === "running" ? "warning" : "normal"}>{item.status}</Badge>
-            </div>
+        {trainingError ? (
+          <div className="mt-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.05] px-4 py-3 text-sm leading-6 text-brandRed">
+            {trainingError}
           </div>
-        ))}
-      </div>
+        ) : null}
 
-      <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-        <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Recent activity</div>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          {trainingJob.activity_feed.map((item) => (
-            <div key={item.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-slate-900">{item.title}</div>
-                <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{item.time}</span>
-              </div>
-              <p className="mt-1 text-sm leading-6 text-slate-500">{item.detail}</p>
-            </div>
-          ))}
+        {!trainingError && displayStatus === "completed" ? (
+          <div className="mt-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm leading-6 text-slate-700">
+            Training completed successfully. Results are available in Step 6.
+          </div>
+        ) : null}
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Training job ID</div>
+            <div className="mt-2 break-all text-sm font-semibold text-slate-900">{jobDetails?.id ?? "Not created"}</div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Status</div>
+            <div className="mt-2 text-sm font-semibold capitalize text-slate-900">{displayStatus}</div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:col-span-2 xl:col-span-1">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Output model path</div>
+            <div className="mt-2 break-all text-sm font-semibold text-slate-900">{displayOutputPath || "Available after training completes"}</div>
+          </div>
         </div>
       </div>
     </StepShell>
   );
 }
 
-export function CompareResultsStep({ activeUseCase, currentModel, evaluation, selectedCandidateId, selectedCandidate, onCandidateSelect }) {
-  const baselineQuality = Number.parseFloat((evaluation.baseline_model.metrics[0]?.value ?? "0").replace("%", "")) || 0;
-  const candidateQuality = Number.parseFloat((selectedCandidate?.metrics[0]?.value ?? "0").replace("%", "")) || 0;
-  const qualityDelta = (candidateQuality - baselineQuality).toFixed(1);
+const GRAPH_ARTIFACT_NAMES = new Set([
+  "results.png",
+  "confusion_matrix.png",
+  "f1_curve.png",
+  "pr_curve.png",
+  "p_curve.png",
+  "r_curve.png",
+]);
+
+function isImageSampleArtifact(name) {
+  const normalized = String(name || "").toLowerCase();
+  return (
+    normalized === "labels.jpg" ||
+    normalized.startsWith("train_batch") ||
+    normalized.startsWith("val_batch")
+  );
+}
+
+function isGraphArtifact(name) {
+  const normalized = String(name || "").toLowerCase();
+  return GRAPH_ARTIFACT_NAMES.has(normalized);
+}
+
+function ArtifactSelector({ title, items, selectedName, onSelect, emptyMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleItems = expanded ? items : items.slice(0, 8);
+  const hasMore = items.length > 8;
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">{title}</div>
+      {items.length === 0 ? (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+          {emptyMessage}
+        </div>
+      ) : (
+        <>
+          <div className="mt-3 space-y-2">
+            {visibleItems.map((artifact) => {
+              const isSelected = artifact.name === selectedName;
+              return (
+                <button
+                  key={artifact.url}
+                  className={`w-full rounded-xl border px-3 py-2 text-left text-sm transition ${
+                    isSelected
+                      ? "border-brandRed bg-brandRed/[0.06] text-slate-900"
+                      : "border-slate-200 bg-slate-50 text-slate-700 hover:border-brandBlue/30"
+                  }`}
+                  onClick={() => onSelect(artifact)}
+                  type="button"
+                >
+                  {artifact.name}
+                </button>
+              );
+            })}
+          </div>
+          {hasMore ? (
+            <Button className="mt-3" onClick={() => setExpanded((current) => !current)} type="button" variant="outline">
+              {expanded ? "Show fewer items" : "Show more items"}
+            </Button>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, trainingJobId, selectedTrainingMode }) {
+  const [jobDetails, setJobDetails] = useState(trainingJob);
+  const [jobLoading, setJobLoading] = useState(false);
+  const [jobError, setJobError] = useState("");
+  const [artifacts, setArtifacts] = useState([]);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactsError, setArtifactsError] = useState("");
+  const [selectedImageArtifact, setSelectedImageArtifact] = useState(null);
+  const [selectedGraphArtifact, setSelectedGraphArtifact] = useState(null);
+  const [actionMessage, setActionMessage] = useState("");
+
+  useEffect(() => {
+    setJobDetails(trainingJobId ? trainingJob : null);
+    setJobError("");
+    setArtifacts([]);
+    setArtifactsError("");
+    setSelectedImageArtifact(null);
+    setSelectedGraphArtifact(null);
+    setActionMessage("");
+  }, [trainingJob, trainingJobId]);
+
+  useEffect(() => {
+    if (!trainingJobId) return;
+
+    let isActive = true;
+
+    async function loadComparisonData() {
+      let jobLoaded = false;
+
+      try {
+        setJobLoading(true);
+        setJobError("");
+
+        const jobResponse = await fetch(`${API_BASE_URL}/api/fine-tuning/${trainingJobId}`);
+        const jobData = await jobResponse.json().catch(() => null);
+        if (!jobResponse.ok) {
+          throw new Error(jobData?.detail || "Failed to load training job");
+        }
+        if (!isActive) return;
+
+        setJobDetails(jobData);
+        jobLoaded = true;
+
+        if (jobData.status !== "completed") {
+          setArtifacts([]);
+          setArtifactsError("");
+          setArtifactsLoading(false);
+          return;
+        }
+
+        setArtifactsLoading(true);
+        setArtifactsError("");
+
+        const artifactsResponse = await fetch(`${API_BASE_URL}/api/fine-tuning/${trainingJobId}/artifacts`);
+        const artifactsData = await artifactsResponse.json().catch(() => null);
+        if (!artifactsResponse.ok) {
+          throw new Error(artifactsData?.detail || "Failed to load training results");
+        }
+        if (!isActive) return;
+
+        const loadedArtifacts = Array.isArray(artifactsData?.artifacts) ? artifactsData.artifacts : [];
+        setArtifacts(loadedArtifacts);
+
+        const imageArtifacts = loadedArtifacts.filter((artifact) => isImageSampleArtifact(artifact?.name));
+        const graphArtifacts = loadedArtifacts.filter((artifact) => isGraphArtifact(artifact?.name));
+
+        setSelectedImageArtifact(imageArtifacts[0] ?? null);
+        setSelectedGraphArtifact(
+          graphArtifacts.find((artifact) => String(artifact?.name || "").toLowerCase() === "results.png") ??
+            graphArtifacts[0] ??
+            null,
+        );
+      } catch (error) {
+        console.error(error);
+        if (!isActive) return;
+        const message = error instanceof Error ? error.message : "Failed to load comparison details";
+        if (!jobLoaded) {
+          setJobError(message);
+        } else {
+          setArtifactsError(message);
+        }
+      } finally {
+        if (!isActive) return;
+        setJobLoading(false);
+        setArtifactsLoading(false);
+      }
+    }
+
+    loadComparisonData();
+
+    return () => {
+      isActive = false;
+    };
+  }, [trainingJobId, trainingJob?.status]);
+
+  const comparisonStatus = trainingJobId ? jobDetails?.status || trainingJob?.status || "" : "";
+  const currentModelPath = currentModel?.model_path || "Production model (existing inference pipeline)";
+  const currentModelStatus = "Active";
+  const runDepthLabel = selectedTrainingMode?.label || "Not available";
+  const comparisonMessage =
+    !trainingJobId
+      ? "No completed training found."
+      : comparisonStatus === "failed"
+        ? "Training failed. Please retry."
+        : comparisonStatus === "running"
+          ? "Training in progress..."
+          : comparisonStatus === "completed"
+            ? activeUseCase?.id === "speed-estimation"
+              ? "Training completed successfully. Speed accuracy is not evaluated yet. This fine-tuning improves the vehicle detection layer; speed calculation is validated in Integration."
+              : activeUseCase?.id === "object-tracking"
+                ? "Training completed successfully. Tracking identity quality is not evaluated yet. This fine-tuning improves the detection layer; tracking behavior is validated in Integration."
+                : activeUseCase?.id === "class-wise-object-counting"
+                  ? "Training completed successfully. Counting accuracy is not evaluated yet. This fine-tuning improves the detection layer; counting results are validated in Integration/Dashboard."
+              : "Training completed successfully. Model ready for evaluation and staging."
+            : "Training is not complete yet.";
+  const currentModelDescription =
+    activeUseCase?.id === "speed-estimation"
+      ? "This is the model currently used for speed estimation inference. It remains unchanged."
+      : activeUseCase?.id === "object-tracking"
+        ? "This is the model currently used for object tracking inference. It remains unchanged."
+        : activeUseCase?.id === "class-wise-object-counting"
+          ? "This is the model currently used for class-wise counting inference. It remains unchanged."
+      : "This is the model currently used for inference. It remains unchanged.";
+  const imageArtifacts = artifacts.filter((artifact) => isImageSampleArtifact(artifact?.name));
+  const graphArtifacts = artifacts.filter((artifact) => isGraphArtifact(artifact?.name));
 
   return (
     <StepShell
       eyebrow="Step 6"
-      helper="Pick the version that looks safest to test. Production is still unchanged."
-      title="Compare before replacing"
+      helper="Review training images, validation predictions, and training graphs before staging the model."
+      title="Show results"
       aside={
         <>
-          <SmallCard helper={selectedCandidate?.recommendation} title="Selected version" tone="accent" value={selectedCandidate?.badge ?? "Choose one"} />
-          <SmallCard helper="Compared with the current live model." title="Quality change" value={`+${qualityDelta}%`} />
+          <SmallCard helper="This remains the active inference model." title="Current model" value={currentModel?.version ?? "Production"} />
+          <SmallCard helper="Pulled from the training job created in Step 5." title="New model status" tone="accent" value={comparisonStatus || "Not started"} />
         </>
       }
     >
-      <div className="grid gap-4 lg:grid-cols-3">
-        {evaluation.candidate_models.map((candidate) => (
-          <ChoiceCard
-            key={candidate.id}
-            active={candidate.id === selectedCandidateId}
-            badge={candidate.version}
-            helper={candidate.summary}
-            icon={BarChart3}
-            title={candidate.badge}
-            onClick={() => onCandidateSelect(candidate.id)}
-          />
-        ))}
-      </div>
+      {jobError ? (
+        <div className="mb-5 rounded-2xl border border-brandRed/20 bg-brandRed/[0.05] px-4 py-3 text-sm leading-6 text-brandRed">
+          {jobError}
+        </div>
+      ) : null}
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <div className="text-sm font-semibold text-slate-900">{currentModel.name}</div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {evaluation.baseline_model.metrics.map((metric) => (
-              <SmallCard key={metric.label} title={metric.label} value={metric.value} />
-            ))}
+          <div className="text-lg font-semibold text-slate-900">Current Live Model</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{currentModelDescription}</p>
+          <div className="mt-5 space-y-3">
+            <SmallCard helper="Shown when a concrete live model path is available." title="Model path" value={currentModelPath} />
+            <SmallCard helper="Production remains untouched in this step." title="Status" value={currentModelStatus} tone="accent" />
           </div>
         </div>
+
         <div className="rounded-2xl border border-brandBlue/20 bg-brandBlue/[0.04] p-5">
-          <div className="text-sm font-semibold text-slate-900">{selectedCandidate?.name}</div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {(selectedCandidate?.metrics ?? []).map((metric) => (
-              <SmallCard key={metric.label} title={metric.label} value={metric.value} tone="accent" />
-            ))}
+          <div className="text-lg font-semibold text-slate-900">New Fine-Tuned Model</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">This model comes from the Step 5 training run and reflects the latest backend job state.</p>
+          <div className="mt-5 space-y-3">
+            <SmallCard helper="Backend training job identifier." title="Training job ID" value={jobDetails?.id ?? "No training job"} />
+            <SmallCard helper={jobLoading ? "Refreshing latest backend state..." : "Returned from the Step 5 job endpoint."} title="Status" value={comparisonStatus || "Not started"} tone="accent" />
+            <SmallCard helper="Saved after training completes." title="Output model path" value={jobDetails?.output_model_path || "Available after training completes"} />
+            <SmallCard helper="Shown from the Step 4 selection while backend plan details stay internal." title="Run depth" value={runDepthLabel} />
           </div>
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-2xl border border-slate-200 bg-white p-5">
-          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">What improved</div>
-          <div className="mt-3 grid gap-3">
-            {evaluation.review_buckets[0]?.items.map((item) => (
-              <div key={item} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                {item}
-              </div>
-            ))}
+      <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Training Results</div>
+        {artifactsLoading ? (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            Loading training results...
           </div>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5">
-          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Quick side-by-side check</div>
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
+        ) : null}
+        {artifactsError ? (
+          <div className="mt-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.05] px-4 py-3 text-sm leading-6 text-brandRed">
+            {artifactsError}
+          </div>
+        ) : null}
+
+        {!artifactsLoading ? (
+          <div className="mt-4 grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <ArtifactSelector
+              emptyMessage="No training or validation images found."
+              items={imageArtifacts}
+              selectedName={selectedImageArtifact?.name || ""}
+              title="Image Samples"
+              onSelect={setSelectedImageArtifact}
+            />
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-semibold text-slate-900">{activeUseCase.title} current</div>
-              <div className="mt-3 space-y-2">
-                {(selectedCandidate?.preview?.current ?? []).map((item) => (
-                  <div key={item} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">{item}</div>
-                ))}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-brandBlue/20 bg-brandBlue/[0.04] p-4">
-              <div className="text-sm font-semibold text-slate-900">{activeUseCase.title} new version</div>
-              <div className="mt-3 space-y-2">
-                {(selectedCandidate?.preview?.candidate ?? []).map((item) => (
-                  <div key={item} className="rounded-xl border border-white bg-white px-3 py-2 text-sm text-slate-600">{item}</div>
-                ))}
-              </div>
+              {selectedImageArtifact ? (
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-900">{selectedImageArtifact.name}</div>
+                  <img
+                    alt={selectedImageArtifact.name}
+                    className="mx-auto w-full rounded-2xl border border-slate-200 bg-white object-contain"
+                    src={selectedImageArtifact.url}
+                  />
+                </div>
+              ) : (
+                <div className="flex min-h-[320px] items-center justify-center text-sm text-slate-600">
+                  No training or validation images found.
+                </div>
+              )}
             </div>
           </div>
+        ) : null}
+
+        {!artifactsLoading ? (
+          <div className="mt-5 grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <ArtifactSelector
+              emptyMessage="No training graphs found."
+              items={graphArtifacts}
+              selectedName={selectedGraphArtifact?.name || ""}
+              title="Training Graphs"
+              onSelect={setSelectedGraphArtifact}
+            />
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              {selectedGraphArtifact ? (
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-900">{selectedGraphArtifact.name}</div>
+                  <img
+                    alt={selectedGraphArtifact.name}
+                    className="mx-auto w-full rounded-2xl border border-slate-200 bg-white object-contain"
+                    src={selectedGraphArtifact.url}
+                  />
+                  <p className="text-sm leading-6 text-slate-500">
+                    Training curves showing loss, precision, recall, and mAP trends
+                  </p>
+                </div>
+              ) : (
+                <div className="flex min-h-[320px] items-center justify-center text-sm text-slate-600">
+                  No training graphs found.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm leading-6 text-slate-700">
+          {comparisonMessage}
         </div>
+      </div>
+
+      <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Actions</div>
+            <p className="mt-2 text-sm leading-6 text-slate-600">Production will not be affected until deployment is explicitly triggered.</p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <Button
+              onClick={() => setActionMessage("Kept the current model in place. Production remains unchanged.")}
+              type="button"
+              variant="outline"
+            >
+              Keep current model
+            </Button>
+            <Button
+              disabled={!trainingJobId || comparisonStatus !== "completed"}
+              onClick={() =>
+                setActionMessage(
+                  activeUseCase?.id === "object-tracking"
+                    ? "Marked the new model as ready for staging review. Production is still unchanged."
+                    : activeUseCase?.id === "class-wise-object-counting"
+                      ? "Marked the new model as ready for staging review. Production is still unchanged."
+                    : "Marked the new model as ready for staging review. Production is still unchanged.",
+                )
+              }
+              type="button"
+            >
+              Use new model for staging
+            </Button>
+          </div>
+        </div>
+
+        {actionMessage ? (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-700">
+            {actionMessage}
+          </div>
+        ) : null}
       </div>
     </StepShell>
   );
 }
 
-export function RolloutStep({ currentModel, deploymentState, selectedCandidate, onAction }) {
+export function RolloutStep({ activeUseCase, currentModel, trainingJob, trainingJobId, selectedTrainingMode }) {
+  const [rolloutState, setRolloutState] = useState(null);
+  const [rolloutLoading, setRolloutLoading] = useState(false);
+  const [rolloutError, setRolloutError] = useState("");
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionMessage, setActionMessage] = useState("");
+
+  const refreshRolloutState = async () => {
+    if (!trainingJobId) {
+      setRolloutState(null);
+      return;
+    }
+
+    try {
+      setRolloutLoading(true);
+      setRolloutError("");
+
+      const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${trainingJobId}/rollout-state`);
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.detail || "Failed to load rollout state");
+      }
+
+      setRolloutState(data);
+    } catch (error) {
+      console.error(error);
+      setRolloutError(error instanceof Error ? error.message : "Failed to load rollout state");
+    } finally {
+      setRolloutLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!trainingJobId) {
+      setRolloutState(null);
+      return;
+    }
+
+    async function loadRolloutState() {
+      try {
+        setRolloutLoading(true);
+        setRolloutError("");
+
+        const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${trainingJobId}/rollout-state`);
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(data?.detail || "Failed to load rollout state");
+        }
+
+        setRolloutState(data);
+      } catch (error) {
+        console.error(error);
+        setRolloutError(error instanceof Error ? error.message : "Failed to load rollout state");
+      } finally {
+        setRolloutLoading(false);
+      }
+    }
+
+    loadRolloutState();
+  }, [trainingJobId]);
+
+  const effectiveJobStatus = rolloutState?.training_job?.status ?? trainingJob?.status ?? "queued";
+  const effectiveOutputPath =
+    rolloutState?.training_job?.output_model_path ?? trainingJob?.output_model_path ?? "";
+  const savedVersion = rolloutState?.saved_version ?? null;
+  const stagingVersion = rolloutState?.staging_version ?? null;
+  const activeModel = rolloutState?.active_model ?? null;
+
+  const rolloutStatus =
+    savedVersion?.status ??
+    stagingVersion?.status ??
+    (effectiveJobStatus === "completed" ? "ready_to_save" : effectiveJobStatus);
+
+  const canRollout = Boolean(trainingJobId) && effectiveJobStatus === "completed" && Boolean(effectiveOutputPath);
+  const activeModelPath = activeModel?.active_model_path || "Production model (existing inference pipeline)";
+  const newVersionLabel = savedVersion?.version_name || "Not saved yet";
+  const displayedModelVersionId = savedVersion?.id || stagingVersion?.id || "";
+
+  const runRolloutAction = async (url, successMessage) => {
+    try {
+      setActionLoading(true);
+      setRolloutError("");
+      setActionMessage("");
+
+      const response = await fetch(url, { method: "POST" });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(data?.detail || "Rollout action failed");
+      }
+
+      setActionMessage(data?.message || successMessage);
+      await refreshRolloutState();
+      return data;
+    } catch (error) {
+      console.error(error);
+      setRolloutError(error instanceof Error ? error.message : "Rollout action failed");
+      return null;
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const ensureSavedVersion = async () => {
+    if (savedVersion?.id) return savedVersion.id;
+    if (!trainingJobId) {
+      setRolloutError("No completed training found.");
+      return "";
+    }
+
+    const data = await runRolloutAction(
+      `${API_BASE_URL}/api/fine-tuning/${trainingJobId}/save-version`,
+      "Candidate version saved. Production remains unchanged.",
+    );
+    return data?.model_version_id || "";
+  };
+
+  const handleSaveVersion = async () => {
+    if (!trainingJobId) {
+      setRolloutError("No completed training found.");
+      return;
+    }
+    await ensureSavedVersion();
+  };
+
+  const handleStageVersion = async () => {
+    const modelVersionId = await ensureSavedVersion();
+    if (!modelVersionId) return;
+
+    await runRolloutAction(
+      `${API_BASE_URL}/api/fine-tuning/model-versions/${modelVersionId}/stage`,
+      activeUseCase?.id === "speed-estimation"
+        ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected speed-estimation videos."
+        : activeUseCase?.id === "object-tracking"
+          ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected object-tracking videos."
+        : "Model staged for temporary testing. Production remains unchanged.",
+    );
+  };
+
+  const handlePromoteVersion = async () => {
+    const modelVersionId = await ensureSavedVersion();
+    if (!modelVersionId) return;
+
+    await runRolloutAction(
+      `${API_BASE_URL}/api/fine-tuning/model-versions/${modelVersionId}/promote`,
+      activeUseCase?.id === "speed-estimation"
+        ? "Model promoted successfully. Integration will now use this Speed Estimation model by default."
+        : activeUseCase?.id === "object-tracking"
+          ? "Model promoted successfully. Integration will now use this Object Tracking model by default."
+        : "New model promoted as active model.",
+    );
+  };
+
+  const handleKeepCurrent = async () => {
+    if (!displayedModelVersionId) {
+      setActionMessage("Current model remains active.");
+      return;
+    }
+
+    await runRolloutAction(
+      `${API_BASE_URL}/api/fine-tuning/model-versions/${displayedModelVersionId}/keep-current`,
+      "Current model remains active.",
+    );
+  };
+
   return (
     <StepShell
       eyebrow="Step 7"
-      helper="Save, test, or keep the current model. This UI does not change production unless a backend action is added later."
+      helper={
+        activeUseCase?.id === "speed-estimation"
+          ? "Register the trained model, try it safely in staging for Speed Estimation, or promote it only after validation."
+          : activeUseCase?.id === "object-tracking"
+            ? "Register the trained model, try it safely in staging for Object Tracking, or promote it only after validation."
+            : activeUseCase?.id === "class-wise-object-counting"
+              ? "Register the trained model, try it safely in staging for Class-wise Object Counting, or promote it only after validation."
+          : "Register the trained model, try it safely in staging, or promote it only after validation."
+      }
       title="Go live safely"
       aside={
         <>
-          <SmallCard helper={currentModel.environment} title="Current live model" value={currentModel.version} />
-          <SmallCard helper={selectedCandidate?.badge} title="New version" tone="accent" value={selectedCandidate?.version ?? "Choose candidate"} />
+          <SmallCard helper="Active production reference" title="Current live model" value={currentModel.version} />
+          <SmallCard
+            helper={rolloutStatus === "promoted" ? "Now active for this use case" : "Latest saved rollout version"}
+            title="New version"
+            tone="accent"
+            value={newVersionLabel}
+          />
         </>
       }
     >
       <div className="grid gap-4 md:grid-cols-3">
-        {deploymentState.rollout_plan.map((step, index) => (
-          <div key={step} className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+        {[
+          {
+            title: "Save the new version",
+            helper: "Register this trained model as a candidate.",
+          },
+          {
+            title: "Try it in staging",
+            helper:
+              activeUseCase?.id === "speed-estimation"
+                ? "Temporarily test this model in Integration without replacing production."
+                : activeUseCase?.id === "object-tracking"
+                  ? "Temporarily test this model in Integration without replacing production."
+                  : activeUseCase?.id === "class-wise-object-counting"
+                    ? "Temporarily test this model in Integration without replacing production."
+                : "Temporarily test this model in Integration without replacing production.",
+          },
+          {
+            title: "Promote after validation",
+            helper: "Use this model as the active model only after validation.",
+          },
+        ].map((step, index) => (
+          <div key={step.title} className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brandBlue text-sm font-semibold text-white">{index + 1}</div>
-            <div className="mt-3 text-sm font-semibold text-slate-900">{step}</div>
+            <div className="mt-3 text-sm font-semibold text-slate-900">{step.title}</div>
+            <p className="mt-2 text-sm leading-6 text-slate-500">{step.helper}</p>
           </div>
         ))}
       </div>
@@ -680,17 +1190,21 @@ export function RolloutStep({ currentModel, deploymentState, selectedCandidate, 
       <div className="mt-5 rounded-2xl border border-brandBlue/20 bg-brandBlue/[0.04] p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <div className="text-lg font-semibold text-slate-900">{selectedCandidate?.name ?? "Candidate version"}</div>
-            <p className="mt-1 text-sm leading-6 text-slate-600">{selectedCandidate?.recommendation ?? "Choose a version in the compare step first."}</p>
+            <div className="text-lg font-semibold text-slate-900">Fine-tuned rollout candidate</div>
+            <p className="mt-1 text-sm leading-6 text-slate-600">
+              {canRollout
+                ? "Production remains unchanged unless you explicitly promote this version."
+                : "Rollout actions stay blocked until training completes and produces a model artifact."}
+            </p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <Button onClick={() => onAction("candidate")} type="button" variant="outline">
+            <Button disabled={!canRollout || actionLoading} onClick={handleSaveVersion} type="button" variant="outline">
               Save version
             </Button>
-            <Button onClick={() => onAction("staging")} type="button" variant="outline">
+            <Button disabled={!canRollout || actionLoading} onClick={handleStageVersion} type="button" variant="outline">
               Try staging
             </Button>
-            <Button onClick={() => onAction("production")} type="button">
+            <Button disabled={!canRollout || actionLoading} onClick={handlePromoteVersion} type="button">
               Promote
               <Rocket className="ml-2 h-4 w-4" />
             </Button>
@@ -700,16 +1214,66 @@ export function RolloutStep({ currentModel, deploymentState, selectedCandidate, 
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
-          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Latest action</div>
-          <p className="mt-2 text-sm leading-6 text-slate-600">{deploymentState.last_action}</p>
+          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Current production model</div>
+          <div className="mt-3 space-y-2 text-sm leading-6 text-slate-600">
+            <p><span className="font-semibold text-slate-900">Model:</span> {currentModel.name}</p>
+            <p><span className="font-semibold text-slate-900">Status:</span> Active</p>
+            <p><span className="font-semibold text-slate-900">Model path:</span> {activeModelPath}</p>
+          </div>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
-          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Rollback note</div>
-          <p className="mt-2 text-sm leading-6 text-slate-600">{deploymentState.rollback_note}</p>
-          <Button className="mt-4" onClick={() => onAction("keep-current")} type="button" variant="outline">
+          <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">New fine-tuned model</div>
+          <div className="mt-3 space-y-2 text-sm leading-6 text-slate-600">
+            <p><span className="font-semibold text-slate-900">Training job ID:</span> {trainingJobId || trainingJob?.id || "Not available"}</p>
+            <p><span className="font-semibold text-slate-900">Status:</span> {rolloutStatus}</p>
+            <p><span className="font-semibold text-slate-900">Model path:</span> {effectiveOutputPath || "No trained model path yet"}</p>
+            <p><span className="font-semibold text-slate-900">Run depth:</span> {selectedTrainingMode?.label ?? "Recommended"}</p>
+          </div>
+          <Button className="mt-4" disabled={actionLoading} onClick={handleKeepCurrent} type="button" variant="outline">
             Keep current model
           </Button>
         </div>
+      </div>
+
+      <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+        <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Rollout state</div>
+        {rolloutLoading ? (
+          <p className="mt-3 text-sm leading-6 text-slate-600">Loading rollout state...</p>
+        ) : (
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <SmallCard
+              helper="Registered version for this training job"
+              title="Saved version"
+              value={savedVersion?.status ?? "Not saved"}
+            />
+            <SmallCard
+              helper="Temporary validation path only"
+              title="Staging"
+              value={stagingVersion?.version_name ?? "Not staged"}
+            />
+            <SmallCard
+              helper="Updated only after promote"
+              title="Active model"
+              value={activeModel?.active_model_version_id || currentModel.version}
+            />
+          </div>
+        )}
+
+        {rolloutError ? (
+          <div className="mt-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.05] px-4 py-3 text-sm leading-6 text-brandRed">
+            {rolloutError}
+          </div>
+        ) : null}
+
+        {actionMessage ? (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-700">
+            {actionMessage}
+          </div>
+        ) : null}
+
+        <p className="mt-4 text-sm leading-6 text-slate-500">
+          Try staging never changes the active production model. Promote is the only action that updates the active model reference.
+        </p>
       </div>
     </StepShell>
   );

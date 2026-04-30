@@ -47,6 +47,8 @@ function formatAnalysisValue(value) {
 
 function RunAnalysisPanel({ run }) {
   const entries = Object.entries(run.metrics ?? {});
+  const fallbackUsed = Boolean(run.metrics?.fallback_used);
+  const fallbackReason = run.metrics?.fallback_reason;
 
   return (
     <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
@@ -57,6 +59,11 @@ function RunAnalysisPanel({ run }) {
         </div>
         <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
       </div>
+      {fallbackUsed ? (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          {fallbackReason || "Staged model was not compatible or produced no valid detections, so the current/default model was used for this run."}
+        </div>
+      ) : null}
       {entries.length === 0 ? (
         <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
           No analysis metadata was stored for this run.
@@ -131,7 +138,69 @@ function IntegrationModeButton({ active, label, onClick }) {
   );
 }
 
-function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLabel }) {
+function formatModelModeLabel(mode) {
+  return mode === "staging" ? "Staged fine-tuned model" : "Current active model";
+}
+
+function formatModelUsageLabel(modeUsed) {
+  if (modeUsed === "staging") return "Staged fine-tuned model";
+  if (modeUsed === "active") return "Current active model";
+  return "Current active/default model";
+}
+
+function IntegrationModelModeControl({
+  connection,
+  disabled,
+  helperText,
+  label,
+  modelState,
+  selectedMode,
+  onChange,
+}) {
+  const showStagedOption = Boolean(modelState?.has_staged_model);
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <label className="block">
+        <span className="mb-2 block text-sm font-semibold text-slate-700">{label}</span>
+        <select
+          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+          disabled={disabled}
+          value={selectedMode}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="active">Current active model</option>
+          {showStagedOption ? <option value="staging">Staged fine-tuned model</option> : null}
+        </select>
+      </label>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        {showStagedOption
+          ? helperText
+          : "Stage a fine-tuned model from Go Live Safely to test it here."}
+      </p>
+      {connection?.model_path_used ? (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+          <div className="font-semibold uppercase tracking-[0.18em] text-slate-400">Current backend model</div>
+          <div className="mt-2 text-sm font-medium text-slate-700">{formatModelUsageLabel(connection.model_mode_used)}</div>
+          <div className="mt-1 break-all">{connection.model_path_used}</div>
+          {connection.fallback_used && connection.fallback_reason ? (
+            <div className="mt-2 text-amber-700">{connection.fallback_reason}</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function IntegrationAutoPanel({
+  connection,
+  isConnected,
+  isProcessing,
+  modelState,
+  selectedModelMode,
+  useCaseLabel,
+  onModelModeChange,
+}) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -145,7 +214,16 @@ function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLa
           {isProcessing ? "Monitoring • Active" : isConnected ? "Monitoring • Idle" : "Not Connected"}
         </span>
       </div>
-      <div className="mt-5 grid gap-4 md:grid-cols-3">
+      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_1fr_1fr]">
+        <IntegrationModelModeControl
+          connection={connection}
+          disabled={!isConnected}
+          helperText="Choose whether this auto-processing session should use the current active model or the staged fine-tuned model."
+          label="Auto mode model"
+          modelState={modelState}
+          selectedMode={selectedModelMode}
+          onChange={onModelModeChange}
+        />
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Input Source</div>
           <div className="mt-2 text-sm font-semibold text-slate-800">{connection?.bucket ?? "—"}</div>
@@ -172,11 +250,14 @@ function IntegrationManualPanel({
   fetchCount,
   fetchedVideos,
   isFetching,
+  modelState,
   isProcessing,
   fetchMessage,
   processMessage,
+  selectedModelMode,
   selectedVideos,
   useCaseLabel,
+  onModelModeChange,
   onFetchCountChange,
   onFetchVideos,
   onProcessSelected,
@@ -217,31 +298,47 @@ function IntegrationManualPanel({
         </div>
       </div>
       <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="text-sm font-semibold text-slate-700" htmlFor="integration-fetch-count">Fetch count</label>
-            <select
-              id="integration-fetch-count"
-              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
-              disabled={disabled || isFetching}
-              value={fetchCount}
-              onChange={(event) => onFetchCountChange(Number(event.target.value))}
-            >
-              {[5, 10, 20, 50].map((count) => (
-                <option key={count} value={count}>{count}</option>
-              ))}
-            </select>
-            <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isFetching} onClick={onFetchVideos} type="button">
-              {isFetching ? "Fetching..." : "Fetch Videos"}
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:border-brandBlue hover:text-brandBlue disabled:cursor-not-allowed disabled:opacity-60" disabled={selectableVideos.length === 0} onClick={toggleSelectAll} type="button">
-              {allSelectableSelected ? "Clear Selection" : "Select All"}
-            </button>
-            <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isProcessing || selectedVideos.length === 0} onClick={onProcessSelected} type="button">
-              {isProcessing ? "Processing..." : `Process Selected${selectedVideos.length > 0 ? ` (${selectedVideos.length})` : ""}`}
-            </button>
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
+          <IntegrationModelModeControl
+            connection={connection}
+            disabled={disabled || isProcessing}
+            helperText="Choose which model should be used only for the selected manual video run."
+            label="Model for this run"
+            modelState={modelState}
+            selectedMode={selectedModelMode}
+            onChange={onModelModeChange}
+          />
+          <div className="flex flex-col gap-4 lg:justify-between">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="text-sm font-semibold text-slate-700" htmlFor="integration-fetch-count">Fetch count</label>
+                <select
+                  id="integration-fetch-count"
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                  disabled={disabled || isFetching}
+                  value={fetchCount}
+                  onChange={(event) => onFetchCountChange(Number(event.target.value))}
+                >
+                  {[5, 10, 20, 50].map((count) => (
+                    <option key={count} value={count}>{count}</option>
+                  ))}
+                </select>
+                <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isFetching} onClick={onFetchVideos} type="button">
+                  {isFetching ? "Fetching..." : "Fetch Videos"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:border-brandBlue hover:text-brandBlue disabled:cursor-not-allowed disabled:opacity-60" disabled={selectableVideos.length === 0} onClick={toggleSelectAll} type="button">
+                  {allSelectableSelected ? "Clear Selection" : "Select All"}
+                </button>
+                <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isProcessing || selectedVideos.length === 0} onClick={onProcessSelected} type="button">
+                  {isProcessing ? "Processing..." : `Process Selected${selectedVideos.length > 0 ? ` (${selectedVideos.length})` : ""}`}
+                </button>
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+              Processed using: <strong className="text-slate-800">{formatModelModeLabel(selectedModelMode)}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -311,9 +408,12 @@ export default function Integration({
   activeUseCase,
   integrationForm,
   integrationOverview,
+  integrationModelState,
   integrationError,
   isConnectingIntegration,
   integrationMode,
+  integrationManualModelMode,
+  integrationAutoModelMode,
   integrationFetchCount,
   integrationFetchedVideos,
   selectedIntegrationVideos,
@@ -325,6 +425,8 @@ export default function Integration({
   onIntegrationFieldChange,
   onIntegrationConnect,
   onIntegrationModeChange,
+  onIntegrationManualModelModeChange,
+  onIntegrationAutoModelModeChange,
   onIntegrationFetchCountChange,
   onIntegrationFetchVideos,
   onIntegrationSelectionChange,
@@ -431,7 +533,15 @@ export default function Integration({
       </section>
 
       {isAutoMode ? (
-        <IntegrationAutoPanel connection={connection} isConnected={integrationOverview.connected} isProcessing={integrationOverview.processing} useCaseLabel={useCaseLabel} />
+        <IntegrationAutoPanel
+          connection={connection}
+          isConnected={integrationOverview.connected}
+          isProcessing={integrationOverview.processing}
+          modelState={integrationModelState}
+          selectedModelMode={integrationAutoModelMode}
+          useCaseLabel={useCaseLabel}
+          onModelModeChange={onIntegrationAutoModelModeChange}
+        />
       ) : (
         <IntegrationManualPanel
           connection={connection}
@@ -439,11 +549,14 @@ export default function Integration({
           fetchCount={integrationFetchCount}
           fetchedVideos={integrationFetchedVideos}
           isFetching={isFetchingIntegrationVideos}
+          modelState={integrationModelState}
           isProcessing={isProcessingIntegrationVideos}
           fetchMessage={integrationFetchMessage}
           processMessage={integrationProcessMessage}
+          selectedModelMode={integrationManualModelMode}
           selectedVideos={selectedIntegrationVideos}
           useCaseLabel={useCaseLabel}
+          onModelModeChange={onIntegrationManualModelModeChange}
           onFetchCountChange={onIntegrationFetchCountChange}
           onFetchVideos={onIntegrationFetchVideos}
           onProcessSelected={onIntegrationProcessSelected}

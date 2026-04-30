@@ -65,6 +65,7 @@ from app.core.minio_integration import (
 )
 from app.schemas.job import UseCaseInfo, VideoJobResponse
 from app.schemas.integration import (
+    IntegrationModelStateResponse,
     IntegrationRunItem,
     IntegrationVideoItem,
     MinioConnectRequest,
@@ -75,6 +76,13 @@ from app.schemas.integration import (
     MinioProcessSelectedResponse,
     MinioUploadItem,
     MinioUploadResponse,
+)
+from app.routers.fine_tuning import router as fine_tuning_router
+from app.services.inference_model_resolver import (
+    get_integration_model_state,
+    normalize_model_mode,
+    resolve_default_inference_model_path,
+    resolve_inference_model_path,
 )
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
@@ -105,6 +113,8 @@ LOCAL_FALLBACK_MODEL_PATH = BASE_DIR / FALLBACK_MODEL_NAME
 PROCESSED_DIR = STATIC_DIR / "processed"
 YOLO_MODEL: YOLO | None = None
 YOLO_MODEL_SOURCE = ""
+FIRE_SMOKE_PREVIEW_MODEL: YOLO | None = None
+FIRE_SMOKE_PREVIEW_MODEL_SOURCE = ""
 PPE_PREVIEW_PERSON_MODEL: YOLO | None = None
 PPE_PREVIEW_MODEL_SOURCE = ""
 PPE_PREVIEW_DETECTOR: ppe_engine.PPEDetector | None = None
@@ -180,6 +190,7 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(fine_tuning_router)
 
 
 class AnalyzeVideoRequest(BaseModel):
@@ -238,6 +249,23 @@ def load_yolo_model() -> None:
     YOLO_MODEL_SOURCE = f"unavailable: {last_error}" if last_error else "unavailable"
 
 
+def load_fire_smoke_preview_components() -> None:
+    global FIRE_SMOKE_PREVIEW_MODEL, FIRE_SMOKE_PREVIEW_MODEL_SOURCE
+
+    model_source = BASE_DIR / "models" / "fire_smoke" / "best.pt"
+    if not model_source.exists():
+        FIRE_SMOKE_PREVIEW_MODEL = None
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = "unavailable: models/fire_smoke/best.pt not found"
+        return
+
+    try:
+        FIRE_SMOKE_PREVIEW_MODEL = YOLO(str(model_source))
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = str(model_source)
+    except Exception as error:
+        FIRE_SMOKE_PREVIEW_MODEL = None
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = f"unavailable: {error}"
+
+
 def load_ppe_preview_components() -> None:
     global PPE_PREVIEW_PERSON_MODEL, PPE_PREVIEW_MODEL_SOURCE, PPE_PREVIEW_DETECTOR
 
@@ -265,11 +293,7 @@ def load_ppe_preview_components() -> None:
 
 
 def resolve_default_model_path() -> str:
-    if BEST_MODEL_PATH.exists():
-        return str(BEST_MODEL_PATH)
-    if LOCAL_FALLBACK_MODEL_PATH.exists():
-        return str(LOCAL_FALLBACK_MODEL_PATH)
-    return FALLBACK_MODEL_NAME
+    return resolve_default_inference_model_path()
 
 
 def _normalize_integration_use_case_id(value: str | None) -> str:
@@ -312,6 +336,12 @@ def _build_empty_integration_state(use_case_id: str) -> dict[str, Any]:
         "processing": False,
         "pending_rescan": False,
         "processing_mode": "manual",
+        "model_mode": "active",
+        "model_version_id": None,
+        "model_mode_used": "active",
+        "model_path_used": resolve_default_model_path(),
+        "fallback_used": False,
+        "fallback_reason": None,
         "message": "",
         "last_sync_at": None,
         "connected_at": None,
@@ -386,6 +416,12 @@ def _build_connection_details(
     connected_at: str | None,
     credential_mode: str,
     processing_mode: str,
+    model_mode: str,
+    model_version_id: str | None,
+    model_mode_used: str | None,
+    model_path_used: str | None,
+    fallback_used: bool,
+    fallback_reason: str | None,
 ) -> MinioConnectionDetails:
     normalized = config.normalized()
     return MinioConnectionDetails(
@@ -396,6 +432,12 @@ def _build_connection_details(
         use_case_id=use_case_id,
         credential_mode=credential_mode,
         processing_mode=processing_mode,
+        model_mode=model_mode,
+        model_version_id=model_version_id,
+        model_mode_used=model_mode_used,
+        model_path_used=model_path_used,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
         connected_at=connected_at,
     )
 
@@ -1341,6 +1383,12 @@ def _build_integration_overview(
     credential_mode = str(snapshot.get("credential_mode") or "direct")
     connected_at = snapshot.get("connected_at")
     processing_mode = str(snapshot.get("processing_mode") or "manual")
+    model_mode = str(snapshot.get("model_mode") or "active")
+    model_version_id = snapshot.get("model_version_id")
+    model_mode_used = snapshot.get("model_mode_used")
+    model_path_used = snapshot.get("model_path_used")
+    fallback_used = bool(snapshot.get("fallback_used"))
+    fallback_reason = snapshot.get("fallback_reason")
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
 
     overview = MinioIntegrationOverviewResponse(
@@ -1354,6 +1402,12 @@ def _build_integration_overview(
             connected_at=connected_at,
             credential_mode=credential_mode,
             processing_mode=processing_mode,
+            model_mode=model_mode,
+            model_version_id=model_version_id,
+            model_mode_used=model_mode_used,
+            model_path_used=model_path_used,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
         ) if config else None,
     )
 
@@ -1533,7 +1587,13 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
         )
         return
 
-    model_path = resolve_default_model_path()
+    auto_model_mode = normalize_model_mode(str(snapshot.get("model_mode") or "active"))
+    auto_model_version_id = str(snapshot.get("model_version_id") or "") or None
+    auto_model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=auto_model_mode,
+        model_version_id=auto_model_version_id,
+    )
     found_any_inputs = False
 
     try:
@@ -1662,10 +1722,22 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     local_output = temp_dir_path / Path(next_output_key).name
                     client.fget_object(config.bucket, input_key, str(local_input))
 
+                    model_resolution = auto_model_resolution
+                    if current_mode == "manual":
+                        existing_metrics = next_existing_run.get("metrics", {}) if next_existing_run else {}
+                        requested_model_mode = normalize_model_mode(existing_metrics.get("requested_model_mode"))
+                        requested_model_version_id = str(existing_metrics.get("requested_model_version_id") or "") or None
+                        model_resolution = resolve_inference_model_path(
+                            canonical_use_case_id,
+                            model_mode=requested_model_mode,
+                            model_version_id=requested_model_version_id,
+                        )
+
                     result = processor(
                         input_path=str(local_input),
                         output_path=str(local_output),
-                        model_path=model_path,
+                        model_path=str(model_resolution["model_path"]),
+                        model_mode=str(model_resolution["model_mode_used"]),
                         device=auto_device(),
                         show=False,
                     )
@@ -1676,12 +1748,13 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
                     if not isinstance(metrics, dict):
                         metrics = {}
+                    metrics.setdefault("model_mode_used", model_resolution["model_mode_used"])
+                    metrics.setdefault("model_path_used", model_resolution["display_model_path"])
+                    metrics.setdefault("fallback_used", bool(model_resolution["fallback_used"]))
+                    metrics.setdefault("fallback_reason", model_resolution["fallback_reason"])
                     processing_version = _get_integration_processing_version(canonical_use_case_id)
                     if processing_version > 0:
-                        metrics = {
-                            **metrics,
-                            "processing_version": processing_version,
-                        }
+                        metrics.setdefault("processing_version", processing_version)
                     analytics_rows = _persist_use_case_analytics(
                         use_case_id=canonical_use_case_id,
                         result=result,
@@ -1693,11 +1766,8 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                         run_status="completed",
                     )
                     if analytics_rows is not None:
-                        metrics = {
-                            **metrics,
-                            "analytics_input_id": analytics_rows["input_row"]["input_id"],
-                            "analytics_output_rows": len(analytics_rows["output_rows"]),
-                        }
+                        metrics.setdefault("analytics_input_id", analytics_rows["input_row"]["input_id"])
+                        metrics.setdefault("analytics_output_rows", len(analytics_rows["output_rows"]))
                     update_integration_run(
                         int(run["id"]),
                         status="completed",
@@ -1752,6 +1822,7 @@ def startup_event() -> None:
     sync_static_assets()
     ensure_mock_video()
     load_yolo_model()
+    load_fire_smoke_preview_components()
     load_ppe_preview_components()
 
 
@@ -1951,9 +2022,35 @@ def run_region_alerts_video_preview(video_path: Path, source_name: str | None = 
 
 
 def run_fire_detection_preview(frame: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+    detections: list[dict[str, str | float]] = []
+
+    if FIRE_SMOKE_PREVIEW_MODEL is not None:
+        try:
+            results = FIRE_SMOKE_PREVIEW_MODEL.predict(
+                source=frame,
+                conf=0.40,
+                verbose=False,
+                imgsz=640,
+            )
+            annotated = results[0].plot() if results else frame.copy()
+            names: dict[int, Any] = results[0].names if results else {}
+            if results and results[0].boxes is not None:
+                for box in results[0].boxes:
+                    confidence = float(box.conf[0]) if box.conf is not None else 0.0
+                    class_id = int(box.cls[0]) if box.cls is not None else -1
+                    class_name = str(names.get(class_id, class_id)).lower()
+                    detections.append(
+                        {
+                            "class": class_name,
+                            "confidence": round(confidence, 4),
+                        }
+                    )
+            return annotated, detections
+        except Exception:
+            pass
+
     annotated = frame.copy()
     fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
-    detections: list[dict[str, str | float]] = []
 
     for region in fire_regions:
         x1, y1, x2, y2 = region["bbox"]
@@ -2123,7 +2220,7 @@ def build_playground_preview_response(
                 model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "fire-detection":
             annotated_image, detections = run_fire_detection_preview(frame)
-            model_source = "fire-smoke-hsv-preview"
+            model_source = FIRE_SMOKE_PREVIEW_MODEL_SOURCE or "fire-smoke-hsv-preview"
         elif use_case_id == "speed-estimation":
             if file_kind != "video" or temp_path is None:
                 raise HTTPException(
@@ -3297,6 +3394,16 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
     return _build_integration_overview(use_case_id=canonical_use_case_id)
 
 
+@app.get(
+    "/api/integrations/model-state/{use_case_id}",
+    tags=["Integration"],
+    response_model=IntegrationModelStateResponse,
+)
+def get_integration_model_state_endpoint(use_case_id: str) -> IntegrationModelStateResponse:
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    return IntegrationModelStateResponse(**get_integration_model_state(canonical_use_case_id))
+
+
 @app.post(
     "/api/integrations/minio/connect",
     tags=["Integration"],
@@ -3305,6 +3412,13 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
 def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationOverviewResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
     processing_mode = _normalize_processing_mode(payload.processing_mode)
+    selected_model_mode = normalize_model_mode(payload.model_mode)
+    selected_model_version_id = str(payload.model_version_id or "").strip() or None
+    model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+    )
     config, credential_mode, bucket_created = _resolve_minio_connection(payload)
     connected_at = _utc_now_iso()
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
@@ -3328,6 +3442,12 @@ def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationO
         connected_at=connected_at,
         credential_mode=credential_mode,
         processing_mode=processing_mode,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+        model_mode_used=model_resolution["model_mode_used"],
+        model_path_used=model_resolution["display_model_path"],
+        fallback_used=bool(model_resolution["fallback_used"]),
+        fallback_reason=model_resolution["fallback_reason"],
         connection=config,
     )
 
@@ -3391,6 +3511,14 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"Unable to access the configured MinIO bucket: {error}") from error
 
+    selected_model_mode = normalize_model_mode(payload.model_mode)
+    selected_model_version_id = str(payload.model_version_id or "").strip() or None
+    model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+    )
+
     queued_count = 0
     skipped_count = 0
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
@@ -3441,7 +3569,15 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
             output_key=output_key,
             status="queued",
             message=f"Queued for manual {use_case_title} processing from MinIO input.",
-            metrics=existing_run.get("metrics", {}) if existing_run else {},
+            metrics={
+                **(existing_run.get("metrics", {}) if existing_run else {}),
+                "requested_model_mode": selected_model_mode,
+                "requested_model_version_id": selected_model_version_id,
+                "model_mode_used": model_resolution["model_mode_used"],
+                "model_path_used": model_resolution["display_model_path"],
+                "fallback_used": bool(model_resolution["fallback_used"]),
+                "fallback_reason": model_resolution["fallback_reason"],
+            },
         )
         queued_count += 1
 
@@ -3470,6 +3606,10 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
         queued_count=queued_count,
         skipped_count=skipped_count,
         message=message,
+        model_mode_used=str(model_resolution["model_mode_used"]),
+        model_path_used=str(model_resolution["display_model_path"]),
+        fallback_used=bool(model_resolution["fallback_used"]),
+        fallback_reason=model_resolution["fallback_reason"],
         overview=overview,
     )
 

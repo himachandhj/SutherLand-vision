@@ -32,6 +32,91 @@ def init_db() -> None:
 
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS training_jobs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                dataset_version_id TEXT NOT NULL,
+                use_case_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                base_model TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                epochs INTEGER NOT NULL,
+                batch_size INTEGER NOT NULL,
+                img_size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                output_model_path TEXT NOT NULL DEFAULT '',
+                plan_config TEXT NOT NULL DEFAULT '{}',
+                dataset_snapshot TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        cursor = connection.execute("PRAGMA table_info(training_jobs)")
+        training_job_columns = {row[1] for row in cursor.fetchall()}
+        if "output_model_path" not in training_job_columns:
+            connection.execute("ALTER TABLE training_jobs ADD COLUMN output_model_path TEXT NOT NULL DEFAULT ''")
+            connection.commit()
+        if "plan_config" not in training_job_columns:
+            connection.execute("ALTER TABLE training_jobs ADD COLUMN plan_config TEXT NOT NULL DEFAULT '{}'")
+            connection.commit()
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_training_jobs_session
+            ON training_jobs (session_id, created_at)
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS model_versions (
+                id TEXT PRIMARY KEY,
+                training_job_id TEXT NOT NULL,
+                use_case_id TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                version_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_versions_job
+            ON model_versions (training_job_id, created_at)
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_versions_use_case
+            ON model_versions (use_case_id, status, updated_at)
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS active_models (
+                use_case_id TEXT PRIMARY KEY,
+                active_model_version_id TEXT NOT NULL DEFAULT '',
+                active_model_path TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS integration_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider TEXT NOT NULL,
