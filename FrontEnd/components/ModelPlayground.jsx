@@ -61,6 +61,16 @@ function previewKindFromFile(file) {
   return contentType.startsWith("image/") ? "image" : "video";
 }
 
+function formatMetricValue(value, suffix = "") {
+  const number = Number(value);
+  if (Number.isFinite(number)) {
+    if (suffix === "%") return `${number.toFixed(1)}${suffix}`;
+    if (number % 1 === 0) return `${number}${suffix}`;
+    return `${number.toFixed(2)}${suffix}`;
+  }
+  return value ?? "—";
+}
+
 export default function ModelPlayground({
   activeUseCase,
   onProcessInput,
@@ -85,7 +95,10 @@ export default function ModelPlayground({
   const supportsPpeMode = activeUseCase.id === "ppe-detection";
   const supportsRoi = activeUseCase.id === "fire-detection" || activeUseCase.id === "region-alerts";
   const isSpeedEstimation = activeUseCase.id === "speed-estimation";
-  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation;
+  const isCrackDetection = activeUseCase.id === "crack-detection";
+  const isUnsafeBehaviorDetection = activeUseCase.id === "unsafe-behavior-detection";
+  const isLegacyClasswiseCounting = activeUseCase.id === "class-wise-object-counting";
+  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation || isCrackDetection || isUnsafeBehaviorDetection;
   const activeSampleId = currentInput?.kind === "sample" ? currentInput.sampleId : selectedSample;
 
   useEffect(() => {
@@ -287,10 +300,30 @@ export default function ModelPlayground({
                 : "Upload your own input or pick a sample, then re-run the preview with the settings below."}
             </p>
 
+            {isLegacyClasswiseCounting ? (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+                Class-wise counting is now included in Vehicle Analytics under Speed Estimation. This preview remains available only for direct access and backward compatibility.
+              </div>
+            ) : null}
+
             {isSpeedEstimation ? (
               <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
-                <p>Speed Estimation tracks moving objects across frames and estimates speed from motion. Use video input for the most meaningful results.</p>
+                <p>Vehicle Analytics tracks moving objects across frames, estimates speed from motion, and summarizes class-wise vehicle counts. Use video input for the most meaningful results.</p>
                 <p className="mt-2">Image previews may only show object detection; speed requires motion across video frames.</p>
+              </div>
+            ) : null}
+
+            {isCrackDetection ? (
+              <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+                <p>Crack Detection uses a fine-tuned YOLO crack detector when the model is available under <span className="font-semibold">BackEnd/models/crack_detection/best.pt</span>.</p>
+                <p className="mt-2">Upload crack images or videos from walls, roads, bridges, pavements, or construction surfaces to preview annotated detections.</p>
+              </div>
+            ) : null}
+
+            {isUnsafeBehaviorDetection ? (
+              <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+                <p>Unsafe Behavior Detection uses a smoking YOLO model at <span className="font-semibold">BackEnd/models/unsafe_behavior/smoking_best.pt</span> and a COCO model for person + cell phone association.</p>
+                <p className="mt-2">Upload images or videos containing smoking or mobile phone usage to preview combined unsafe behavior detections.</p>
               </div>
             ) : null}
 
@@ -515,6 +548,34 @@ export default function ModelPlayground({
                 )}
               </div>
             </div>
+            {(isCrackDetection || isUnsafeBehaviorDetection) && playgroundState.metrics ? (
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {(isUnsafeBehaviorDetection
+                  ? [
+                      ["Total unsafe events", formatMetricValue(playgroundState.metrics.total_unsafe_events)],
+                      ["Smoking events", formatMetricValue(playgroundState.metrics.smoking_events)],
+                      ["Phone usage events", formatMetricValue(playgroundState.metrics.phone_usage_events)],
+                      ["Frames analyzed", formatMetricValue(playgroundState.metrics.frames_analyzed)],
+                      ["Frames with unsafe behavior", formatMetricValue(playgroundState.metrics.frames_with_unsafe_behavior)],
+                      ["Unsafe rate", formatMetricValue(playgroundState.metrics.unsafe_rate_pct, "%")],
+                      ["Max confidence", formatMetricValue(playgroundState.metrics.max_confidence)],
+                      ["Average confidence", formatMetricValue(playgroundState.metrics.avg_confidence)],
+                    ]
+                  : [
+                      ["Crack detections", formatMetricValue(playgroundState.metrics.crack_detections)],
+                      ["Frames analyzed", formatMetricValue(playgroundState.metrics.frames_analyzed)],
+                      ["Frames with cracks", formatMetricValue(playgroundState.metrics.frames_with_cracks)],
+                      ["Crack rate", formatMetricValue(playgroundState.metrics.crack_rate_pct, "%")],
+                      ["Max confidence", formatMetricValue(playgroundState.metrics.max_confidence)],
+                      ["Average confidence", formatMetricValue(playgroundState.metrics.avg_confidence)],
+                    ]).map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+                    <div className="mt-2 text-xl font-semibold text-slate-900">{value}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="mt-5 flex gap-3">
               <button
                 className="rounded-xl border border-brandBlue px-4 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white"

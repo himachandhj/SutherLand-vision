@@ -34,6 +34,8 @@ TASK_TYPE_BY_USE_CASE = {
     "fire-detection": "object_detection",
     "ppe-detection": "object_detection",
     "region-alerts": "object_detection",
+    "crack-detection": "object_detection",
+    "unsafe-behavior-detection": "object_detection",
     "class-wise-counting": "object_detection",
     "class-wise-object-counting": "object_detection",
     "speed-estimation": "tracking",

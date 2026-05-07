@@ -13,6 +13,8 @@ SPEED_ESTIMATION_MODEL_PATH = BASE_DIR / "models" / "speed_estimation" / "best.p
 SPEED_MODEL_PATH = BASE_DIR / "models" / "speed" / "best.pt"
 OBJECT_TRACKING_MODEL_PATH = BASE_DIR / "models" / "object_tracking" / "best.pt"
 TRACKING_MODEL_PATH = BASE_DIR / "models" / "tracking" / "best.pt"
+CRACK_DETECTION_MODEL_PATH = BASE_DIR / "models" / "crack_detection" / "best.pt"
+UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH = BASE_DIR / "models" / "unsafe_behavior" / "smoking_best.pt"
 LOCAL_FALLBACK_MODEL_PATH = BASE_DIR / "yolov8n.pt"
 FALLBACK_MODEL_NAME = "yolov8n.pt"
 SAFE_EXPLICIT_STATUSES = {"candidate", "staging", "promoted"}
@@ -69,6 +71,15 @@ def resolve_inference_model_path(
             }
 
     default_model_path = resolve_default_inference_model_path(use_case_id)
+    if str(use_case_id or "").strip().lower() in {"crack-detection", "unsafe-behavior-detection"}:
+        return {
+            "model_path": default_model_path,
+            "display_model_path": default_model_path,
+            "model_mode_used": "active",
+            "fallback_used": False,
+            "fallback_reason": None,
+            "model_version_id_used": "",
+        }
     return {
         "model_path": default_model_path,
         "display_model_path": default_model_path,
@@ -102,6 +113,11 @@ def get_integration_model_state(use_case_id: str) -> dict[str, Any]:
 
 
 def resolve_default_inference_model_path(use_case_id: str | None = None) -> str:
+    normalized = str(use_case_id or "").strip().lower()
+    if normalized == "crack-detection":
+        return str(CRACK_DETECTION_MODEL_PATH)
+    if normalized == "unsafe-behavior-detection":
+        return str(UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH)
     for candidate in _get_use_case_default_model_candidates(use_case_id):
         if candidate.exists():
             return str(candidate)
@@ -136,6 +152,10 @@ def _get_use_case_default_model_candidates(use_case_id: str | None) -> tuple[Pat
         return (SPEED_ESTIMATION_MODEL_PATH, SPEED_MODEL_PATH, BEST_MODEL_PATH)
     if normalized == "object-tracking":
         return (OBJECT_TRACKING_MODEL_PATH, TRACKING_MODEL_PATH, BEST_MODEL_PATH)
+    if normalized == "crack-detection":
+        return (CRACK_DETECTION_MODEL_PATH,)
+    if normalized == "unsafe-behavior-detection":
+        return (UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH,)
     return (BEST_MODEL_PATH,)
 
 

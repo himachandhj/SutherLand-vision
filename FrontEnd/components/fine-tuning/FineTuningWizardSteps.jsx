@@ -474,6 +474,9 @@ export function GetStartedStep({
       {stepError ? (
         <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] p-4 text-sm text-brandRed">{stepError}</div>
       ) : null}
+      {!stepError && step1Data?.model_available === false && step1Data?.model_warning ? (
+        <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-slate-700">{step1Data.model_warning}</div>
+      ) : null}
 
       <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-5">
         <div className="text-lg font-semibold text-slate-900">Safe fine-tuning path</div>
@@ -572,6 +575,53 @@ export function GetStartedStep({
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
             Fine-tuning improves the object detector used by Speed Estimation. Speed calculation, calibration, and thresholds are configured separately during processing.
           </p>
+        </div>
+      ) : null}
+      {activeUseCase.id === "crack-detection" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Fine-tuning improves the crack detector used for construction and infrastructure inspection. Use bounding-box labels around visible cracks, and include both cracked and non-cracked surfaces so the model learns what should not trigger detections.
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Current model</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">Crack detector</div>
+              <div className="mt-2 text-sm text-slate-700">Task: object detection</div>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Dataset needed</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>images of cracked surfaces</div>
+                <div>images of non-cracked surfaces</div>
+                <div>YOLO bounding-box labels for crack regions</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {activeUseCase.id === "unsafe-behavior-detection" ? (
+        <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
+          <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            Fine-tuning in this flow prepares object-detection labels for unsafe workplace events. Smoking can use the installed smoking detector for suggestions when available, while phone usage currently remains a COCO person-plus-phone rule that should be reviewed manually during labeling.
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Current smoking model</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">Unsafe smoking detector</div>
+              <div className="mt-2 text-sm text-slate-700">Task: object detection</div>
+              <div className="mt-2 text-sm text-slate-700">Phone usage uses COCO person + phone association during inference.</div>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Dataset needed</div>
+              <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div>workplace images or extracted frames</div>
+                <div>YOLO bounding-box labels for smoking events</div>
+                <div>YOLO bounding-box labels for phone_usage events</div>
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -2698,7 +2748,13 @@ export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, t
   }, [trainingJobId, trainingJob?.status]);
 
   const comparisonStatus = trainingJobId ? jobDetails?.status || trainingJob?.status || "" : "";
-  const currentModelPath = currentModel?.model_path || "Production model (existing inference pipeline)";
+  const currentModelPath =
+    currentModel?.model_path ||
+    (activeUseCase?.id === "crack-detection"
+      ? "models/crack_detection/best.pt"
+      : activeUseCase?.id === "unsafe-behavior-detection"
+        ? "models/unsafe_behavior/smoking_best.pt"
+      : "Production model (existing inference pipeline)");
   const currentModelStatus = "Active";
   const runDepthLabel = selectedTrainingMode?.label || "Not available";
   const comparisonMessage =
@@ -2710,9 +2766,13 @@ export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, t
           ? "Training in progress..."
           : comparisonStatus === "completed"
             ? activeUseCase?.id === "speed-estimation"
-              ? "Training completed successfully. Speed accuracy is not evaluated yet. This fine-tuning improves the vehicle detection layer; speed calculation is validated in Integration."
+                ? "Training completed successfully. Speed accuracy is not evaluated yet. This fine-tuning improves the vehicle detection layer; speed calculation is validated in Integration."
               : activeUseCase?.id === "object-tracking"
                 ? "Training completed successfully. Tracking identity quality is not evaluated yet. This fine-tuning improves the detection layer; tracking behavior is validated in Integration."
+                : activeUseCase?.id === "crack-detection"
+                  ? "Training completed successfully. Crack-specific validation metrics are shown only when YOLO generates them. Review artifacts and test in Integration before promotion."
+                : activeUseCase?.id === "unsafe-behavior-detection"
+                  ? "Training completed successfully. Unsafe behavior validation metrics are shown only when YOLO generates them. Review artifacts and test in Integration before promotion."
                 : activeUseCase?.id === "class-wise-object-counting"
                   ? "Training completed successfully. Counting accuracy is not evaluated yet. This fine-tuning improves the detection layer; counting results are validated in Integration/Dashboard."
               : "Training completed successfully. Model ready for evaluation and staging."
@@ -2722,6 +2782,10 @@ export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, t
       ? "This is the model currently used for speed estimation inference. It remains unchanged."
       : activeUseCase?.id === "object-tracking"
         ? "This is the model currently used for object tracking inference. It remains unchanged."
+        : activeUseCase?.id === "crack-detection"
+          ? "This is the model currently used for crack detection inference. It remains unchanged unless you explicitly promote a new version."
+        : activeUseCase?.id === "unsafe-behavior-detection"
+          ? "This is the smoking model currently used for unsafe behavior inference. Production phone usage currently uses COCO person + phone association."
         : activeUseCase?.id === "class-wise-object-counting"
           ? "This is the model currently used for class-wise counting inference. It remains unchanged."
       : "This is the model currently used for inference. It remains unchanged.";
@@ -2735,7 +2799,7 @@ export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, t
       title="Show results"
       aside={
         <>
-          <SmallCard helper="This remains the active inference model." title="Current model" value={currentModel?.version ?? "Production"} />
+          <SmallCard helper="This remains the active inference model." title="Current model" value={activeUseCase?.id === "crack-detection" ? (currentModel?.version ?? "Crack detector") : activeUseCase?.id === "unsafe-behavior-detection" ? (currentModel?.version ?? "Unsafe smoking detector") : (currentModel?.version ?? "Production")} />
           <SmallCard helper="Pulled from the training job created in Step 5." title="New model status" tone="accent" value={comparisonStatus || "Not started"} />
         </>
       }
@@ -2748,22 +2812,28 @@ export function CompareResultsStep({ activeUseCase, currentModel, trainingJob, t
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <div className="text-lg font-semibold text-slate-900">Current Live Model</div>
+          <div className="text-lg font-semibold text-slate-900">{activeUseCase?.id === "crack-detection" ? "Current Crack Detection Model" : activeUseCase?.id === "unsafe-behavior-detection" ? "Current Unsafe Behavior Model" : "Current Live Model"}</div>
           <p className="mt-2 text-sm leading-6 text-slate-600">{currentModelDescription}</p>
           <div className="mt-5 space-y-3">
             <SmallCard helper="Shown when a concrete live model path is available." title="Model path" value={currentModelPath} />
-            <SmallCard helper="Production remains untouched in this step." title="Status" value={currentModelStatus} tone="accent" />
+            <SmallCard helper="Production remains untouched in this step." title="Status" value={activeUseCase?.id === "crack-detection" ? "Existing detector" : activeUseCase?.id === "unsafe-behavior-detection" ? "Existing detector" : currentModelStatus} tone="accent" />
+            {activeUseCase?.id === "unsafe-behavior-detection" ? (
+              <SmallCard helper="Current production note" title="Phone usage note" value="Production phone usage currently uses COCO person + phone association." />
+            ) : null}
           </div>
         </div>
 
         <div className="rounded-2xl border border-brandBlue/20 bg-brandBlue/[0.04] p-5">
-          <div className="text-lg font-semibold text-slate-900">New Fine-Tuned Model</div>
+          <div className="text-lg font-semibold text-slate-900">{activeUseCase?.id === "crack-detection" ? "New Fine-Tuned Crack Model" : activeUseCase?.id === "unsafe-behavior-detection" ? "New Fine-Tuned Unsafe Behavior Model" : "New Fine-Tuned Model"}</div>
           <p className="mt-2 text-sm leading-6 text-slate-600">This model comes from the Step 5 training run and reflects the latest backend job state.</p>
           <div className="mt-5 space-y-3">
             <SmallCard helper="Backend training job identifier." title="Training job ID" value={jobDetails?.id ?? "No training job"} />
             <SmallCard helper={jobLoading ? "Refreshing latest backend state..." : "Returned from the Step 5 job endpoint."} title="Status" value={comparisonStatus || "Not started"} tone="accent" />
             <SmallCard helper="Saved after training completes." title="Output model path" value={jobDetails?.output_model_path || "Available after training completes"} />
             <SmallCard helper="Shown from the Step 4 selection while backend plan details stay internal." title="Run depth" value={runDepthLabel} />
+            {activeUseCase?.id === "unsafe-behavior-detection" ? (
+              <SmallCard helper="Training classes configured in this run" title="Classes" value="smoking, phone_usage" />
+            ) : null}
           </div>
         </div>
       </div>
@@ -3024,6 +3094,10 @@ export function RolloutStep({ activeUseCase, currentModel, trainingJob, training
         ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected speed-estimation videos."
         : activeUseCase?.id === "object-tracking"
           ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected object-tracking videos."
+          : activeUseCase?.id === "crack-detection"
+            ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected crack images or videos. Production remains unchanged."
+          : activeUseCase?.id === "unsafe-behavior-detection"
+            ? "Model staged successfully. Go to Integration and choose 'Staged fine-tuned model' to test it on selected unsafe behavior images or videos. Production remains unchanged."
         : "Model staged for temporary testing. Production remains unchanged.",
     );
   };
@@ -3038,6 +3112,10 @@ export function RolloutStep({ activeUseCase, currentModel, trainingJob, training
         ? "Model promoted successfully. Integration will now use this Speed Estimation model by default."
         : activeUseCase?.id === "object-tracking"
           ? "Model promoted successfully. Integration will now use this Object Tracking model by default."
+          : activeUseCase?.id === "crack-detection"
+            ? "Model promoted successfully. Integration will now use this Crack Detection model by default."
+          : activeUseCase?.id === "unsafe-behavior-detection"
+            ? "Model promoted successfully. Integration will now use this Unsafe Behavior model by default."
         : "New model promoted as active model.",
     );
   };
@@ -3062,6 +3140,10 @@ export function RolloutStep({ activeUseCase, currentModel, trainingJob, training
           ? "Register the trained model, try it safely in staging for Speed Estimation, or promote it only after validation."
           : activeUseCase?.id === "object-tracking"
             ? "Register the trained model, try it safely in staging for Object Tracking, or promote it only after validation."
+            : activeUseCase?.id === "crack-detection"
+              ? "Register the trained crack model, test the staged version on crack images or videos in Integration, or promote it only after validation."
+            : activeUseCase?.id === "unsafe-behavior-detection"
+              ? "Register the trained unsafe-behavior model, test the staged version on unsafe behavior images or videos in Integration, or promote it only after validation."
             : activeUseCase?.id === "class-wise-object-counting"
               ? "Register the trained model, try it safely in staging for Class-wise Object Counting, or promote it only after validation."
           : "Register the trained model, try it safely in staging, or promote it only after validation."
@@ -3069,7 +3151,7 @@ export function RolloutStep({ activeUseCase, currentModel, trainingJob, training
       title="Go live safely"
       aside={
         <>
-          <SmallCard helper="Active production reference" title="Current live model" value={currentModel.version} />
+          <SmallCard helper="Active production reference" title="Current live model" value={activeUseCase?.id === "crack-detection" ? (currentModel?.version || "Crack detector") : activeUseCase?.id === "unsafe-behavior-detection" ? (currentModel?.version || "Unsafe smoking detector") : currentModel.version} />
           <SmallCard
             helper={rolloutStatus === "promoted" ? "Now active for this use case" : "Latest saved rollout version"}
             title="New version"
@@ -3092,6 +3174,10 @@ export function RolloutStep({ activeUseCase, currentModel, trainingJob, training
                 ? "Temporarily test this model in Integration without replacing production."
                 : activeUseCase?.id === "object-tracking"
                   ? "Temporarily test this model in Integration without replacing production."
+                  : activeUseCase?.id === "crack-detection"
+                    ? "Test staged model on crack images or videos in Integration without replacing production."
+                  : activeUseCase?.id === "unsafe-behavior-detection"
+                    ? "Test staged model on unsafe behavior images or videos in Integration without replacing production."
                   : activeUseCase?.id === "class-wise-object-counting"
                     ? "Temporarily test this model in Integration without replacing production."
                 : "Temporarily test this model in Integration without replacing production.",

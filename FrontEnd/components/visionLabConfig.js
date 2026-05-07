@@ -1,3 +1,4 @@
+import crackDetectionCover from "../CrackDetection.webp";
 import fireDetectionCover from "../FireDetection.webp";
 import objectTrackingCover from "../ObjectTracking.webp";
 import ppeDetectionImage from "../PPE_Detection.png";
@@ -5,6 +6,7 @@ import queueIntelligenceImage from "../Queue_Intelligence.png";
 import restrictedAreaCover from "../RestrictedArea.webp";
 import speedEstimationCover from "../SpeedEstimation.jpeg";
 import trafficVisibilityImage from "../Traffic_visibility .png";
+import unsafeBehaviorDetectionCover from "../UnsafeBehaviorDetection.webp";
 
 export const BRAND_BLUE = "#27235C";
 export const BRAND_RED = "#DE1B54";
@@ -37,12 +39,12 @@ export const useCases = [
   },
   {
     id: "speed-estimation",
-    title: "Speed Estimation",
-    description: "Estimate vehicle speeds at intersections, campuses, and industrial roads to flag speeding events.",
+    title: "Vehicle Analytics",
+    description: "Estimate vehicle speed and count vehicles by class at intersections, campuses, and industrial roads.",
     category: "Traffic Intelligence",
     accent: BRAND_BLUE,
     image: speedEstimationCover,
-    backstory: "Traffic and campus operations teams need fast visibility into average speed, peak speed, and speeding violations without a dedicated radar stack.",
+    backstory: "Traffic and campus operations teams need fast visibility into average speed, peak speed, class-wise vehicle counts, and speeding violations without a dedicated radar stack.",
   },
   {
     id: "fire-detection",
@@ -54,6 +56,24 @@ export const useCases = [
     backstory: "Facilities teams need earlier warning than traditional systems can provide. This view surfaces fire and smoke-like activity directly from camera footage.",
   },
   {
+    id: "crack-detection",
+    title: "Crack Detection",
+    description: "Detect cracks on concrete, roads, bridges, pavements, and construction surfaces.",
+    category: "Safety & Compliance",
+    accent: BRAND_RED,
+    image: crackDetectionCover,
+    backstory: "Construction and infrastructure teams can use this to identify visible surface cracks on roads, walls, bridges, and structural surfaces before they become larger maintenance risks.",
+  },
+  {
+    id: "unsafe-behavior-detection",
+    title: "Unsafe Behavior Detection",
+    description: "Detect smoking and mobile phone usage using YOLO models and rule-based person-phone association.",
+    category: "Safety & Compliance",
+    accent: BRAND_RED,
+    image: unsafeBehaviorDetectionCover,
+    backstory: "Safety teams can use this to surface smoking and mobile phone usage in monitored areas where distractions or unsafe behavior need quick review.",
+  },
+  {
     id: "class-wise-object-counting",
     title: "Class-Wise Object Counting",
     description: "Separate counts by class such as cars, trucks, buses, and bikes to understand traffic composition.",
@@ -61,6 +81,9 @@ export const useCases = [
     accent: BRAND_BLUE,
     image: trafficVisibilityImage,
     backstory: "Mobility and logistics teams care about what mix of vehicles uses a road or yard, not just the total. This view highlights class distribution at a glance.",
+    hidden: true,
+    deprecated: true,
+    deprecationNote: "Class-wise counting is now included in Vehicle Analytics under Speed Estimation.",
   },
   {
     id: "object-tracking",
@@ -86,16 +109,22 @@ export const integrationSupportedUseCases = new Set([
   "ppe-detection",
   "region-alerts",
   "fire-detection",
+  "crack-detection",
+  "unsafe-behavior-detection",
   "speed-estimation",
   "queue-management",
   "class-wise-object-counting",
   "object-tracking",
 ]);
 
+export const visibleUseCases = useCases.filter((useCase) => !useCase.hidden);
+
 export const integrationPrefixDefaults = {
   "ppe-detection": { input_prefix: "ppe/input/", output_prefix: "ppe/output/" },
   "region-alerts": { input_prefix: "region/input/", output_prefix: "region/output/" },
   "fire-detection": { input_prefix: "fire/input/", output_prefix: "fire/output/" },
+  "crack-detection": { input_prefix: "crack/input/", output_prefix: "crack/output/" },
+  "unsafe-behavior-detection": { input_prefix: "unsafe_behavior/input/", output_prefix: "unsafe_behavior/output/" },
   "speed-estimation": { input_prefix: "speed/input/", output_prefix: "speed/output/" },
   "queue-management": { input_prefix: "queue/input/", output_prefix: "queue/output/" },
   "class-wise-object-counting": { input_prefix: "counting/input/", output_prefix: "counting/output/" },
@@ -165,6 +194,8 @@ export const sectionParamToLabel = Object.fromEntries(categoryDetails.map((categ
 export const sectionLabelToParam = Object.fromEntries(categoryDetails.map((category) => [category.label, category.param]));
 
 export const useCaseToAnalyticsDashboardSlug = {
+  "crack-detection": "crack-detection",
+  "unsafe-behavior-detection": "unsafe-behavior-detection",
   "region-alerts": "region-alerts",
   "queue-management": "queue-management",
   "speed-estimation": "speed-estimation",

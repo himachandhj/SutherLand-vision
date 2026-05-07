@@ -47,6 +47,25 @@ function buildEmptyIntegrationModelState() {
   };
 }
 
+function friendlyPlaygroundErrorMessage(message) {
+  if (String(message || "").includes("Crack detection model not found at models/crack_detection/best.pt")) {
+    return "Crack detection model is not installed yet. Place best.pt under BackEnd/models/crack_detection/best.pt.";
+  }
+  if (String(message || "").includes("Smoking model not found at models/unsafe_behavior/smoking_best.pt")) {
+    return "Smoking model is not installed yet. Place smoking_best.pt under BackEnd/models/unsafe_behavior/.";
+  }
+  if (String(message || "").includes("COCO model not found or could not be loaded")) {
+    return "COCO YOLO model could not be loaded. Place yolov8n.pt under BackEnd/models/common/ or allow Ultralytics to load yolov8n.pt.";
+  }
+  return message;
+}
+
+function integrationAssetLabel(useCaseId) {
+  return ["crack-detection", "unsafe-behavior-detection"].includes(String(useCaseId || "").trim().toLowerCase())
+    ? "file"
+    : "video";
+}
+
 const DEFAULT_REGION_ALERT_RULE_CONFIG = {
   trigger_type: "enter",
   alert_delay_sec: 0,
@@ -135,6 +154,7 @@ function VisionLabPage() {
     imageBase64: "",
     outputVideoUrl: "",
     detections: [],
+    metrics: null,
     sourceLabel: "",
     error: "",
   });
@@ -309,7 +329,9 @@ function VisionLabPage() {
         setIsRegionAlertsRuleConfigDirty(false);
       }
     } catch (error) {
-      setIntegrationError(error instanceof Error ? error.message : "Unable to connect to MinIO.");
+      setIntegrationError(
+        friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to connect to MinIO."),
+      );
     } finally {
       setIsConnectingIntegration(false);
     }
@@ -344,14 +366,17 @@ function VisionLabPage() {
       }
       const data = await response.json();
       const videos = Array.isArray(data?.videos) ? data.videos : [];
+      const assetLabel = integrationAssetLabel(activeUseCaseId);
       setIntegrationFetchedVideos(videos);
       setSelectedIntegrationVideos((current) => current.filter((key) => videos.some((video) => video.object_key === key && video.status !== "completed" && video.status !== "processing")));
       setIntegrationFetchMessage(
-        `Fetched ${Number(data?.fetched_count ?? videos.length)} video${Number(data?.fetched_count ?? videos.length) === 1 ? "" : "s"} from ${activeUseCase.title} input storage.`,
+        `Fetched ${Number(data?.fetched_count ?? videos.length)} ${assetLabel}${Number(data?.fetched_count ?? videos.length) === 1 ? "" : "s"} from ${activeUseCase.title} input storage.`,
       );
       setIntegrationError("");
     } catch (error) {
-      setIntegrationFetchMessage(`✗ ${error instanceof Error ? error.message : "Unable to fetch MinIO videos."}`);
+      setIntegrationFetchMessage(
+        `✗ ${friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to fetch MinIO videos.")}`,
+      );
     } finally {
       setIsFetchingIntegrationVideos(false);
     }
@@ -404,7 +429,9 @@ function VisionLabPage() {
       }
       await handleIntegrationFetchVideos();
     } catch (error) {
-      setIntegrationProcessMessage(`✗ ${error instanceof Error ? error.message : "Unable to queue selected videos."}`);
+      setIntegrationProcessMessage(
+        `✗ ${friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to queue selected videos.")}`,
+      );
     } finally {
       setIsProcessingIntegrationVideos(false);
     }
@@ -482,7 +509,7 @@ function VisionLabPage() {
   };
 
   const runPlaygroundPreview = async (file, sourceLabel, previewOptions = {}) => {
-    setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
+    setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], metrics: null, sourceLabel, error: "" });
     navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
     try {
       const formData = new FormData();
@@ -505,6 +532,7 @@ function VisionLabPage() {
         imageBase64: data.image_base64 ?? "",
         outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
         detections: data.detections ?? [],
+        metrics: data.metrics && typeof data.metrics === "object" ? data.metrics : null,
         sourceLabel,
         error: "",
       });
@@ -514,8 +542,9 @@ function VisionLabPage() {
         imageBase64: "",
         outputVideoUrl: "",
         detections: [],
+        metrics: null,
         sourceLabel,
-        error: error instanceof Error ? error.message : "Unable to generate playground preview.",
+        error: error instanceof Error ? friendlyPlaygroundErrorMessage(error.message) : "Unable to generate playground preview.",
       });
     }
   };
@@ -531,7 +560,7 @@ function VisionLabPage() {
     if (!matchingSample) return;
 
     try {
-      setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
+      setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], metrics: null, sourceLabel, error: "" });
       navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
       const formData = new FormData();
       formData.append("sample_name", matchingSample.label);
@@ -553,6 +582,7 @@ function VisionLabPage() {
         imageBase64: data.image_base64 ?? "",
         outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
         detections: data.detections ?? [],
+        metrics: data.metrics && typeof data.metrics === "object" ? data.metrics : null,
         sourceLabel,
         error: "",
       });
@@ -562,8 +592,9 @@ function VisionLabPage() {
         imageBase64: "",
         outputVideoUrl: "",
         detections: [],
+        metrics: null,
         sourceLabel,
-        error: error instanceof Error ? error.message : "Unable to process sample media.",
+        error: error instanceof Error ? friendlyPlaygroundErrorMessage(error.message) : "Unable to process sample media.",
       });
     }
   };

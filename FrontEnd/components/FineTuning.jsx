@@ -47,6 +47,12 @@ const MODEL_PAYLOAD_MAP = {
   "fire-fast": "yolo_nano",
   "fire-balanced": "current_model",
   "fire-watch": "yolo_medium",
+  "unsafe-current": "current_model",
+  "unsafe-fast": "yolo_nano",
+  "unsafe-accurate": "yolo_medium",
+  "crack-current": "current_model",
+  "crack-fast": "yolo_nano",
+  "crack-accurate": "yolo_medium",
   "ppe-fast": "yolo_nano",
   "ppe-balanced": "current_model",
   "ppe-accurate": "yolo_medium",
@@ -711,6 +717,7 @@ export default function FineTuning({ activeUseCase }) {
   const [errors, setErrors] = useState({});
 
   const config = getFineTuningConfig(activeUseCase);
+  const isDeprecatedCountingUseCase = activeUseCase.id === "class-wise-object-counting";
   const requestedFineTuningStep = searchParams.get("ftStep");
   const mappedDatasets = useMemo(() => sortDatasetsForStep(datasets).map(mapDatasetFromApi), [datasets]);
   const selectedDataset = useMemo(
@@ -757,7 +764,6 @@ export default function FineTuning({ activeUseCase }) {
   const steps = useMemo(
     () => [
       { id: "start", label: "Get started", helper: "Understand the safe path" },
-      { id: "plan", label: "Training plan", helper: "Pick model and run" },
       { id: "data", label: "Your data", helper: "Register MinIO data" },
       { id: "labels", label: "Labels", helper: "Choose labeling path" },
       { id: "plan", label: "Training plan", helper: "Pick model and run" },
@@ -1592,6 +1598,12 @@ export default function FineTuning({ activeUseCase }) {
         />
 
         <main className="min-w-0">
+          {isDeprecatedCountingUseCase ? (
+            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+              <span className="font-semibold">Class-wise counting is now included in Vehicle Analytics.</span>{" "}
+              This legacy fine-tuning flow still works if you opened it directly, but the primary product path now lives under Speed Estimation / Vehicle Analytics.
+            </div>
+          ) : null}
           {pageMessage ? (
             <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm leading-6 text-slate-700">
               {pageMessage}

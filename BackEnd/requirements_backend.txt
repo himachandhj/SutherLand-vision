@@ -7,5 +7,5 @@ numpy
 ultralytics
 torch
 dill
-transformers
+transformers==4.52.4
 Pillow

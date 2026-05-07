@@ -11,9 +11,20 @@ from app.schemas.training_schema import DatasetReadyPayload, TrainingPlanRequest
 
 
 READY_FOR_TRAINING = "ready_for_training"
+READY_WITH_WARNINGS = "ready_with_warnings"
 BLOCKED = "blocked"
-MOCK_DATASET_READY_STATUSES = {READY_FOR_TRAINING, BLOCKED}
-SUPPORTED_USE_CASE_IDS = {"fire-detection", "ppe-detection", "region-alerts", "speed-estimation", "object-tracking", "class-wise-object-counting"}
+TRAINABLE_DATASET_STATUSES = {READY_FOR_TRAINING, READY_WITH_WARNINGS}
+MOCK_DATASET_READY_STATUSES = {READY_FOR_TRAINING, READY_WITH_WARNINGS, BLOCKED}
+SUPPORTED_USE_CASE_IDS = {
+    "fire-detection",
+    "ppe-detection",
+    "region-alerts",
+    "crack-detection",
+    "unsafe-behavior-detection",
+    "speed-estimation",
+    "object-tracking",
+    "class-wise-object-counting",
+}
 SUPPORTED_TASK_TYPE = "object_detection"
 DEFAULT_GOAL = "catch_more_real_issues"
 DEFAULT_RUN_DEPTH = "recommended"
@@ -23,6 +34,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ROOT_DEFAULT_MODEL_PATH = BASE_DIR / "best.pt"
 LOCAL_FIRE_MODEL_PATH = BASE_DIR / "models" / "fire_smoke" / "best.pt"
 LOCAL_PPE_MODEL_PATH = BASE_DIR / "models" / "ppe" / "best.pt"
+LOCAL_CRACK_MODEL_PATH = BASE_DIR / "models" / "crack_detection" / "best.pt"
+LOCAL_UNSAFE_BEHAVIOR_MODEL_PATH = BASE_DIR / "models" / "unsafe_behavior" / "smoking_best.pt"
 LOCAL_REGION_ALERTS_MODEL_PATH = ROOT_DEFAULT_MODEL_PATH
 RUNS_DIR = BASE_DIR / "runs" / "detect"
 YOLO_NANO_MODEL_PATH = BASE_DIR / "yolov8n.pt"
@@ -41,6 +54,16 @@ USE_CASE_BASE_MODEL_ALIASES = {
         "fire-fast": "yolo_nano",
         "fire-balanced": "current_custom",
         "fire-watch": "yolo_medium",
+    },
+    "crack-detection": {
+        "crack-current": "current_custom",
+        "crack-fast": "yolo_nano",
+        "crack-accurate": "yolo_medium",
+    },
+    "unsafe-behavior-detection": {
+        "unsafe-current": "current_custom",
+        "unsafe-fast": "yolo_nano",
+        "unsafe-accurate": "yolo_medium",
     },
     "ppe-detection": {
         "ppe-fast": "yolo_nano",
@@ -92,6 +115,22 @@ USE_CASE_TRAINING_CONFIG = {
         "mock_dataset_version": "mock_fire_v1",
         "mock_dataset_uri": "minio://vision-demo/fire/input",
         "mock_dataset_name": "Mock Fire Detection Dataset",
+        "allow_runs_fallback": False,
+    },
+    "crack-detection": {
+        "custom_model_path": LOCAL_CRACK_MODEL_PATH,
+        "custom_model_source": "models/crack_detection/best.pt",
+        "mock_dataset_version": "mock_crack_detection_v1",
+        "mock_dataset_uri": "minio://vision-demo/crack/input",
+        "mock_dataset_name": "Mock Crack Detection Dataset",
+        "allow_runs_fallback": False,
+    },
+    "unsafe-behavior-detection": {
+        "custom_model_path": LOCAL_UNSAFE_BEHAVIOR_MODEL_PATH,
+        "custom_model_source": "models/unsafe_behavior/smoking_best.pt",
+        "mock_dataset_version": "mock_unsafe_behavior_v1",
+        "mock_dataset_uri": "minio://vision-demo/unsafe_behavior/input",
+        "mock_dataset_name": "Mock Unsafe Behavior Dataset",
         "allow_runs_fallback": False,
     },
     "ppe-detection": {
@@ -236,6 +275,168 @@ RUN_DEPTH_RECIPES_BY_USE_CASE = {
                 "optimizer": "adamw",
                 "lr_schedule": "cosine",
                 "augmentation_profile": "strong",
+                "freeze_depth": 0,
+                "early_stopping_patience": 12,
+                "checkpoint_policy": "periodic_dense",
+                "checkpoint_frequency": 3,
+                "preprocessing_policy": "extended",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "enabled",
+                "class_rebalance": "enabled",
+                "export_formats": "onnx, torchscript",
+            },
+        },
+    },
+    "crack-detection": {
+        "quick_check": {
+            "label": "Quick check",
+            "summary": "Smallest safe crack-detection recipe for a fast validation run with light augmentation and a narrow tuning budget.",
+            "dimension_budget": 1,
+            "dimensions_unlocked": ["epochs"],
+            "defaults": {
+                "epochs": 6,
+                "batch_size": 2,
+                "img_size": 640,
+                "optimizer": "sgd",
+                "lr_schedule": "one_cycle",
+                "augmentation_profile": "light",
+                "freeze_depth": 12,
+                "early_stopping_patience": 4,
+                "checkpoint_policy": "last_only",
+                "checkpoint_frequency": 0,
+                "preprocessing_policy": "basic",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "deferred",
+                "class_rebalance": "disabled",
+                "export_formats": "onnx",
+            },
+        },
+        "recommended": {
+            "label": "Recommended",
+            "summary": "Moderate crack-detection recipe with balanced augmentation and a broader training budget for most inspection surfaces.",
+            "dimension_budget": 3,
+            "dimensions_unlocked": ["epochs", "image_size", "augmentation_profile"],
+            "defaults": {
+                "epochs": 14,
+                "batch_size": 4,
+                "img_size": 768,
+                "optimizer": "auto",
+                "lr_schedule": "cosine",
+                "augmentation_profile": "balanced",
+                "freeze_depth": 6,
+                "early_stopping_patience": 8,
+                "checkpoint_policy": "periodic",
+                "checkpoint_frequency": 5,
+                "preprocessing_policy": "standardized",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "enabled",
+                "class_rebalance": "enabled",
+                "export_formats": "onnx, torchscript",
+            },
+        },
+        "deep_tune": {
+            "label": "Deep tune",
+            "summary": "Broadest safe crack-detection recipe with stronger augmentation, larger image size, and more unlocked training choices.",
+            "dimension_budget": 6,
+            "dimensions_unlocked": [
+                "epochs",
+                "image_size",
+                "augmentation_profile",
+                "optimizer",
+                "lr_schedule",
+                "freeze_depth",
+            ],
+            "defaults": {
+                "epochs": 24,
+                "batch_size": 4,
+                "img_size": 896,
+                "optimizer": "adamw",
+                "lr_schedule": "cosine",
+                "augmentation_profile": "stronger",
+                "freeze_depth": 0,
+                "early_stopping_patience": 12,
+                "checkpoint_policy": "periodic_dense",
+                "checkpoint_frequency": 3,
+                "preprocessing_policy": "extended",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "enabled",
+                "class_rebalance": "enabled",
+                "export_formats": "onnx, torchscript",
+            },
+        },
+    },
+    "unsafe-behavior-detection": {
+        "quick_check": {
+            "label": "Quick check",
+            "summary": "Smallest safe unsafe-behavior recipe for a quick smoking and phone-usage validation run with light augmentation and a narrow tuning budget.",
+            "dimension_budget": 1,
+            "dimensions_unlocked": ["epochs"],
+            "defaults": {
+                "epochs": 6,
+                "batch_size": 2,
+                "img_size": 640,
+                "optimizer": "sgd",
+                "lr_schedule": "one_cycle",
+                "augmentation_profile": "light",
+                "freeze_depth": 12,
+                "early_stopping_patience": 4,
+                "checkpoint_policy": "last_only",
+                "checkpoint_frequency": 0,
+                "preprocessing_policy": "basic",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "deferred",
+                "class_rebalance": "disabled",
+                "export_formats": "onnx",
+            },
+        },
+        "recommended": {
+            "label": "Recommended",
+            "summary": "Moderate unsafe-behavior recipe with balanced augmentation and a broader training budget for most workplace scenes.",
+            "dimension_budget": 3,
+            "dimensions_unlocked": ["epochs", "image_size", "augmentation_profile"],
+            "defaults": {
+                "epochs": 14,
+                "batch_size": 4,
+                "img_size": 768,
+                "optimizer": "auto",
+                "lr_schedule": "cosine",
+                "augmentation_profile": "balanced",
+                "freeze_depth": 6,
+                "early_stopping_patience": 8,
+                "checkpoint_policy": "periodic",
+                "checkpoint_frequency": 5,
+                "preprocessing_policy": "standardized",
+                "validation_split": 20,
+                "test_split": 10,
+                "threshold_tuning": "enabled",
+                "class_rebalance": "enabled",
+                "export_formats": "onnx, torchscript",
+            },
+        },
+        "deep_tune": {
+            "label": "Deep tune",
+            "summary": "Broadest safe unsafe-behavior recipe with stronger augmentation, larger image size, and more unlocked training choices for harder workplace scenes.",
+            "dimension_budget": 6,
+            "dimensions_unlocked": [
+                "epochs",
+                "image_size",
+                "augmentation_profile",
+                "optimizer",
+                "lr_schedule",
+                "freeze_depth",
+            ],
+            "defaults": {
+                "epochs": 24,
+                "batch_size": 4,
+                "img_size": 896,
+                "optimizer": "adamw",
+                "lr_schedule": "cosine",
+                "augmentation_profile": "stronger",
                 "freeze_depth": 0,
                 "early_stopping_patience": 12,
                 "checkpoint_policy": "periodic_dense",
@@ -732,7 +933,7 @@ def build_mock_dataset_ready_payload(session_id: str, *, use_case_hint: str | No
     status = settings.fine_tuning_mock_dataset_ready_status
     if status not in MOCK_DATASET_READY_STATUSES:
         raise TrainingPlanError(
-            "Invalid mock dataset readiness status. Use ready_for_training or blocked.",
+            "Invalid mock dataset readiness status. Use ready_for_training, ready_with_warnings, or blocked.",
             status_code=500,
         )
 
@@ -757,12 +958,23 @@ def build_mock_dataset_ready_payload(session_id: str, *, use_case_hint: str | No
             "session_id": session_id,
             "dataset_name": use_case_config["mock_dataset_name"],
             "mock_payload": True,
+            "annotation_format": "yolo",
+            "class_distribution": {
+                "smoking": 0,
+                "phone_usage": 0,
+            } if use_case_id == "unsafe-behavior-detection" else {},
         }
     )
 
 
 def validate_dataset_payload(dataset_payload: DatasetReadyPayload) -> None:
-    if dataset_payload.status != READY_FOR_TRAINING:
+    if dataset_payload.use_case_id == "unsafe-behavior-detection" and dataset_payload.status != READY_FOR_TRAINING:
+        raise TrainingPlanError(
+            f"Unsafe behavior detection training plan requires dataset status {READY_FOR_TRAINING}. Current status: {dataset_payload.status}",
+            status_code=400,
+        )
+
+    if dataset_payload.status not in TRAINABLE_DATASET_STATUSES:
         raise TrainingPlanError(
             f"Dataset is not ready for training. Current status: {dataset_payload.status}",
             status_code=400,
@@ -770,7 +982,7 @@ def validate_dataset_payload(dataset_payload: DatasetReadyPayload) -> None:
 
     if dataset_payload.use_case_id not in SUPPORTED_USE_CASE_IDS:
         raise TrainingPlanError(
-            "Training plan currently supports only fire-detection, ppe-detection, region-alerts, speed-estimation, object-tracking, and class-wise-object-counting.",
+            "Training plan currently supports only fire-detection, ppe-detection, region-alerts, crack-detection, unsafe-behavior-detection, speed-estimation, object-tracking, and class-wise-object-counting.",
             status_code=400,
         )
 
@@ -873,6 +1085,23 @@ def build_training_plan_config(request: TrainingPlanRequest, dataset_payload: Da
 
     return {
         "schema_version": "phase1_training_plan_v1",
+        "use_case_id": dataset_payload.use_case_id,
+        "task_type": dataset_payload.task_type,
+        "annotation_format": getattr(dataset_payload, "annotation_format", "yolo"),
+        "classes": (
+            ["smoking", "phone_usage"]
+            if dataset_payload.use_case_id == "unsafe-behavior-detection"
+            else ["crack"]
+            if dataset_payload.use_case_id == "crack-detection"
+            else []
+        ),
+        "dataset_version_id": dataset_payload.dataset_version_id,
+        "data_fingerprint": getattr(dataset_payload, "data_fingerprint", ""),
+        "use_case_note": (
+            "Phone usage inference still uses rule-based person-phone association in production unless a later rollout explicitly replaces that logic."
+            if dataset_payload.use_case_id == "unsafe-behavior-detection"
+            else ""
+        ),
         "requested": {
             "use_case_id": request.use_case_id or dataset_payload.use_case_id,
             "base_model": request.base_model,
@@ -884,12 +1113,20 @@ def build_training_plan_config(request: TrainingPlanRequest, dataset_payload: Da
         "normalized": {
             "use_case_id": dataset_payload.use_case_id,
             "base_model": normalized_base_model,
+            "starting_model": normalized_base_model,
             "goal": normalized_goal,
             "run_depth": normalized_run_depth,
             "stop_rule": normalized_stop_rule,
             "task_type": dataset_payload.task_type,
         },
         "model_resolution": model_resolution,
+        "starting_model": {
+            "requested_starting_model": request.base_model,
+            "normalized_starting_model": normalized_base_model,
+            "resolved_model_path": model_resolution["resolved_model_path"],
+            "fallback_used": bool(model_resolution.get("fallback_used")),
+            "fallback_reason": model_resolution.get("fallback_reason"),
+        },
         "run_depth_recipe": {
             "label": recipe["label"],
             "summary": recipe["summary"],
@@ -988,6 +1225,8 @@ def resolve_current_custom_model(use_case_id: str) -> dict[str, Any]:
     nano_model = resolve_yolo_nano_model()
     fallback_messages = {
         "fire-detection": "No fire-specific custom model was found, so the plan falls back to YOLO nano.",
+        "crack-detection": "No crack-specific custom model was found, so the plan falls back to YOLO nano.",
+        "unsafe-behavior-detection": "No unsafe-behavior smoking model was found, so the plan falls back to YOLO nano.",
         "ppe-detection": "No PPE-specific custom model was found, so the plan falls back to YOLO nano.",
         "region-alerts": "No region-alerts custom model was found, so the plan falls back to YOLO nano.",
         "speed-estimation": "No speed-estimation custom model was found, so the plan falls back to YOLO nano.",
@@ -1075,6 +1314,10 @@ def infer_mock_use_case_id(session_id: str, *, use_case_hint: str | None = None)
         return "region-alerts"
     if "speed" in normalized_session_id:
         return "speed-estimation"
+    if "crack" in normalized_session_id:
+        return "crack-detection"
+    if "unsafe" in normalized_session_id or "smoking" in normalized_session_id or "phone" in normalized_session_id:
+        return "unsafe-behavior-detection"
     if "tracking" in normalized_session_id or "track" in normalized_session_id:
         return "object-tracking"
     if "class-wise" in normalized_session_id or "classwise" in normalized_session_id or "class_wise" in normalized_session_id:

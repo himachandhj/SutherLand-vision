@@ -42,6 +42,8 @@ ANNOTATION_META_FOLDER = "_annotation_meta"
 DEFAULT_CLASSES_BY_USE_CASE = {
     "ppe-detection": ["person", "helmet", "vest"],
     "fire-detection": ["fire", "smoke"],
+    "crack-detection": ["crack"],
+    "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "region-alerts": ["person"],
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "class-wise-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -50,8 +52,11 @@ DEFAULT_CLASSES_BY_USE_CASE = {
     "speed-estimation": ["car", "truck", "bus", "motorcycle"],
 }
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-FIRE_SMOKE_MODEL_DIR = BACKEND_DIR / "models"
-FIRE_SMOKE_MODEL_PATH = FIRE_SMOKE_MODEL_DIR / "fire_smoke_best.pt"
+FIRE_SMOKE_MODEL_DIR = BACKEND_DIR / "models" / "fire_smoke"
+FIRE_SMOKE_MODEL_PATH = FIRE_SMOKE_MODEL_DIR / "best.pt"
+FIRE_SMOKE_MODEL_LEGACY_PATH = BACKEND_DIR / "models" / "fire_smoke_best.pt"
+CRACK_DETECTION_MODEL_PATH = BACKEND_DIR / "models" / "crack_detection" / "best.pt"
+UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH = BACKEND_DIR / "models" / "unsafe_behavior" / "smoking_best.pt"
 YOLO_EXPORTS_DIR = BACKEND_DIR / "exports" / "fine_tuning"
 ASSIST_MODEL_DIR = BACKEND_DIR / "models" / "assist"
 ASSIST_BASE_MODEL_CANDIDATES = ["yolo11n.pt", "yolov8n.pt"]
@@ -62,8 +67,8 @@ FIRE_SMOKE_MODEL_URLS = [
 GROUNDING_DINO_MODEL_NAME = "IDEA-Research/grounding-dino-tiny"
 SAM_MODEL_NAME = "facebook/sam-vit-base"
 
-_AUTO_LABEL_MODEL: Any | None = None
-_AUTO_LABEL_MODEL_SOURCE = ""
+_AUTO_LABEL_MODELS: dict[str, Any] = {}
+_AUTO_LABEL_MODEL_SOURCES: dict[str, str] = {}
 _GROUNDING_DINO_MODEL: Any | None = None
 _GROUNDING_DINO_PROCESSOR: Any | None = None
 _GROUNDING_DINO_MODEL_SOURCE = ""
@@ -133,6 +138,8 @@ def _class_names(usecase_slug: str, extra: list[str] | None = None) -> list[str]
 
 def _normalize_detected_class_name(value: Any) -> str:
     name = str(value or "").strip().lower()
+    if "smoking" in name or "cigarette" in name:
+        return "smoking"
     if "smoke" in name:
         return "smoke"
     if "fire" in name or "flame" in name:
@@ -853,12 +860,50 @@ def save_manual_annotations(session_id: int, payload: Any) -> dict[str, Any]:
     }
 
 
-def _load_auto_label_model() -> tuple[Any, str]:
-    global _AUTO_LABEL_MODEL, _AUTO_LABEL_MODEL_SOURCE
-    if _AUTO_LABEL_MODEL is not None:
-        return _AUTO_LABEL_MODEL, _AUTO_LABEL_MODEL_SOURCE
-
+def _load_auto_label_model(usecase_slug: str) -> tuple[Any, str]:
     from ultralytics import YOLO
+
+    if usecase_slug == "crack-detection":
+        if not CRACK_DETECTION_MODEL_PATH.is_file():
+            raise ValueError(
+                "Crack detection auto-label model is unavailable. "
+                f"Expected local weights at {CRACK_DETECTION_MODEL_PATH}. "
+                "Manual labeling is still available."
+            )
+        cache_key = str(CRACK_DETECTION_MODEL_PATH)
+        if cache_key in _AUTO_LABEL_MODELS:
+            return _AUTO_LABEL_MODELS[cache_key], _AUTO_LABEL_MODEL_SOURCES[cache_key]
+        try:
+            print(f"Loading crack detection auto-label model from {CRACK_DETECTION_MODEL_PATH}")
+            model = YOLO(str(CRACK_DETECTION_MODEL_PATH))
+            _AUTO_LABEL_MODELS[cache_key] = model
+            _AUTO_LABEL_MODEL_SOURCES[cache_key] = str(CRACK_DETECTION_MODEL_PATH)
+            return model, _AUTO_LABEL_MODEL_SOURCES[cache_key]
+        except Exception as error:
+            raise ValueError(
+                f"Crack detection auto-label model could not be loaded from {CRACK_DETECTION_MODEL_PATH}: {error}"
+            ) from error
+
+    if usecase_slug == "unsafe-behavior-detection":
+        if not UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH.is_file():
+            raise ValueError(
+                "Unsafe behavior auto-label model is unavailable. "
+                f"Expected smoking model weights at {UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH}. "
+                "Auto-label supports smoking suggestions only; phone usage labels should be reviewed manually."
+            )
+        cache_key = str(UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH)
+        if cache_key in _AUTO_LABEL_MODELS:
+            return _AUTO_LABEL_MODELS[cache_key], _AUTO_LABEL_MODEL_SOURCES[cache_key]
+        try:
+            print(f"Loading unsafe behavior auto-label smoking model from {UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH}")
+            model = YOLO(str(UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH))
+            _AUTO_LABEL_MODELS[cache_key] = model
+            _AUTO_LABEL_MODEL_SOURCES[cache_key] = str(UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH)
+            return model, _AUTO_LABEL_MODEL_SOURCES[cache_key]
+        except Exception as error:
+            raise ValueError(
+                f"Unsafe behavior auto-label smoking model could not be loaded from {UNSAFE_BEHAVIOR_SMOKING_MODEL_PATH}: {error}"
+            ) from error
 
     def _download_fire_smoke_model() -> Path:
         FIRE_SMOKE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -882,15 +927,24 @@ def _load_auto_label_model() -> tuple[Any, str]:
                     temp_path.unlink()
         raise ValueError(
             "Fire/smoke auto-label model is unavailable. "
-            f"Expected local weights at {FIRE_SMOKE_MODEL_PATH} or a downloadable backup. Last error: {last_error}"
+            "Expected local weights at "
+            f"{FIRE_SMOKE_MODEL_PATH} or {FIRE_SMOKE_MODEL_LEGACY_PATH}, "
+            f"or a downloadable backup. Last error: {last_error}"
         )
 
-    model_path = FIRE_SMOKE_MODEL_PATH if FIRE_SMOKE_MODEL_PATH.is_file() else _download_fire_smoke_model()
+    candidate_paths = [FIRE_SMOKE_MODEL_PATH, FIRE_SMOKE_MODEL_LEGACY_PATH]
+    model_path = next((candidate for candidate in candidate_paths if candidate.is_file()), None)
+    if model_path is None:
+        model_path = _download_fire_smoke_model()
+    cache_key = str(model_path)
+    if cache_key in _AUTO_LABEL_MODELS:
+        return _AUTO_LABEL_MODELS[cache_key], _AUTO_LABEL_MODEL_SOURCES[cache_key]
     try:
         print(f"Loading fire/smoke auto-label model from {model_path}")
-        _AUTO_LABEL_MODEL = YOLO(str(model_path))
-        _AUTO_LABEL_MODEL_SOURCE = str(model_path)
-        return _AUTO_LABEL_MODEL, _AUTO_LABEL_MODEL_SOURCE
+        model = YOLO(str(model_path))
+        _AUTO_LABEL_MODELS[cache_key] = model
+        _AUTO_LABEL_MODEL_SOURCES[cache_key] = str(model_path)
+        return model, _AUTO_LABEL_MODEL_SOURCES[cache_key]
     except Exception as error:
         raise ValueError(f"Fire/smoke auto-label model could not be loaded from {model_path}: {error}") from error
 
@@ -1263,6 +1317,7 @@ def _predict_annotations_for_images(
     class_names: list[str],
     prompts: list[str],
     confidence: float,
+    usecase_slug: str = "fire-detection",
     mode: str = "yolo",
     model_override: Any | None = None,
     model_source_override: str = "",
@@ -1279,7 +1334,7 @@ def _predict_annotations_for_images(
             model = model_override
             model_source = model_source_override or "custom"
         else:
-            model, model_source = _load_auto_label_model()
+            model, model_source = _load_auto_label_model(usecase_slug)
         processor = None
         device = "cpu"
         grounding_text = ""
@@ -1405,6 +1460,12 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
     session, dataset = _session_and_selected_dataset(session_id)
     data = _payload_to_dict(payload)
     requested_mode = _auto_label_mode(data.get("mode"))
+    usecase_slug = str(session["usecase_slug"])
+    unsafe_smoking_note = ""
+    effective_requested_mode = requested_mode
+    if usecase_slug == "unsafe-behavior-detection":
+        unsafe_smoking_note = " Auto-label supports smoking suggestions when the smoking model is installed. Phone usage labels should be reviewed manually."
+        effective_requested_mode = "yolo"
     prompts = _prompt_terms(data.get("prompts"))
     item_ids = [str(item).strip() for item in data.get("item_ids") or [] if str(item).strip()]
     limit = max(1, min(int(data.get("limit") or 12), 50))
@@ -1418,9 +1479,10 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
     if not image_objects:
         raise ValueError("No supported images were found in the selected dataset for auto-labeling.")
 
-    class_names = _class_names(str(session["usecase_slug"]), prompts)
-    mode_used = requested_mode
+    class_names = _class_names(usecase_slug, prompts)
+    mode_used = effective_requested_mode
     fallback_used = False
+    fallback_warning = ""
     predicted_items, model_source = _predict_annotations_for_images(
         client=client,
         bucket=config.bucket,
@@ -1428,6 +1490,7 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
         class_names=class_names,
         prompts=prompts,
         confidence=confidence,
+        usecase_slug=usecase_slug,
         mode=mode_used,
     )
     suggested_items = []
@@ -1445,33 +1508,37 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
                 ),
             }
         )
-    if requested_mode == "yolo" and not suggested_items:
-        predicted_items, model_source = _predict_annotations_for_images(
-            client=client,
-            bucket=config.bucket,
-            image_objects=image_objects,
-            class_names=class_names,
-            prompts=prompts,
-            confidence=confidence,
-            mode="grounding",
-        )
-        fallback_used = True
-        mode_used = "grounding"
-        suggested_items = []
-        for item in predicted_items:
-            if not item["annotations"]:
-                continue
-            suggested_items.append(
-                {
-                    **item,
-                    "review_status": _review_status(
-                        has_saved_annotations=False,
-                        label_source=None,
-                        has_low_confidence_predictions=bool(item.get("has_low_confidence_predictions")),
-                        has_medium_confidence_predictions=bool(item.get("has_medium_confidence_predictions")),
-                    ),
-                }
+    if effective_requested_mode == "yolo" and not suggested_items and usecase_slug != "unsafe-behavior-detection":
+        try:
+            predicted_items, model_source = _predict_annotations_for_images(
+                client=client,
+                bucket=config.bucket,
+                image_objects=image_objects,
+                class_names=class_names,
+                prompts=prompts,
+                confidence=confidence,
+                usecase_slug=usecase_slug,
+                mode="grounding",
             )
+            fallback_used = True
+            mode_used = "grounding"
+            suggested_items = []
+            for item in predicted_items:
+                if not item["annotations"]:
+                    continue
+                suggested_items.append(
+                    {
+                        **item,
+                        "review_status": _review_status(
+                            has_saved_annotations=False,
+                            label_source=None,
+                            has_low_confidence_predictions=bool(item.get("has_low_confidence_predictions")),
+                            has_medium_confidence_predictions=bool(item.get("has_medium_confidence_predictions")),
+                        ),
+                    }
+                )
+        except ValueError as error:
+            fallback_warning = str(error)
     uncertain_item_count = sum(
         1
         for item in suggested_items
@@ -1497,8 +1564,16 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
             "message": (
                 "No detections found from YOLO or prompt-based Grounding DINO."
                 if fallback_used
-                else "No detections found for given prompts."
-            ),
+                else (
+                    (
+                        "No smoking detections found."
+                        if usecase_slug == "unsafe-behavior-detection"
+                        else "No detections found for given prompts."
+                    )
+                    if not fallback_warning
+                    else f"No detections found. Prompt-based fallback was unavailable: {fallback_warning}"
+                )
+            ) + unsafe_smoking_note,
         }
     backend_label = "Prompt-based Grounding DINO" if mode_used == "grounding" else "YOLO"
     fallback_note = " YOLO found no detections, so prompt-based Grounding DINO was used as a fallback." if fallback_used else ""
@@ -1523,7 +1598,7 @@ def auto_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
             f"Focus on {uncertain_item_count} image(s) with medium or low-confidence detections."
             if uncertain_item_count
             else f"{backend_label} suggestions are ready to review.{fallback_note} Review, edit, and save them before they become ground-truth labels."
-        ),
+        ) + unsafe_smoking_note,
     }
 
 
@@ -1652,6 +1727,7 @@ def assist_label_dataset(session_id: int, payload: Any) -> dict[str, Any]:
         class_names=class_names,
         prompts=prompts,
         confidence=confidence,
+        usecase_slug=str(session["usecase_slug"]),
     )
     predictions_by_key = {str(item["media_object_key"]): item for item in predicted_items}
     prioritized_items: list[dict[str, Any]] = []

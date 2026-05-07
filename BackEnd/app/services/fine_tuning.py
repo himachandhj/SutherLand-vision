@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.core.config import settings
@@ -48,11 +48,36 @@ USECASE_DATASET_PREFIXES = {
     "ppe-detection": "ppe/input/",
     "region-alerts": "region/input/",
     "fire-detection": "fire/input/",
+    "crack-detection": "crack/input/",
+    "unsafe-behavior-detection": "unsafe_behavior/input/",
     "speed-estimation": "speed/input/",
     "queue-management": "queue/input/",
     "class-wise-object-counting": "counting/input/",
     "class-wise-counting": "counting/input/",
     "object-tracking": "tracking/input/",
+}
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+USECASE_STEP_ONE_METADATA = {
+    "crack-detection": {
+        "display_name": "Crack Detection",
+        "task_type": "object_detection",
+        "annotation_format": "yolo",
+        "classes": ["crack"],
+        "current_model_path": "models/crack_detection/best.pt",
+        "title": "Tune Crack Detection",
+        "subtitle": "Check whether your crack dataset, labels, and current crack detector are ready before training setup.",
+    },
+    "unsafe-behavior-detection": {
+        "display_name": "Unsafe Behavior Detection",
+        "task_type": "object_detection",
+        "annotation_format": "yolo",
+        "classes": ["smoking", "phone_usage"],
+        "current_model_path": "models/unsafe_behavior/smoking_best.pt",
+        "title": "Tune Unsafe Behavior Detection",
+        "subtitle": "Check workplace data, labeling readiness, and the installed smoking detector before training setup. Phone usage currently uses a rule-based COCO person and phone association during inference.",
+        "model_note": "Phone usage currently relies on COCO person + cell phone association. Fine-tuning in this flow prepares smoking and phone_usage event labels only.",
+    },
 }
 
 
@@ -132,6 +157,7 @@ def ensure_step_one_session(usecase_slug: str) -> dict[str, Any]:
 def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
     session = ensure_step_one_session(usecase_slug)
     model = get_active_model_version(usecase_slug) or ensure_default_model_version(usecase_slug=usecase_slug)
+    metadata = USECASE_STEP_ONE_METADATA.get(usecase_slug, {})
     dataset = get_dataset(int(session["selected_dataset_id"])) if session.get("selected_dataset_id") else None
     if session.get("selected_dataset_id") and dataset is None:
         session = update_fine_tuning_session(
@@ -196,15 +222,35 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         )
 
     issues = latest_audit.get("issues_json", []) if latest_audit else (live_check.get("issues", []) if live_check else [])
+    current_model_path = metadata.get("current_model_path") or str(model.get("model_path") or "yolov8n.pt")
+    model_available = Path(BACKEND_DIR / current_model_path).is_file() if current_model_path and not current_model_path.startswith("yolo") else True
+    model_warnings = []
+    if not model_available:
+        model_warnings.append(f"Current model is not installed at {current_model_path}. Manual labeling still works.")
+    starting_model_name = model.get("version_name", "YOLOv8n baseline")
+    if usecase_slug == "crack-detection":
+        starting_model_name = "Crack detector" if model_available else "Crack detector unavailable"
+    elif usecase_slug == "unsafe-behavior-detection":
+        starting_model_name = "Unsafe smoking detector" if model_available else "Unsafe smoking detector unavailable"
 
     return {
+        "use_case_id": usecase_slug,
+        "display_name": metadata.get("display_name") or usecase_slug.replace("-", " ").title(),
+        "task_type": metadata.get("task_type") or "object_detection",
+        "annotation_format": metadata.get("annotation_format") or "yolo",
+        "classes": metadata.get("classes") or [],
+        "current_model_path": current_model_path,
+        "model_available": model_available,
+        "warnings": model_warnings,
+        "model_warning": model_warnings[0] if model_warnings else "",
+        "model_note": metadata.get("model_note") or "",
         "session_id": int(session["id"]),
         "current_step": int(session.get("current_step") or 1),
         "selected_dataset_id": selected_dataset_id,
         "resume_message": f"Resuming previous setup: {dataset['name']}" if dataset and selected_dataset_id else "",
         "step": 1,
-        "title": "Get started with fine-tuning",
-        "subtitle": "Check whether your examples, labels, and baseline model are ready before setup.",
+        "title": metadata.get("title") or "Get started with fine-tuning",
+        "subtitle": metadata.get("subtitle") or "Check whether your examples, labels, and baseline model are ready before setup.",
         "guidance_cards": [
             {
                 "title": "Bring examples",
@@ -247,9 +293,12 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
             },
             "starting_model": {
                 "label": "Starting model",
-                "name": model.get("version_name", "YOLOv8n baseline"),
+                "name": starting_model_name,
                 "role": model.get("role", "production"),
                 "is_active": bool(model.get("is_active")),
+                "model_path": current_model_path,
+                "model_available": model_available,
+                "warning": model_warnings[0] if model_warnings else "",
                 "quality_score": model.get("quality_score"),
                 "latency_ms": model.get("latency_ms"),
                 "false_alarm_rate": model.get("false_alarm_rate"),

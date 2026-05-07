@@ -162,10 +162,77 @@ const useCaseConfigs = {
       notes: "",
     },
   },
-  "speed-estimation": {
-    heroTitle: "Tune speed estimation for your camera geometry",
+  "crack-detection": {
+    heroTitle: "Fine-tune crack detection for your inspection surfaces",
     heroSummary:
-      "Speed estimation needs both strong detection and scene calibration. This guided flow keeps the experience simple, while leaving room for things like frame rate, reference distance, and lane setup.",
+      "Prepare a crack detector for roads, concrete walls, bridges, pavements, and construction surfaces. Use representative cracked and non-cracked images, confirm labels, and keep manual labeling available if the current model is not installed yet.",
+    supportedFormats: sharedFormats,
+    datasetChecklist: [
+      ...sharedChecklist,
+      "Include both cracked and non-cracked surfaces so the detector learns what should be ignored.",
+    ],
+    baseModels: [
+      { value: "crack-current", label: "Crack Current", tradeoff: "Recommended", helper: "Continue from the installed crack detector." },
+      { value: "crack-fast", label: "Crack Fast", tradeoff: "Faster", helper: "Start from a lightweight YOLO model for quick checks." },
+      { value: "crack-accurate", label: "Crack Accurate", tradeoff: "Highest accuracy", helper: "Start from a stronger YOLO model for harder surface conditions." },
+    ],
+    recommendedBaseModelId: "crack-current",
+    recommendedGoalId: "best-accuracy",
+    recommendedTrainingModeId: "balanced",
+    extensionTitle: "Inspection guidance",
+    extensionDescription: "Capture the surface types, crack scale, and camera distance that matter most for your inspection workflow.",
+    extensionDefaults: {
+      surfaceTypes: "concrete-road-bridge",
+      crackScale: "hairline-to-visible",
+      captureProfile: "close-range-inspection",
+      notes: "",
+    },
+  },
+  "unsafe-behavior-detection": {
+    heroTitle: "Fine-tune unsafe behavior detection for workplace events",
+    heroSummary:
+      "Prepare smoking and mobile phone usage event labels from real workplace scenes. The installed smoking detector can help with smoking suggestions when available, while phone usage labels should be reviewed manually.",
+    supportedFormats: sharedFormats,
+    datasetChecklist: [
+      ...sharedChecklist,
+      "Include both smoking and phone-usage examples when possible, plus clean workplace scenes with no unsafe behavior.",
+    ],
+    baseModels: [
+      {
+        value: "unsafe-current",
+        label: "Unsafe Current",
+        tradeoff: "Recommended",
+        helper: "Continue from the installed smoking detector. Phone usage still uses the COCO person-phone rule in inference.",
+      },
+      {
+        value: "unsafe-fast",
+        label: "Unsafe Fast",
+        tradeoff: "Faster",
+        helper: "Start from a lightweight YOLO model for quick checks on smoking and phone-usage labels.",
+      },
+      {
+        value: "unsafe-accurate",
+        label: "Unsafe Accurate",
+        tradeoff: "Highest accuracy",
+        helper: "Start from a stronger YOLO model for harder workplace scenes.",
+      },
+    ],
+    recommendedBaseModelId: "unsafe-current",
+    recommendedGoalId: "best-accuracy",
+    recommendedTrainingModeId: "balanced",
+    extensionTitle: "Unsafe behavior guidance",
+    extensionDescription: "Use workplace scenes that clearly show smoking behavior and visible phone usage so reviewers can create precise event labels before training setup is enabled.",
+    extensionDefaults: {
+      targetEvents: "smoking-phone_usage",
+      sceneProfile: "indoor-workplace",
+      reviewPolicy: "manual-phone-review",
+      notes: "",
+    },
+  },
+  "speed-estimation": {
+    heroTitle: "Tune Vehicle Analytics for your camera geometry",
+    heroSummary:
+      "Estimate vehicle speed and count vehicles by class with a single guided flow. Strong detection and scene calibration work together to improve both speed analytics and vehicle counting.",
     supportedFormats: [...sharedFormats, "Calibration sheet / reference notes"],
     datasetChecklist: [...sharedChecklist, "Include at least one clip with a known distance or calibration reference."],
     baseModels: [
@@ -210,6 +277,8 @@ const useCaseConfigs = {
     },
   },
   "class-wise-object-counting": {
+    deprecated: true,
+    hidden: true,
     heroTitle: "Adapt class-wise counting to your traffic mix",
     heroSummary:
       "Fine-tune the detector on your road or yard conditions so better detections lead to more accurate counts across camera positions, lighting, and traffic mix.",

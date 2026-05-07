@@ -456,6 +456,8 @@ export const dashboardData = {
 };
 
 export const dashboardInfo = {
+  "crack-detection": "Monitor crack detections across construction and infrastructure inspection inputs.",
+  "unsafe-behavior-detection": "Monitor smoking and mobile phone usage incidents across workplace cameras and locations.",
   "object-counting": "Monitors production-oriented object counts against expected throughput to surface over-count and under-count deviations by zone and camera.",
   "region-alerts": "Shows where restricted-zone violations are happening, when they peak, how serious they are, and which incidents supervisors or security should action first.",
   "queue-management": "Measures queue build-up, staffing impact, breach thresholds, and wait time trends across operational counters and service zones.",

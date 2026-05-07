@@ -89,6 +89,10 @@ def run_training_job_endpoint(job_id: str) -> TrainingJobResponse:
     return TrainingJobResponse(
         training_job_id=str(job["id"]),
         status=str(job["status"]),
+        data_yaml_path_used=str(job.get("data_yaml_path_used") or ""),
+        dataset_source=str(job.get("dataset_source") or ""),
+        fallback_used=bool(job.get("fallback_used") or False),
+        fallback_reason=str(job.get("fallback_reason") or ""),
     )
 
 

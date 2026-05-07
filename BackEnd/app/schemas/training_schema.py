@@ -64,6 +64,10 @@ class DatasetReadyPayload(BaseModel):
 class TrainingJobResponse(BaseModel):
     training_job_id: str
     status: str
+    data_yaml_path_used: str = ""
+    dataset_source: str = ""
+    fallback_used: bool = False
+    fallback_reason: str = ""
 
 
 class TrainingArtifactItem(BaseModel):
