@@ -791,6 +791,56 @@ def _derive_demo_source_metadata(source_ref: str, simulated_timestamp: str) -> d
     }
 
 
+def _derive_persisted_context(
+    *,
+    use_case_id: str,
+    source_ref: str,
+    simulated_timestamp: str,
+) -> dict[str, Any]:
+    if use_case_id == "crack-detection":
+        return {
+            "camera_id": "CAM-CRACK-01",
+            "location": "Infrastructure Inspection Site",
+            "zone": "Inspection Zone",
+            "shift": "Day",
+            "generated_context": True,
+            "generated_fields": ["camera_id", "location", "zone"],
+        }
+    if use_case_id == "unsafe-behavior-detection":
+        return {
+            "camera_id": "CAM-SAFE-01",
+            "location": "Manufacturing Plant A",
+            "zone": "Work Zone",
+            "shift": "Day",
+            "generated_context": True,
+            "generated_fields": ["camera_id", "location", "zone"],
+        }
+
+    base = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+    return {
+        **base,
+        "generated_context": False,
+        "generated_fields": [],
+    }
+
+
+def _derive_persisted_filename(
+    *,
+    filename: str,
+    input_object_key: str | None,
+    source_ref: str,
+) -> str:
+    if input_object_key:
+        object_name = Path(str(input_object_key)).name.strip()
+        if object_name:
+            return object_name
+    candidate = Path(str(filename or "")).name.strip()
+    if candidate:
+        return candidate
+    source_name = Path(str(source_ref).rstrip("/")).name.strip()
+    return source_name or "input_media"
+
+
 def _stable_hash_int(value: str, *, start: int = 0, length: int = 8) -> int:
     digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
     return int(digest[start:start + length], 16)
@@ -1075,10 +1125,20 @@ def _persist_crack_detection_analytics(
     stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
     source_ref = minio_input_link or (f"job://crack-detection/{job_id}" if job_id is not None else f"file://{filename}")
     simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
-    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+    processed_at = _utc_now_iso()
+    source_metadata = _derive_persisted_context(
+        use_case_id="crack-detection",
+        source_ref=source_ref,
+        simulated_timestamp=simulated_timestamp,
+    )
+    persisted_filename = _derive_persisted_filename(
+        filename=filename,
+        input_object_key=input_object_key,
+        source_ref=source_ref,
+    )
 
     severity_rank = {"low": 1, "medium": 2, "high": 3}
-    dominant_severity = "none"
+    dominant_severity = "normal"
     for event in crack_events:
         event_severity = str(event.get("severity") or "").strip().lower()
         if severity_rank.get(event_severity, 0) > severity_rank.get(dominant_severity, 0):
@@ -1091,8 +1151,9 @@ def _persist_crack_detection_analytics(
         camera_id=source_metadata["camera_id"],
         location=source_metadata["location"],
         zone=source_metadata["zone"],
-        filename=filename,
+        filename=persisted_filename,
         minio_input_link=minio_input_link,
+        output_media_link=stable_output_link,
         output_video_link=stable_output_link,
         input_bucket=input_bucket,
         input_object_key=input_object_key,
@@ -1100,32 +1161,45 @@ def _persist_crack_detection_analytics(
         load_time_sec=video_summary.get("duration_sec"),
         processing_time_sec=video_summary.get("processing_time_sec"),
         simulated_timestamp=simulated_timestamp,
+        processed_at=processed_at,
         run_status=run_status,
         metadata_json={
+            "generated_context": bool(source_metadata.get("generated_context")),
+            "generated_fields": list(source_metadata.get("generated_fields") or []),
             "frame_count": video_summary.get("frame_count"),
             "fps": video_summary.get("fps"),
             "metrics": metrics,
             "crack_events": crack_events,
+            "defect_events": crack_events,
             "source_type": "minio" if minio_input_link else "local",
+            "minio_input_link": minio_input_link,
+            "output_media_link": stable_output_link,
         },
     )
+
+    crack_count = int(metrics.get("crack_detections") or len(crack_events) or 0)
 
     output_rows = replace_crack_detection_outputs(
         input_id=int(input_row["input_id"]),
         outputs=[
             {
-                "crack_detected": bool(metrics.get("crack_detections", 0)),
-                "crack_count": metrics.get("crack_detections"),
+                "crack_detected": crack_count > 0,
+                "crack_count": crack_count,
                 "frames_analyzed": metrics.get("frames_analyzed"),
                 "frames_with_cracks": metrics.get("frames_with_cracks"),
                 "crack_rate_pct": metrics.get("crack_rate_pct"),
                 "max_confidence": metrics.get("max_confidence"),
                 "avg_confidence": metrics.get("avg_confidence"),
                 "severity": dominant_severity,
-                "status": "cracks_detected" if metrics.get("crack_detections", 0) else "clear",
+                "status": "open" if crack_count > 0 else "clear",
                 "metadata_json": {
+                    "defect_events": crack_events,
                     "crack_events": crack_events,
                     "video_summary": video_summary,
+                    "frames_analyzed": metrics.get("frames_analyzed"),
+                    "frames_with_cracks": metrics.get("frames_with_cracks"),
+                    "crack_rate_pct": metrics.get("crack_rate_pct"),
+                    "output_media_link": stable_output_link,
                 },
             }
         ],
@@ -1163,7 +1237,17 @@ def _persist_unsafe_behavior_analytics(
         f"job://unsafe-behavior-detection/{job_id}" if job_id is not None else f"file://{filename}"
     )
     simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
-    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+    processed_at = _utc_now_iso()
+    source_metadata = _derive_persisted_context(
+        use_case_id="unsafe-behavior-detection",
+        source_ref=source_ref,
+        simulated_timestamp=simulated_timestamp,
+    )
+    persisted_filename = _derive_persisted_filename(
+        filename=filename,
+        input_object_key=input_object_key,
+        source_ref=source_ref,
+    )
 
     input_row = upsert_unsafe_behavior_input(
         source_ref=source_ref,
@@ -1172,8 +1256,9 @@ def _persist_unsafe_behavior_analytics(
         camera_id=source_metadata["camera_id"],
         location=source_metadata["location"],
         zone=source_metadata["zone"],
-        filename=filename,
+        filename=persisted_filename,
         minio_input_link=minio_input_link,
+        output_media_link=stable_output_link,
         output_video_link=stable_output_link,
         input_bucket=input_bucket,
         input_object_key=input_object_key,
@@ -1181,13 +1266,18 @@ def _persist_unsafe_behavior_analytics(
         load_time_sec=video_summary.get("duration_sec"),
         processing_time_sec=video_summary.get("processing_time_sec"),
         simulated_timestamp=simulated_timestamp,
+        processed_at=processed_at,
         run_status=run_status,
         metadata_json={
+            "generated_context": bool(source_metadata.get("generated_context")),
+            "generated_fields": list(source_metadata.get("generated_fields") or []),
             "frame_count": video_summary.get("frame_count"),
             "fps": video_summary.get("fps"),
             "metrics": metrics,
             "unsafe_events": unsafe_events,
             "source_type": "minio" if minio_input_link else "local",
+            "minio_input_link": minio_input_link,
+            "output_media_link": stable_output_link,
         },
     )
 
@@ -1201,12 +1291,18 @@ def _persist_unsafe_behavior_analytics(
                 "source": event.get("source"),
                 "associated_person_box_json": event.get("associated_person_box") or [],
                 "severity": event.get("severity"),
-                "status": event.get("status") or "unsafe",
+                "status": event.get("status") or "open",
                 "frame_number": event.get("frame_number"),
                 "timestamp_sec": event.get("timestamp_sec"),
                 "metadata_json": {
                     "video_summary": video_summary,
                     "summary_metrics": metrics,
+                    "source": event.get("source"),
+                    "output_media_link": stable_output_link,
+                    "evidence": {
+                        "bbox": event.get("bbox") or [],
+                        "associated_person_box": event.get("associated_person_box") or [],
+                    },
                 },
             }
             for event in unsafe_events
@@ -3943,9 +4039,11 @@ def _build_crack_dashboard_records() -> list[dict[str, Any]]:
             i.zone,
             i.filename,
             i.minio_input_link,
+            i.output_media_link,
             i.output_video_link,
             i.output_object_key,
             i.simulated_timestamp,
+            i.processed_at,
             i.run_status,
             i.metadata_json AS input_metadata_json,
             o.output_id,
@@ -3971,12 +4069,12 @@ def _build_crack_dashboard_records() -> list[dict[str, Any]]:
     for row in rows:
         input_meta = _parse_json_blob(row["input_metadata_json"])
         output_meta = _parse_json_blob(row["output_metadata_json"])
-        crack_events = output_meta.get("crack_events", [])
+        crack_events = output_meta.get("defect_events", output_meta.get("crack_events", []))
         if not isinstance(crack_events, list):
             crack_events = []
 
-        output_url = _build_integration_proxy_url("crack-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
-        simulated_timestamp = str(row["simulated_timestamp"] or _utc_now_iso())
+        output_url = _build_integration_proxy_url("crack-detection", row["output_object_key"]) or str(row["output_media_link"] or row["output_video_link"] or "")
+        simulated_timestamp = str(row["simulated_timestamp"] or row["processed_at"] or _utc_now_iso())
         confidence_values = [
             float(event.get("confidence_score") or 0)
             for event in crack_events
@@ -3993,6 +4091,7 @@ def _build_crack_dashboard_records() -> list[dict[str, Any]]:
                 "zone": str(row["zone"] or ""),
                 "filename": str(row["filename"] or ""),
                 "minio_input_link": str(row["minio_input_link"] or ""),
+                "output_media_link": str(row["output_media_link"] or row["output_video_link"] or ""),
                 "output_video_url": output_url,
                 "simulated_timestamp": simulated_timestamp,
                 "timestamp": simulated_timestamp,
@@ -4005,6 +4104,7 @@ def _build_crack_dashboard_records() -> list[dict[str, Any]]:
                 "avg_confidence": float(row["avg_confidence"] or 0),
                 "severity": str(row["severity"] or "none"),
                 "status": str(row["status"] or row["run_status"] or "processed"),
+                "processed_at": str(row["processed_at"] or ""),
                 "metadata_json": output_meta,
                 "crack_events": crack_events,
                 "highest_event_confidence": highest_event_confidence,
@@ -4024,9 +4124,11 @@ def _build_unsafe_behavior_dashboard_records() -> list[dict[str, Any]]:
             i.zone,
             i.filename,
             i.minio_input_link,
+            i.output_media_link,
             i.output_video_link,
             i.output_object_key,
             i.simulated_timestamp,
+            i.processed_at,
             i.run_status,
             i.metadata_json AS input_metadata_json,
             o.output_id,
@@ -4054,8 +4156,8 @@ def _build_unsafe_behavior_dashboard_records() -> list[dict[str, Any]]:
         output_meta = _parse_json_blob(row["output_metadata_json"])
         summary_metrics = output_meta.get("summary_metrics", {}) if isinstance(output_meta.get("summary_metrics"), dict) else {}
         video_summary = output_meta.get("video_summary", {}) if isinstance(output_meta.get("video_summary"), dict) else {}
-        output_url = _build_integration_proxy_url("unsafe-behavior-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
-        simulated_timestamp = str(row["simulated_timestamp"] or _utc_now_iso())
+        output_url = _build_integration_proxy_url("unsafe-behavior-detection", row["output_object_key"]) or str(row["output_media_link"] or row["output_video_link"] or "")
+        simulated_timestamp = str(row["simulated_timestamp"] or row["processed_at"] or _utc_now_iso())
 
         try:
             bbox = json.loads(row["bbox_json"]) if row["bbox_json"] else []
@@ -4075,6 +4177,7 @@ def _build_unsafe_behavior_dashboard_records() -> list[dict[str, Any]]:
                 "zone": str(row["zone"] or ""),
                 "filename": str(row["filename"] or ""),
                 "minio_input_link": str(row["minio_input_link"] or ""),
+                "output_media_link": str(row["output_media_link"] or row["output_video_link"] or ""),
                 "output_video_url": output_url,
                 "simulated_timestamp": simulated_timestamp,
                 "timestamp": simulated_timestamp,
@@ -4083,6 +4186,7 @@ def _build_unsafe_behavior_dashboard_records() -> list[dict[str, Any]]:
                 "severity": str(row["severity"] or "low"),
                 "source": str(row["source"] or ""),
                 "status": str(row["status"] or row["run_status"] or "unsafe"),
+                "processed_at": str(row["processed_at"] or ""),
                 "frame_number": int(row["frame_number"] or 0),
                 "timestamp_sec": float(row["timestamp_sec"] or 0),
                 "bbox": bbox,
