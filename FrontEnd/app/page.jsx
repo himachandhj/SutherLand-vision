@@ -35,6 +35,37 @@ function buildEmptyIntegrationOverview() {
   };
 }
 
+function buildEmptyIntegrationModelState() {
+  return {
+    use_case_id: "",
+    has_staged_model: false,
+    staged_model_version_id: null,
+    staged_model_path: null,
+    has_active_model: false,
+    active_model_path: null,
+    default_model_available: true,
+  };
+}
+
+function friendlyPlaygroundErrorMessage(message) {
+  if (String(message || "").includes("Crack detection model not found at models/crack_detection/best.pt")) {
+    return "Crack detection model is not installed yet. Place best.pt under BackEnd/models/crack_detection/best.pt.";
+  }
+  if (String(message || "").includes("Smoking model not found at models/unsafe_behavior/smoking_best.pt")) {
+    return "Smoking model is not installed yet. Place smoking_best.pt under BackEnd/models/unsafe_behavior/.";
+  }
+  if (String(message || "").includes("COCO model not found or could not be loaded")) {
+    return "COCO YOLO model could not be loaded. Place yolov8n.pt under BackEnd/models/common/ or allow Ultralytics to load yolov8n.pt.";
+  }
+  return message;
+}
+
+function integrationAssetLabel(useCaseId) {
+  return ["crack-detection", "unsafe-behavior-detection"].includes(String(useCaseId || "").trim().toLowerCase())
+    ? "file"
+    : "video";
+}
+
 const DEFAULT_REGION_ALERT_RULE_CONFIG = {
   trigger_type: "enter",
   alert_delay_sec: 0,
@@ -123,6 +154,7 @@ function VisionLabPage() {
     imageBase64: "",
     outputVideoUrl: "",
     detections: [],
+    metrics: null,
     sourceLabel: "",
     error: "",
   });
@@ -139,9 +171,12 @@ function VisionLabPage() {
     output_prefix: "ppe/output/",
   });
   const [integrationOverview, setIntegrationOverview] = useState(buildEmptyIntegrationOverview);
+  const [integrationModelState, setIntegrationModelState] = useState(buildEmptyIntegrationModelState);
   const [isConnectingIntegration, setIsConnectingIntegration] = useState(false);
   const [integrationError, setIntegrationError] = useState("");
   const [integrationMode, setIntegrationMode] = useState("manual");
+  const [integrationManualModelMode, setIntegrationManualModelMode] = useState("active");
+  const [integrationAutoModelMode, setIntegrationAutoModelMode] = useState("active");
   const [integrationFetchCount, setIntegrationFetchCount] = useState(10);
   const [integrationFetchedVideos, setIntegrationFetchedVideos] = useState([]);
   const [selectedIntegrationVideos, setSelectedIntegrationVideos] = useState([]);
@@ -200,6 +235,7 @@ function VisionLabPage() {
   const fetchIntegrationOverview = async () => {
     if (!integrationSupportedUseCases.has(activeUseCaseId)) {
       setIntegrationOverview(buildEmptyIntegrationOverview());
+      setIntegrationModelState(buildEmptyIntegrationModelState());
       return;
     }
     try {
@@ -236,6 +272,21 @@ function VisionLabPage() {
           }
         }
       }
+
+      try {
+        const modelStateResponse = await fetch(`${API_BASE_URL}/api/integrations/model-state/${encodeURIComponent(activeUseCaseId)}`);
+        if (modelStateResponse.ok) {
+          const modelStatePayload = await modelStateResponse.json();
+          setIntegrationModelState(modelStatePayload);
+          if (!modelStatePayload?.has_staged_model) {
+            setIntegrationManualModelMode("active");
+            setIntegrationAutoModelMode("active");
+          }
+        }
+      } catch (modelStateError) {
+        console.error(modelStateError);
+      }
+
       setIntegrationError("");
     } catch (error) {
       setIntegrationError(error instanceof Error ? error.message : "Unable to load MinIO integration status.");
@@ -246,8 +297,11 @@ function VisionLabPage() {
     setIntegrationForm((current) => ({ ...current, [field]: value }));
   };
 
-  const handleIntegrationConnect = async (modeOverride = integrationMode) => {
+  const handleIntegrationConnect = async (modeOverride = integrationMode, modelModeOverride = null) => {
     const resolvedMode = modeOverride === "auto" || modeOverride === "manual" ? modeOverride : integrationMode;
+    const requestedModelMode = resolvedMode === "auto" ? (modelModeOverride ?? integrationAutoModelMode) : "active";
+    const requestedModelVersionId =
+      requestedModelMode === "staging" ? integrationModelState.staged_model_version_id : null;
     setIsConnectingIntegration(true);
     setIntegrationError("");
     try {
@@ -258,6 +312,8 @@ function VisionLabPage() {
           ...integrationForm,
           use_case_id: activeUseCaseId,
           processing_mode: resolvedMode,
+          model_mode: requestedModelMode,
+          model_version_id: requestedModelVersionId,
           ...buildRegionAlertsIntegrationPayload(),
         }),
       });
@@ -273,7 +329,9 @@ function VisionLabPage() {
         setIsRegionAlertsRuleConfigDirty(false);
       }
     } catch (error) {
-      setIntegrationError(error instanceof Error ? error.message : "Unable to connect to MinIO.");
+      setIntegrationError(
+        friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to connect to MinIO."),
+      );
     } finally {
       setIsConnectingIntegration(false);
     }
@@ -284,7 +342,14 @@ function VisionLabPage() {
     setIntegrationFetchMessage("");
     setIntegrationProcessMessage("");
     if (!integrationOverview.connected) return;
-    await handleIntegrationConnect(nextMode);
+    await handleIntegrationConnect(nextMode, nextMode === "auto" ? integrationAutoModelMode : "active");
+  };
+
+  const handleIntegrationAutoModelModeChange = async (nextMode) => {
+    setIntegrationAutoModelMode(nextMode);
+    setIntegrationProcessMessage("");
+    if (!integrationOverview.connected || integrationMode !== "auto") return;
+    await handleIntegrationConnect("auto", nextMode);
   };
 
   const handleIntegrationFetchVideos = async () => {
@@ -301,14 +366,17 @@ function VisionLabPage() {
       }
       const data = await response.json();
       const videos = Array.isArray(data?.videos) ? data.videos : [];
+      const assetLabel = integrationAssetLabel(activeUseCaseId);
       setIntegrationFetchedVideos(videos);
       setSelectedIntegrationVideos((current) => current.filter((key) => videos.some((video) => video.object_key === key && video.status !== "completed" && video.status !== "processing")));
       setIntegrationFetchMessage(
-        `Fetched ${Number(data?.fetched_count ?? videos.length)} video${Number(data?.fetched_count ?? videos.length) === 1 ? "" : "s"} from ${activeUseCase.title} input storage.`,
+        `Fetched ${Number(data?.fetched_count ?? videos.length)} ${assetLabel}${Number(data?.fetched_count ?? videos.length) === 1 ? "" : "s"} from ${activeUseCase.title} input storage.`,
       );
       setIntegrationError("");
     } catch (error) {
-      setIntegrationFetchMessage(`✗ ${error instanceof Error ? error.message : "Unable to fetch MinIO videos."}`);
+      setIntegrationFetchMessage(
+        `✗ ${friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to fetch MinIO videos.")}`,
+      );
     } finally {
       setIsFetchingIntegrationVideos(false);
     }
@@ -319,12 +387,20 @@ function VisionLabPage() {
     setIsProcessingIntegrationVideos(true);
     setIntegrationProcessMessage("");
     try {
+      const requestedModelMode =
+        integrationManualModelMode === "staging" && integrationModelState.has_staged_model ? "staging" : "active";
+      const requestedModelVersionId =
+        requestedModelMode === "staging" ? integrationModelState.staged_model_version_id : null;
       const response = await fetch(`${API_BASE_URL}/api/integrations/minio/process-selected`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           use_case_id: activeUseCaseId,
           object_keys: selectedIntegrationVideos,
+          model_mode: requestedModelMode,
+          model_version_id: requestedModelVersionId,
+          model_mode: requestedModelMode,
+          model_version_id: requestedModelVersionId,
           ...buildRegionAlertsIntegrationPayload(),
         }),
       });
@@ -338,7 +414,14 @@ function VisionLabPage() {
       } else {
         await fetchIntegrationOverview();
       }
-      setIntegrationProcessMessage(data?.message ?? "Selected videos have been queued.");
+      const modelModeMessage =
+        data?.model_mode_used === "staging"
+          ? "Using for this request: Staged fine-tuned model."
+          : "Using for this request: Current active/default model.";
+      const fallbackMessage = data?.fallback_used
+        ? ` ${data?.fallback_reason ?? "Staged model was unavailable, so the current active/default model was used."}`
+        : "";
+      setIntegrationProcessMessage(`${data?.message ?? "Selected videos have been queued."} ${modelModeMessage}${fallbackMessage}`.trim());
       setSelectedIntegrationVideos([]);
       if (activeUseCaseId === "region-alerts") {
         setIsRegionAlertsRoiDirty(false);
@@ -346,7 +429,9 @@ function VisionLabPage() {
       }
       await handleIntegrationFetchVideos();
     } catch (error) {
-      setIntegrationProcessMessage(`✗ ${error instanceof Error ? error.message : "Unable to queue selected videos."}`);
+      setIntegrationProcessMessage(
+        `✗ ${friendlyPlaygroundErrorMessage(error instanceof Error ? error.message : "Unable to queue selected videos.")}`,
+      );
     } finally {
       setIsProcessingIntegrationVideos(false);
     }
@@ -383,12 +468,15 @@ function VisionLabPage() {
     });
     const defaults = getIntegrationDefaults(activeUseCaseId);
     setIntegrationOverview(buildEmptyIntegrationOverview());
+    setIntegrationModelState(buildEmptyIntegrationModelState());
     setIntegrationForm((current) => ({
       ...current,
       input_prefix: defaults.input_prefix,
       output_prefix: defaults.output_prefix,
     }));
     setIntegrationMode("manual");
+    setIntegrationManualModelMode("active");
+    setIntegrationAutoModelMode("active");
     setIntegrationError("");
     setIntegrationFetchMessage("");
     setIntegrationProcessMessage("");
@@ -421,7 +509,7 @@ function VisionLabPage() {
   };
 
   const runPlaygroundPreview = async (file, sourceLabel, previewOptions = {}) => {
-    setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
+    setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], metrics: null, sourceLabel, error: "" });
     navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
     try {
       const formData = new FormData();
@@ -444,6 +532,7 @@ function VisionLabPage() {
         imageBase64: data.image_base64 ?? "",
         outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
         detections: data.detections ?? [],
+        metrics: data.metrics && typeof data.metrics === "object" ? data.metrics : null,
         sourceLabel,
         error: "",
       });
@@ -453,8 +542,9 @@ function VisionLabPage() {
         imageBase64: "",
         outputVideoUrl: "",
         detections: [],
+        metrics: null,
         sourceLabel,
-        error: error instanceof Error ? error.message : "Unable to generate playground preview.",
+        error: error instanceof Error ? friendlyPlaygroundErrorMessage(error.message) : "Unable to generate playground preview.",
       });
     }
   };
@@ -470,7 +560,7 @@ function VisionLabPage() {
     if (!matchingSample) return;
 
     try {
-      setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], sourceLabel, error: "" });
+      setPlaygroundState({ status: "loading", imageBase64: "", outputVideoUrl: "", detections: [], metrics: null, sourceLabel, error: "" });
       navigateTo("detail", "Model Playground", "replace", activeSection, activeUseCaseId);
       const formData = new FormData();
       formData.append("sample_name", matchingSample.label);
@@ -492,6 +582,7 @@ function VisionLabPage() {
         imageBase64: data.image_base64 ?? "",
         outputVideoUrl: resolveBackendUrl(data.output_video_url ?? ""),
         detections: data.detections ?? [],
+        metrics: data.metrics && typeof data.metrics === "object" ? data.metrics : null,
         sourceLabel,
         error: "",
       });
@@ -501,8 +592,9 @@ function VisionLabPage() {
         imageBase64: "",
         outputVideoUrl: "",
         detections: [],
+        metrics: null,
         sourceLabel,
-        error: error instanceof Error ? error.message : "Unable to process sample media.",
+        error: error instanceof Error ? friendlyPlaygroundErrorMessage(error.message) : "Unable to process sample media.",
       });
     }
   };
@@ -539,9 +631,12 @@ function VisionLabPage() {
           setActiveTab={(tab) => navigateTo("detail", tab, "push", activeSection, activeUseCaseId)}
           integrationForm={integrationForm}
           integrationOverview={integrationOverview}
+          integrationModelState={integrationModelState}
           integrationError={integrationError}
           isConnectingIntegration={isConnectingIntegration}
           integrationMode={integrationMode}
+          integrationManualModelMode={integrationManualModelMode}
+          integrationAutoModelMode={integrationAutoModelMode}
           integrationFetchCount={integrationFetchCount}
           integrationFetchedVideos={integrationFetchedVideos}
           selectedIntegrationVideos={selectedIntegrationVideos}
@@ -553,6 +648,8 @@ function VisionLabPage() {
           onIntegrationFieldChange={handleIntegrationFieldChange}
           onIntegrationConnect={handleIntegrationConnect}
           onIntegrationModeChange={handleIntegrationModeChange}
+          onIntegrationManualModelModeChange={setIntegrationManualModelMode}
+          onIntegrationAutoModelModeChange={handleIntegrationAutoModelModeChange}
           onIntegrationFetchCountChange={setIntegrationFetchCount}
           onIntegrationFetchVideos={handleIntegrationFetchVideos}
           onIntegrationSelectionChange={setSelectedIntegrationVideos}

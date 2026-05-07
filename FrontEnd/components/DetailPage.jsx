@@ -22,9 +22,12 @@ export default function DetailPage({
   setActiveTab,
   integrationForm,
   integrationOverview,
+  integrationModelState,
   integrationError,
   isConnectingIntegration,
   integrationMode,
+  integrationManualModelMode,
+  integrationAutoModelMode,
   integrationFetchCount,
   integrationFetchedVideos,
   selectedIntegrationVideos,
@@ -36,6 +39,8 @@ export default function DetailPage({
   onIntegrationFieldChange,
   onIntegrationConnect,
   onIntegrationModeChange,
+  onIntegrationManualModelModeChange,
+  onIntegrationAutoModelModeChange,
   onIntegrationFetchCountChange,
   onIntegrationFetchVideos,
   onIntegrationSelectionChange,
@@ -112,9 +117,12 @@ export default function DetailPage({
             activeUseCase={activeUseCase}
             integrationForm={integrationForm}
             integrationOverview={integrationOverview}
+            integrationModelState={integrationModelState}
             integrationError={integrationError}
             isConnectingIntegration={isConnectingIntegration}
             integrationMode={integrationMode}
+            integrationManualModelMode={integrationManualModelMode}
+            integrationAutoModelMode={integrationAutoModelMode}
             integrationFetchCount={integrationFetchCount}
             integrationFetchedVideos={integrationFetchedVideos}
             selectedIntegrationVideos={selectedIntegrationVideos}
@@ -127,6 +135,8 @@ export default function DetailPage({
             onIntegrationFieldChange={onIntegrationFieldChange}
             onIntegrationConnect={onIntegrationConnect}
             onIntegrationModeChange={onIntegrationModeChange}
+            onIntegrationManualModelModeChange={onIntegrationManualModelModeChange}
+            onIntegrationAutoModelModeChange={onIntegrationAutoModelModeChange}
             onIntegrationFetchCountChange={onIntegrationFetchCountChange}
             onIntegrationFetchVideos={onIntegrationFetchVideos}
             onIntegrationSelectionChange={onIntegrationSelectionChange}

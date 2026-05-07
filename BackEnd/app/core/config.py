@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     frontend_url: str = "http://localhost:3000"
+    fine_tuning_internal_base_url: str = "http://127.0.0.1:8000"
+    fine_tuning_use_mock_dataset_ready_payload: bool = False
+    fine_tuning_mock_dataset_ready_status: str = "ready_for_training"
     minio_endpoint: str = "127.0.0.1:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"

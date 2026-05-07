@@ -10,6 +10,7 @@ from minio.error import S3Error
 
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 @dataclass(frozen=True)
@@ -95,13 +96,20 @@ def validate_bucket_access(client: Minio, bucket: str, *, auto_create: bool = Fa
         ) from error
 
 
-def list_video_objects(client: Minio, bucket: str, prefix: str) -> list[dict[str, object]]:
+def list_media_objects(
+    client: Minio,
+    bucket: str,
+    prefix: str,
+    *,
+    allowed_extensions: set[str] | None = None,
+) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
+    extensions = allowed_extensions or VIDEO_EXTENSIONS
     for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
         if getattr(obj, "is_dir", False):
             continue
         suffix = PurePosixPath(obj.object_name).suffix.lower()
-        if suffix not in VIDEO_EXTENSIONS:
+        if suffix not in extensions:
             continue
         items.append(
             {
@@ -112,6 +120,10 @@ def list_video_objects(client: Minio, bucket: str, prefix: str) -> list[dict[str
             }
         )
     return sorted(items, key=lambda item: item["last_modified"] or "", reverse=True)
+
+
+def list_video_objects(client: Minio, bucket: str, prefix: str) -> list[dict[str, object]]:
+    return list_media_objects(client, bucket, prefix, allowed_extensions=VIDEO_EXTENSIONS)
 
 
 def build_output_object_key(

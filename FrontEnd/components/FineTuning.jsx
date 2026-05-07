@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, PlayCircle } from "lucide-react";
 
-import { getIntegrationDefaults, sectionLabelToParam } from "./visionLabConfig";
+import { API_BASE_URL, getIntegrationDefaults, sectionLabelToParam } from "./visionLabConfig";
 import {
   DEFAULT_ADVANCED_SETTINGS,
   getFineTuningConfig,
@@ -12,11 +12,7 @@ import {
   stopConditionOptions,
   trainingModeOptions,
 } from "./fine-tuning/useCaseFineTuningConfig";
-import {
-  advanceMockTraining,
-  buildMockFineTuningState,
-  promoteMockCandidate,
-} from "./fine-tuning/mockFineTuningData";
+import { buildMockFineTuningState } from "./fine-tuning/mockFineTuningData";
 import {
   deleteDataset,
   loadDataCheckStatus,
@@ -46,6 +42,71 @@ import {
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 
+
+const MODEL_PAYLOAD_MAP = {
+  "fire-fast": "yolo_nano",
+  "fire-balanced": "current_model",
+  "fire-watch": "yolo_medium",
+  "unsafe-current": "current_model",
+  "unsafe-fast": "yolo_nano",
+  "unsafe-accurate": "yolo_medium",
+  "crack-current": "current_model",
+  "crack-fast": "yolo_nano",
+  "crack-accurate": "yolo_medium",
+  "ppe-fast": "yolo_nano",
+  "ppe-balanced": "current_model",
+  "ppe-accurate": "yolo_medium",
+  "region-fast": "yolo_nano",
+  "region-balanced": "current_model",
+  "region-guard": "yolo_medium",
+  "speed-fast": "yolo_nano",
+  "speed-balanced": "current_model",
+  "speed-accurate": "yolo_medium",
+  "speed-precision": "yolo_medium",
+  "tracking-fast": "yolo_nano",
+  "track-fast": "yolo_nano",
+  "object-tracking-fast": "yolo_nano",
+  "tracking-balanced": "current_model",
+  "track-balanced": "current_model",
+  "object-tracking-balanced": "current_model",
+  "tracking-identity-focus": "yolo_medium",
+  "track-identity": "yolo_medium",
+  "object-tracking-identity-focus": "yolo_medium",
+  "counting-fast": "yolo_nano",
+  "count-fast": "yolo_nano",
+  "class-wise-counting-fast": "yolo_nano",
+  "class-wise-object-counting-fast": "yolo_nano",
+  "counting-balanced": "current_model",
+  "count-balanced": "current_model",
+  "class-wise-counting-balanced": "current_model",
+  "class-wise-object-counting-balanced": "current_model",
+  "counting-accurate": "yolo_medium",
+  "count-accurate": "yolo_medium",
+  "class-wise-counting-accurate": "yolo_medium",
+  "class-wise-object-counting-accurate": "yolo_medium",
+};
+
+const RUN_DEPTH_PAYLOAD_MAP = {
+  "quick-tune": {
+    run_depth: "quick_check",
+    epochs: 6,
+    batch_size: 2,
+    img_size: 640,
+  },
+  balanced: {
+    run_depth: "recommended",
+    epochs: 14,
+    batch_size: 4,
+    img_size: 768,
+  },
+  "deep-optimization": {
+    run_depth: "deep_tune",
+    epochs: 24,
+    batch_size: 8,
+    img_size: 896,
+  },
+};
+
 function getInitialFormState(useCase) {
   const config = getFineTuningConfig(useCase);
   return {
@@ -60,6 +121,54 @@ function getInitialFormState(useCase) {
     advancedSettings: { ...DEFAULT_ADVANCED_SETTINGS, ...(config.advancedDefaults ?? {}) },
     extensionSettings: { ...(config.extensionDefaults ?? {}) },
     selectedCandidateId: "best-tradeoff",
+  };
+}
+
+function getTrainingJobUiPatch(status, outputModelPath = "") {
+  if (status === "running") {
+    return {
+      status: "running",
+      current_stage: "Training in progress",
+      progress_percent: 55,
+      eta: "Running now",
+      next_up: "Training is running. This may take a few minutes.",
+      plain_english_status: "Training is running. This may take a few minutes.",
+      output_model_path: outputModelPath,
+    };
+  }
+
+  if (status === "completed") {
+    return {
+      status: "completed",
+      current_stage: "Training completed",
+      progress_percent: 100,
+      eta: "Finished",
+      next_up: "Training completed successfully. You can review this run before moving to comparison.",
+      plain_english_status: "Training completed successfully.",
+      output_model_path: outputModelPath,
+    };
+  }
+
+  if (status === "failed") {
+    return {
+      status: "failed",
+      current_stage: "Training failed",
+      progress_percent: 0,
+      eta: "Needs attention",
+      next_up: "Training failed. Check backend logs before retrying.",
+      plain_english_status: "Training failed. Check backend logs.",
+      output_model_path: outputModelPath,
+    };
+  }
+
+  return {
+    status: "queued",
+    current_stage: "Training job queued",
+    progress_percent: 0,
+    eta: "Waiting to start",
+    next_up: "Training job is ready to start.",
+    plain_english_status: "Training job is ready to start.",
+    output_model_path: outputModelPath,
   };
 }
 
@@ -583,7 +692,6 @@ function buildCurrentPlanState({
 }
 
 const sleep = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-
 export default function FineTuning({ activeUseCase }) {
   const searchParams = useSearchParams();
   const [mockState, setMockState] = useState(() => buildMockFineTuningState(activeUseCase));
@@ -594,6 +702,9 @@ export default function FineTuning({ activeUseCase }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [sceneOpen, setSceneOpen] = useState(false);
   const [pageMessage, setPageMessage] = useState("");
+  const [pageError, setPageError] = useState("");
+  const [trainingPlanLoading, setTrainingPlanLoading] = useState(false);
+  const [trainingJobId, setTrainingJobId] = useState("");
 
   const [sessionId, setSessionId] = useState(null);
   const [step1Data, setStep1Data] = useState(null);
@@ -606,21 +717,18 @@ export default function FineTuning({ activeUseCase }) {
   const [errors, setErrors] = useState({});
 
   const config = getFineTuningConfig(activeUseCase);
+  const isDeprecatedCountingUseCase = activeUseCase.id === "class-wise-object-counting";
   const requestedFineTuningStep = searchParams.get("ftStep");
   const mappedDatasets = useMemo(() => sortDatasetsForStep(datasets).map(mapDatasetFromApi), [datasets]);
   const selectedDataset = useMemo(
     () => mappedDatasets.find((dataset) => dataset.id === String(formState.selectedDatasetId)) ?? null,
     [formState.selectedDatasetId, mappedDatasets],
   );
-  const selectedCandidate =
-    mockState.evaluation.candidate_models.find((candidate) => candidate.id === formState.selectedCandidateId) ??
-    mockState.evaluation.candidate_models[0] ??
-    null;
   const selectedBaseModel =
     config.baseModels.find((model) => model.value === formState.baseModelId) ?? config.baseModels[0] ?? null;
-  const selectedGoal = goalOptions.find((goal) => goal.value === formState.goalId) ?? goalOptions[0];
   const selectedTrainingMode =
     trainingModeOptions.find((mode) => mode.value === formState.trainingModeId) ?? trainingModeOptions[0];
+  const currentSessionId = sessionId ?? mockState.sessionId ?? `${activeUseCase.id}-session-1`;
   const datasetHealth = useMemo(
     () => buildDatasetHealth(step1Data, dataCheckStatus, labelState, selectedDataset),
     [step1Data, dataCheckStatus, labelState, selectedDataset],
@@ -658,9 +766,9 @@ export default function FineTuning({ activeUseCase }) {
       { id: "start", label: "Get started", helper: "Understand the safe path" },
       { id: "data", label: "Your data", helper: "Register MinIO data" },
       { id: "labels", label: "Labels", helper: "Choose labeling path" },
-      { id: "plan", label: "Training plan", helper: "Pick model and goal" },
+      { id: "plan", label: "Training plan", helper: "Pick model and run" },
       { id: "training", label: "Watch training", helper: "Track progress" },
-      { id: "compare", label: "Compare results", helper: "Choose the best version" },
+      { id: "compare", label: "Show results", helper: "Review training artifacts and model details" },
       { id: "rollout", label: "Go live safely", helper: "Save, stage, or keep current" },
     ],
     [],
@@ -806,6 +914,9 @@ export default function FineTuning({ activeUseCase }) {
     setAdvancedOpen(false);
     setSceneOpen(false);
     setPageMessage("");
+    setPageError("");
+    setTrainingPlanLoading(false);
+    setTrainingJobId("");
     setSessionId(null);
     setStep1Data(null);
     setDatasets([]);
@@ -1189,28 +1300,94 @@ export default function FineTuning({ activeUseCase }) {
     }
   };
 
-  const handleAdvanceTraining = () => {
-    setMockState((current) => advanceMockTraining(current));
-    setPageMessage("Moved the placeholder training run forward one stage. Step 4+ backend is not connected yet.");
+  const handleTrainingJobSync = (jobData) => {
+    if (!jobData?.id && !jobData?.training_job_id && !jobData?.status) return;
+
+    const nextJobId = jobData?.id ?? jobData?.training_job_id ?? trainingJobId;
+
+    if (nextJobId) {
+      setTrainingJobId(nextJobId);
+    }
+
+    setMockState((current) => ({
+      ...current,
+      trainingJob: {
+        ...current.trainingJob,
+        id: nextJobId || current.trainingJob.id,
+        ...getTrainingJobUiPatch(
+          jobData?.status ?? current.trainingJob.status ?? "queued",
+          jobData?.output_model_path ?? current.trainingJob.output_model_path ?? "",
+        ),
+      },
+    }));
   };
 
-  const handlePromotionAction = (action) => {
-    if (!selectedCandidate) return;
-    setMockState((current) => promoteMockCandidate(current, selectedCandidate.id, action));
-    if (action === "candidate") {
-      setPageMessage(`Saved ${selectedCandidate.name} as a candidate. The current live model stays untouched.`);
-      return;
+  const handleCreateTrainingPlan = async () => {
+    const runDepthPayload = RUN_DEPTH_PAYLOAD_MAP[formState.trainingModeId] ?? RUN_DEPTH_PAYLOAD_MAP.balanced;
+    const mappedModel = MODEL_PAYLOAD_MAP[formState.baseModelId] ?? "current_model";
+    const payload = {
+      use_case_id: activeUseCase.id,
+      base_model: mappedModel,
+      run_depth: runDepthPayload.run_depth,
+      epochs: runDepthPayload.epochs,
+      batch_size: runDepthPayload.batch_size,
+      img_size: runDepthPayload.img_size,
+    };
+
+    try {
+      setTrainingPlanLoading(true);
+      setPageError("");
+      setPageMessage("");
+
+      const response = await fetch(`${API_BASE_URL}/api/fine-tuning/${currentSessionId}/training-plan`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.detail || "Failed to create training plan");
+      }
+
+      setTrainingJobId(data.training_job_id);
+      setMockState((current) => ({
+        ...current,
+        trainingJob: {
+          ...current.trainingJob,
+          id: data.training_job_id,
+          status: data.status ?? "queued",
+          current_stage: "Training plan created",
+          eta: "Ready for Step 5",
+          next_up: "Training plan is ready. Step 5 can now start the training run when you choose.",
+          plain_english_status:
+            "Your training plan is saved. The model has not started training yet, so production remains unchanged.",
+          activity_feed: [
+            {
+              id: `${data.training_job_id}-created`,
+              time: "Just now",
+              title: "Training plan created",
+              detail: `Saved backend job ${data.training_job_id} using the selected starting model and run depth.`,
+            },
+            ...current.trainingJob.activity_feed,
+          ],
+        },
+      }));
+      setPageMessage(`Training plan created successfully. Job ${data.training_job_id} is ready for Step 5.`);
+      setActiveStepId("training");
+    } catch (error) {
+      console.error(error);
+      setPageError(error instanceof Error ? error.message : "Failed to create training plan");
+    } finally {
+      setTrainingPlanLoading(false);
     }
-    if (action === "keep-current") {
-      setPageMessage("Kept the current live model in place. The new version stays available for more checking.");
-      return;
-    }
-    setPageMessage(`Prepared ${selectedCandidate.name} for ${action}. This remains UI-only until backend deployment actions are connected.`);
   };
 
-  const handlePrimaryNext = () => {
+  const handlePrimaryNext = async () => {
     if (activeStepId === "start") {
-      void handleStartSetup();
+      await handleStartSetup();
       return;
     }
     if (activeStepId === "data") {
@@ -1226,12 +1403,11 @@ export default function FineTuning({ activeUseCase }) {
       return;
     }
     if (activeStepId === "labels") {
-      void handlePrepareDatasetReadyPayload();
+      await handlePrepareDatasetReadyPayload();
       return;
     }
     if (activeStepId === "plan") {
-      handleAdvanceTraining();
-      setActiveStepId("training");
+      await handleCreateTrainingPlan();
       return;
     }
     goNext();
@@ -1241,7 +1417,7 @@ export default function FineTuning({ activeUseCase }) {
     if (activeStepId === "start") return step1Data?.selected_dataset_id ? "Continue" : "Choose data";
     if (activeStepId === "labels") return loading.handoff ? "Preparing..." : "Prepare handoff";
     if (activeStepId === "plan") return "Start training";
-    if (activeStepId === "training") return "Compare results";
+    if (activeStepId === "training") return "Show results";
     if (activeStepId === "compare") return "Go live safely";
     if (activeStepId === "rollout") return "Finish";
     return "Continue";
@@ -1329,10 +1505,8 @@ export default function FineTuning({ activeUseCase }) {
           config={config}
           currentModel={mockState.deployment.current_model}
           extensionSettings={formState.extensionSettings}
-          goalOptions={goalOptions}
           sceneOpen={sceneOpen}
           selectedBaseModelId={formState.baseModelId}
-          selectedGoalId={formState.goalId}
           selectedStopConditionId={formState.stopConditionId}
           selectedTrainingModeId={formState.trainingModeId}
           stopConditionOptions={stopConditionOptions}
@@ -1340,7 +1514,6 @@ export default function FineTuning({ activeUseCase }) {
           onAdvancedSettingChange={updateAdvancedSetting}
           onBaseModelChange={(value) => updateFormField("baseModelId", value)}
           onExtensionSettingChange={updateExtensionSetting}
-          onGoalChange={(value) => updateFormField("goalId", value)}
           onStopConditionChange={(value) => updateFormField("stopConditionId", value)}
           onToggleAdvanced={() => setAdvancedOpen((current) => !current)}
           onToggleScene={() => setSceneOpen((current) => !current)}
@@ -1350,7 +1523,7 @@ export default function FineTuning({ activeUseCase }) {
     }
 
     if (activeStepId === "training") {
-      return <WatchTrainingStep trainingJob={mockState.trainingJob} onAdvanceTraining={handleAdvanceTraining} />;
+      return <WatchTrainingStep trainingJob={mockState.trainingJob} onTrainingJobSync={handleTrainingJobSync} />;
     }
 
     if (activeStepId === "compare") {
@@ -1358,20 +1531,20 @@ export default function FineTuning({ activeUseCase }) {
         <CompareResultsStep
           activeUseCase={activeUseCase}
           currentModel={mockState.deployment.current_model}
-          evaluation={mockState.evaluation}
-          selectedCandidate={selectedCandidate}
-          selectedCandidateId={formState.selectedCandidateId}
-          onCandidateSelect={(value) => updateFormField("selectedCandidateId", value)}
+          trainingJobId={trainingJobId}
+          selectedTrainingMode={selectedTrainingMode}
+          trainingJob={mockState.trainingJob}
         />
       );
     }
 
     return (
       <RolloutStep
+        activeUseCase={activeUseCase}
         currentModel={mockState.deployment.current_model}
-        deploymentState={mockState.deployment}
-        selectedCandidate={selectedCandidate}
-        onAction={handlePromotionAction}
+        trainingJob={mockState.trainingJob}
+        trainingJobId={trainingJobId}
+        selectedTrainingMode={selectedTrainingMode}
       />
     );
   };
@@ -1399,8 +1572,8 @@ export default function FineTuning({ activeUseCase }) {
               {selectedDataset ? <div className="mt-1 truncate text-xs font-semibold text-slate-500">{selectedDataset.label_display}</div> : null}
             </div>
             <div className="rounded-2xl border border-white bg-white/90 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Goal</div>
-              <div className="mt-1 truncate text-sm font-semibold text-slate-900">{selectedGoal?.label ?? "Balanced"}</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Run depth</div>
+              <div className="mt-1 truncate text-sm font-semibold text-slate-900">{selectedTrainingMode?.label ?? "Recommended"}</div>
             </div>
             <div className="rounded-2xl border border-white bg-white/90 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Status</div>
@@ -1414,9 +1587,10 @@ export default function FineTuning({ activeUseCase }) {
         <FineTuningStepRail
           activeStepId={activeStepId}
           completedStepIds={completedStepIds}
+          selectedBaseModel={selectedBaseModel}
           currentPlanState={currentPlanState}
+          selectedBaseModel={selectedBaseModel}
           selectedDataset={selectedDataset}
-          selectedGoal={selectedGoal}
           selectedTrainingMode={selectedTrainingMode}
           steps={steps}
           trainingJob={trainingJob}
@@ -1424,9 +1598,25 @@ export default function FineTuning({ activeUseCase }) {
         />
 
         <main className="min-w-0">
+          {isDeprecatedCountingUseCase ? (
+            <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+              <span className="font-semibold">Class-wise counting is now included in Vehicle Analytics.</span>{" "}
+              This legacy fine-tuning flow still works if you opened it directly, but the primary product path now lives under Speed Estimation / Vehicle Analytics.
+            </div>
+          ) : null}
           {pageMessage ? (
             <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm leading-6 text-slate-700">
               {pageMessage}
+            </div>
+          ) : null}
+          {pageError ? (
+            <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.05] px-4 py-3 text-sm leading-6 text-brandRed">
+              {pageError}
+            </div>
+          ) : null}
+          {trainingJobId ? (
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700">
+              Training job ID: <span className="font-semibold text-slate-900">{trainingJobId}</span>
             </div>
           ) : null}
 
@@ -1446,9 +1636,9 @@ export default function FineTuning({ activeUseCase }) {
                 Finish
               </Button>
             ) : (
-              <Button disabled={primaryActionDisabled} onClick={handlePrimaryNext} type="button">
+              <Button disabled={primaryActionDisabled || trainingPlanLoading} onClick={handlePrimaryNext} type="button">
                 {activeStepId === "plan" ? <PlayCircle className="mr-2 h-4 w-4" /> : null}
-                {getNextLabel()}
+                {activeStepId === "plan" && trainingPlanLoading ? "Creating training plan..." : getNextLabel()}
                 {activeStepId !== "plan" ? <ArrowRight className="ml-2 h-4 w-4" /> : null}
               </Button>
             )}

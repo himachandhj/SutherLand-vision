@@ -45,8 +45,220 @@ function formatAnalysisValue(value) {
   return String(value);
 }
 
+function normalizeAnalysisCountMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value)
+    .filter(([, count]) => Number(count) > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]));
+}
+
+function SpeedAnalyticsCountList({ title, counts, emptyLabel }) {
+  if (counts.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-4 text-sm text-slate-500">
+        {emptyLabel}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{title}</div>
+      <div className="mt-3 space-y-2">
+        {counts.map(([label, count]) => (
+          <div key={label} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 text-sm text-slate-700">
+            <span className="font-medium">{formatAnalysisLabel(label)}</span>
+            <span className="rounded-full bg-brandBlue/[0.08] px-2.5 py-1 text-xs font-semibold text-brandBlue">{count}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SpeedRunAnalysisPanel({ run }) {
+  const metrics = run.metrics ?? {};
+  const fallbackUsed = Boolean(metrics.fallback_used);
+  const fallbackReason = metrics.fallback_reason;
+  const classCounts = normalizeAnalysisCountMap(metrics.class_wise_counts);
+  const crossedClassCounts = normalizeAnalysisCountMap(metrics.class_wise_crossed_counts);
+
+  const summaryCards = [
+    ["Total Vehicles", metrics.total_vehicles],
+    ["Crossed Vehicles", metrics.crossed_vehicle_count],
+    ["Average Speed (km/h)", metrics.avg_speed_kmh],
+    ["Max Speed (km/h)", metrics.max_speed_kmh],
+    ["Speeding Violations", metrics.speeding_violations],
+  ].filter(([, value]) => value !== undefined && value !== null);
+
+  const excludedKeys = new Set([
+    "total_vehicles",
+    "class_wise_counts",
+    "crossed_vehicle_count",
+    "class_wise_crossed_counts",
+    "avg_speed_kmh",
+    "max_speed_kmh",
+    "speeding_violations",
+    "fallback_used",
+    "fallback_reason",
+  ]);
+  const additionalEntries = Object.entries(metrics).filter(([key]) => !excludedKeys.has(key));
+
+  return (
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-900">Vehicle Analytics</h4>
+          <p className="mt-1 text-sm text-slate-500">Latest speed, vehicle counting, and crossed-line metrics captured for this run.</p>
+        </div>
+        <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
+      </div>
+      {fallbackUsed ? (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          {fallbackReason || "Staged model was not compatible or produced no valid detections, so the current/default model was used for this run."}
+        </div>
+      ) : null}
+      {summaryCards.length > 0 ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {summaryCards.map(([label, value]) => (
+            <div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+              <div className="mt-2 text-xl font-semibold text-slate-900">{formatAnalysisValue(value)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 grid gap-3 xl:grid-cols-2">
+        <SpeedAnalyticsCountList title="Class-wise Vehicle Count" counts={classCounts} emptyLabel="No class-wise counts available yet." />
+        <SpeedAnalyticsCountList title="Class-wise Crossed Count" counts={crossedClassCounts} emptyLabel="No class-wise crossed counts available yet." />
+      </div>
+      {additionalEntries.length > 0 ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {additionalEntries.map(([key, value]) => (
+            <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{formatAnalysisLabel(key)}</div>
+              <div className="mt-2 break-words text-sm font-medium text-slate-800">{formatAnalysisValue(value)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 text-xs text-slate-400">{run.message || "No additional run note available."}</div>
+    </div>
+  );
+}
+
+function UnsafeBehaviorRunAnalysisPanel({ run }) {
+  const metrics = run.metrics ?? {};
+  const fallbackUsed = Boolean(metrics.fallback_used);
+  const fallbackReason = metrics.fallback_reason;
+  const unsafeEvents = Array.isArray(metrics.unsafe_events_preview) ? metrics.unsafe_events_preview : [];
+  const summaryCards = [
+    ["Total Unsafe Events", metrics.total_unsafe_events],
+    ["Smoking Events", metrics.smoking_events],
+    ["Phone Usage Events", metrics.phone_usage_events],
+    ["Frames Analyzed", metrics.frames_analyzed],
+    ["Frames with Unsafe Behavior", metrics.frames_with_unsafe_behavior],
+    ["Unsafe Rate (%)", metrics.unsafe_rate_pct],
+    ["Max Confidence", metrics.max_confidence],
+    ["Average Confidence", metrics.avg_confidence],
+  ].filter(([, value]) => value !== undefined && value !== null);
+
+  const excludedKeys = new Set([
+    "total_unsafe_events",
+    "smoking_events",
+    "phone_usage_events",
+    "frames_analyzed",
+    "frames_with_unsafe_behavior",
+    "unsafe_rate_pct",
+    "max_confidence",
+    "avg_confidence",
+    "unsafe_events_preview",
+    "fallback_used",
+    "fallback_reason",
+  ]);
+  const additionalEntries = Object.entries(metrics).filter(([key]) => !excludedKeys.has(key));
+
+  return (
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-900">Unsafe Behavior Analysis</h4>
+          <p className="mt-1 text-sm text-slate-500">Latest smoking and phone-usage detections captured for this run.</p>
+        </div>
+        <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
+      </div>
+      {fallbackUsed ? (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          {fallbackReason || "The requested model was unavailable, so the current/default model was used for this run."}
+        </div>
+      ) : null}
+      {summaryCards.length > 0 ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {summaryCards.map(([label, value]) => (
+            <div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+              <div className="mt-2 text-xl font-semibold text-slate-900">{formatAnalysisValue(value)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Unsafe Events</div>
+        {unsafeEvents.length === 0 ? (
+          <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-white px-4 py-4 text-sm text-slate-500">
+            No unsafe events were captured for this run.
+          </div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {unsafeEvents.map((event, index) => (
+              <div key={`${event.event_type || "unsafe"}-${event.frame_number || index}-${index}`} className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="font-semibold text-slate-900">{formatAnalysisLabel(event.event_type || "unsafe")}</span>
+                  <span className="rounded-full bg-brandBlue/[0.08] px-2.5 py-1 text-xs font-semibold text-brandBlue">
+                    {formatAnalysisValue(event.confidence)}
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                    {formatAnalysisLabel(event.severity || "low")}
+                  </span>
+                </div>
+                <div className="mt-2 grid gap-2 text-xs text-slate-500 sm:grid-cols-2 xl:grid-cols-5">
+                  <div>Source: <span className="font-medium text-slate-700">{formatAnalysisValue(event.source)}</span></div>
+                  <div>Frame: <span className="font-medium text-slate-700">{formatAnalysisValue(event.frame_number)}</span></div>
+                  <div>Timestamp: <span className="font-medium text-slate-700">{formatAnalysisValue(event.timestamp_sec)}</span></div>
+                  <div>Status: <span className="font-medium text-slate-700">{formatAnalysisValue(event.status)}</span></div>
+                  <div>Box: <span className="font-medium text-slate-700">{formatAnalysisValue(event.bbox)}</span></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {additionalEntries.length > 0 ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {additionalEntries.map(([key, value]) => (
+            <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{formatAnalysisLabel(key)}</div>
+              <div className="mt-2 break-words text-sm font-medium text-slate-800">{formatAnalysisValue(value)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 text-xs text-slate-400">{run.message || "No additional run note available."}</div>
+    </div>
+  );
+}
+
 function RunAnalysisPanel({ run }) {
+  if (run.use_case_id === "speed-estimation") {
+    return <SpeedRunAnalysisPanel run={run} />;
+  }
+  if (run.use_case_id === "unsafe-behavior-detection") {
+    return <UnsafeBehaviorRunAnalysisPanel run={run} />;
+  }
+
   const entries = Object.entries(run.metrics ?? {});
+  const fallbackUsed = Boolean(run.metrics?.fallback_used);
+  const fallbackReason = run.metrics?.fallback_reason;
 
   return (
     <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
@@ -57,6 +269,11 @@ function RunAnalysisPanel({ run }) {
         </div>
         <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
       </div>
+      {fallbackUsed ? (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          {fallbackReason || "Staged model was not compatible or produced no valid detections, so the current/default model was used for this run."}
+        </div>
+      ) : null}
       {entries.length === 0 ? (
         <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
           No analysis metadata was stored for this run.
@@ -128,6 +345,60 @@ function IntegrationModeButton({ active, label, onClick }) {
     >
       {label}
     </button>
+  );
+}
+
+function formatModelModeLabel(mode) {
+  return mode === "staging" ? "Staged fine-tuned model" : "Current active model";
+}
+
+function formatModelUsageLabel(modeUsed) {
+  if (modeUsed === "staging") return "Staged fine-tuned model";
+  if (modeUsed === "active") return "Current active model";
+  return "Current active/default model";
+}
+
+function IntegrationModelModeControl({
+  connection,
+  disabled,
+  helperText,
+  label,
+  modelState,
+  selectedMode,
+  onChange,
+}) {
+  const showStagedOption = Boolean(modelState?.has_staged_model);
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <label className="block">
+        <span className="mb-2 block text-sm font-semibold text-slate-700">{label}</span>
+        <select
+          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+          disabled={disabled}
+          value={selectedMode}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="active">Current active model</option>
+          {showStagedOption ? <option value="staging">Staged fine-tuned model</option> : null}
+        </select>
+      </label>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        {showStagedOption
+          ? helperText
+          : "Stage a fine-tuned model from Go Live Safely to test it here."}
+      </p>
+      {connection?.model_path_used ? (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+          <div className="font-semibold uppercase tracking-[0.18em] text-slate-400">Current backend model</div>
+          <div className="mt-2 text-sm font-medium text-slate-700">{formatModelUsageLabel(connection.model_mode_used)}</div>
+          <div className="mt-1 break-all">{connection.model_path_used}</div>
+          {connection.fallback_used && connection.fallback_reason ? (
+            <div className="mt-2 text-amber-700">{connection.fallback_reason}</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -308,21 +579,41 @@ function RegionAlertsSummaryCard({ regionRoi, zonePointsNormalized, ruleConfig }
   );
 }
 
-function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLabel }) {
+function IntegrationAutoPanel({
+  connection,
+  isConnected,
+  isProcessing,
+  modelState,
+  selectedModelMode,
+  supportsMediaInputs,
+  useCaseLabel,
+  onModelModeChange,
+}) {
+  const inputAssetLabel = supportsMediaInputs ? "files" : "videos";
+
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-slate-900">Auto Mode Monitor</h3>
           <p className="mt-1 text-sm text-slate-500">
-            Auto mode monitors the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix for new or unprocessed <strong>{useCaseLabel}</strong> videos and processes them one by one into <strong>{connection?.output_prefix ?? "output/"}</strong>.
+            Auto mode monitors the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix for new or unprocessed <strong>{useCaseLabel}</strong> {inputAssetLabel} and processes them one by one into <strong>{connection?.output_prefix ?? "output/"}</strong>.
           </p>
         </div>
         <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(isProcessing ? "processing" : isConnected ? "available" : "failed")}`}>
           {isProcessing ? "Monitoring • Active" : isConnected ? "Monitoring • Idle" : "Not Connected"}
         </span>
       </div>
-      <div className="mt-5 grid gap-4 md:grid-cols-3">
+      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_1fr_1fr]">
+        <IntegrationModelModeControl
+          connection={connection}
+          disabled={!isConnected}
+          helperText="Choose whether this auto-processing session should use the current active model or the staged fine-tuned model."
+          label="Auto mode model"
+          modelState={modelState}
+          selectedMode={selectedModelMode}
+          onChange={onModelModeChange}
+        />
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Input Source</div>
           <div className="mt-2 text-sm font-semibold text-slate-800">{connection?.bucket ?? "—"}</div>
@@ -330,8 +621,8 @@ function IntegrationAutoPanel({ connection, isConnected, isProcessing, useCaseLa
         </div>
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Detection Rule</div>
-          <div className="mt-2 text-sm font-semibold text-slate-800">New or Unprocessed Videos</div>
-          <div className="mt-1 text-xs text-slate-500">Already completed videos are skipped on later polls.</div>
+          <div className="mt-2 text-sm font-semibold text-slate-800">New or Unprocessed {supportsMediaInputs ? "Files" : "Videos"}</div>
+          <div className="mt-1 text-xs text-slate-500">Already completed {inputAssetLabel} are skipped on later polls.</div>
         </div>
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Output Target</div>
@@ -349,16 +640,21 @@ function IntegrationManualPanel({
   fetchCount,
   fetchedVideos,
   isFetching,
+  modelState,
   isProcessing,
   fetchMessage,
   processMessage,
+  selectedModelMode,
   selectedVideos,
+  supportsMediaInputs,
   useCaseLabel,
+  onModelModeChange,
   onFetchCountChange,
   onFetchVideos,
   onProcessSelected,
   onSelectionChange,
 }) {
+  const inputAssetLabel = supportsMediaInputs ? "files" : "videos";
   const selectableVideos = fetchedVideos.filter((video) => !["completed", "processing"].includes(video.status));
   const allSelectableSelected = selectableVideos.length > 0 && selectableVideos.every((video) => selectedVideos.includes(video.object_key));
 
@@ -386,7 +682,7 @@ function IntegrationManualPanel({
         <div>
           <h3 className="text-lg font-semibold text-slate-900">Manual Fetch & Process</h3>
           <p className="mt-1 text-sm text-slate-500">
-            Fetch videos from the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix, choose the {useCaseLabel} inputs you want, and process only those selections.
+            Fetch {inputAssetLabel} from the connected MinIO <strong>{connection?.input_prefix ?? "input/"}</strong> prefix, choose the {useCaseLabel} inputs you want, and process only those selections.
           </p>
         </div>
         <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
@@ -394,31 +690,47 @@ function IntegrationManualPanel({
         </div>
       </div>
       <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="text-sm font-semibold text-slate-700" htmlFor="integration-fetch-count">Fetch count</label>
-            <select
-              id="integration-fetch-count"
-              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
-              disabled={disabled || isFetching}
-              value={fetchCount}
-              onChange={(event) => onFetchCountChange(Number(event.target.value))}
-            >
-              {[5, 10, 20, 50].map((count) => (
-                <option key={count} value={count}>{count}</option>
-              ))}
-            </select>
-            <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isFetching} onClick={onFetchVideos} type="button">
-              {isFetching ? "Fetching..." : "Fetch Videos"}
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:border-brandBlue hover:text-brandBlue disabled:cursor-not-allowed disabled:opacity-60" disabled={selectableVideos.length === 0} onClick={toggleSelectAll} type="button">
-              {allSelectableSelected ? "Clear Selection" : "Select All"}
-            </button>
-            <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isProcessing || selectedVideos.length === 0} onClick={onProcessSelected} type="button">
-              {isProcessing ? "Processing..." : `Process Selected${selectedVideos.length > 0 ? ` (${selectedVideos.length})` : ""}`}
-            </button>
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
+          <IntegrationModelModeControl
+            connection={connection}
+            disabled={disabled || isProcessing}
+            helperText="Choose which model should be used only for the selected manual video run."
+            label="Model for this run"
+            modelState={modelState}
+            selectedMode={selectedModelMode}
+            onChange={onModelModeChange}
+          />
+          <div className="flex flex-col gap-4 lg:justify-between">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="text-sm font-semibold text-slate-700" htmlFor="integration-fetch-count">Fetch count</label>
+                <select
+                  id="integration-fetch-count"
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                  disabled={disabled || isFetching}
+                  value={fetchCount}
+                  onChange={(event) => onFetchCountChange(Number(event.target.value))}
+                >
+                  {[5, 10, 20, 50].map((count) => (
+                    <option key={count} value={count}>{count}</option>
+                  ))}
+                </select>
+                <button className="rounded-xl border border-brandBlue px-5 py-3 text-sm font-semibold text-brandBlue transition hover:bg-brandBlue hover:text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isFetching} onClick={onFetchVideos} type="button">
+                  {isFetching ? "Fetching..." : supportsMediaInputs ? "Fetch Files" : "Fetch Videos"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:border-brandBlue hover:text-brandBlue disabled:cursor-not-allowed disabled:opacity-60" disabled={selectableVideos.length === 0} onClick={toggleSelectAll} type="button">
+                  {allSelectableSelected ? "Clear Selection" : "Select All"}
+                </button>
+                <button className="rounded-xl bg-brandBlue px-5 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60" disabled={disabled || isProcessing || selectedVideos.length === 0} onClick={onProcessSelected} type="button">
+                  {isProcessing ? "Processing..." : `Process Selected${selectedVideos.length > 0 ? ` (${selectedVideos.length})` : ""}`}
+                </button>
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+              Processed using: <strong className="text-slate-800">{formatModelModeLabel(selectedModelMode)}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -435,14 +747,14 @@ function IntegrationManualPanel({
       <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
         {fetchedVideos.length === 0 ? (
           <div className="bg-white px-4 py-10 text-center text-sm text-slate-500">
-            Fetch videos to list the current {useCaseLabel} inputs from MinIO.
+            Fetch {inputAssetLabel} to list the current {useCaseLabel} inputs from MinIO.
           </div>
         ) : (
           <table className="min-w-full divide-y divide-slate-200 text-left">
             <thead className="bg-slate-50">
               <tr>
                 <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Select</th>
-                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Video</th>
+                <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">{supportsMediaInputs ? "File" : "Video"}</th>
                 <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Status</th>
                 <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Updated</th>
                 <th className="px-5 py-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Size</th>
@@ -488,9 +800,12 @@ export default function Integration({
   activeUseCase,
   integrationForm,
   integrationOverview,
+  integrationModelState,
   integrationError,
   isConnectingIntegration,
   integrationMode,
+  integrationManualModelMode,
+  integrationAutoModelMode,
   integrationFetchCount,
   integrationFetchedVideos,
   selectedIntegrationVideos,
@@ -505,6 +820,8 @@ export default function Integration({
   onIntegrationFieldChange,
   onIntegrationConnect,
   onIntegrationModeChange,
+  onIntegrationManualModelModeChange,
+  onIntegrationAutoModelModeChange,
   onIntegrationFetchCountChange,
   onIntegrationFetchVideos,
   onIntegrationSelectionChange,
@@ -518,8 +835,12 @@ export default function Integration({
   const recentRuns = integrationOverview?.recent_runs ?? [];
   const activeMode = connection?.processing_mode ?? integrationMode;
   const isAutoMode = activeMode === "auto";
+  const isLegacyClasswiseCounting = activeUseCase.id === "class-wise-object-counting";
+  const isCrackDetection = activeUseCase.id === "crack-detection";
+  const isUnsafeBehaviorDetection = activeUseCase.id === "unsafe-behavior-detection";
   const isRegionAlerts = activeUseCase.id === "region-alerts";
   const isSpeedEstimation = activeUseCase.id === "speed-estimation";
+  const supportsMediaInputs = isCrackDetection || isUnsafeBehaviorDetection;
   const activeRegionZonePoints = regionAlertsZonePointsNormalized ?? connection?.zone_points_normalized ?? null;
   const activeRegionRuleConfig = regionAlertsRuleConfig ?? connection?.rule_config ?? null;
 
@@ -530,13 +851,13 @@ export default function Integration({
           <div>
             <h2 className="text-xl font-semibold text-slate-900">Integration Configuration</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-              Connect to MinIO object storage to route videos through the <strong>{useCaseLabel}</strong> pipeline.
+              Connect to MinIO object storage to route {supportsMediaInputs ? "image or video files" : "videos"} through the <strong>{useCaseLabel}</strong> pipeline.
               Supports Auto (continuous monitoring) and Manual (on-demand upload) modes.
             </p>
             <div className="mt-4 rounded-xl border border-brandBlue/10 bg-brandBlue/[0.02] p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-brandBlue">Demo Flow</div>
               <p className="mt-2 text-sm leading-6 text-slate-600">
-                Connect to MinIO → choose Auto or Manual mode → process videos through <strong>{useCaseLabel}</strong> → view outputs here.
+                Connect to MinIO → choose Auto or Manual mode → process {supportsMediaInputs ? "files" : "videos"} through <strong>{useCaseLabel}</strong> → view outputs here.
               </p>
             </div>
           </div>
@@ -549,7 +870,7 @@ export default function Integration({
 
         {!supportedUseCase && (
           <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm font-medium text-amber-800">
-            MinIO integration is available for <strong>PPE Detection</strong>, <strong>Region Alerts</strong>, and <strong>Fire Detection</strong>. Switch to one of those use cases to connect.
+            MinIO integration is not available for this use case yet. Switch to one of the currently supported use cases to connect.
           </div>
         )}
 
@@ -562,8 +883,8 @@ export default function Integration({
             </div>
             <p className="mt-3 text-sm text-slate-500">
               {isAutoMode
-                ? `Auto mode continuously monitors the MinIO input prefix and processes new ${useCaseLabel} videos automatically.`
-                : `Manual mode fetches videos already present in the MinIO input prefix and processes only the ${useCaseLabel} videos you select.`}
+                ? `Auto mode continuously monitors the MinIO input prefix and processes new ${useCaseLabel} ${supportsMediaInputs ? "files" : "videos"} automatically.`
+                : `Manual mode fetches ${supportsMediaInputs ? "files" : "videos"} already present in the MinIO input prefix and processes only the ${useCaseLabel} ${supportsMediaInputs ? "files" : "videos"} you select.`}
             </p>
           </div>
 
@@ -615,11 +936,38 @@ export default function Integration({
         </div>
       </section>
 
+      {isLegacyClasswiseCounting ? (
+        <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5 shadow-panel">
+          <div className="text-sm font-semibold text-amber-900">Legacy counting flow</div>
+          <p className="mt-2 text-sm leading-6 text-amber-900/80">
+            Class-wise counting is now included in Vehicle Analytics under Speed Estimation. This Integration screen remains available only for direct access and backward compatibility.
+          </p>
+        </section>
+      ) : null}
+
       {isSpeedEstimation && (
         <section className="rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] p-5 shadow-panel">
-          <div className="text-sm font-semibold text-slate-900">Speed Estimation Processing</div>
+          <div className="text-sm font-semibold text-slate-900">Vehicle Analytics Processing</div>
           <p className="mt-2 text-sm leading-6 text-slate-600">
-            Upload or select traffic/road videos. Processed outputs will include speed overlays and analytics when motion is detected.
+            Upload or select traffic and road videos. Processed outputs will include speed overlays, total vehicle counts, class-wise counts, crossed-line summaries, and overspeeding analytics.
+          </p>
+        </section>
+      )}
+
+      {isCrackDetection && (
+        <section className="rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] p-5 shadow-panel">
+          <div className="text-sm font-semibold text-slate-900">Crack Detection Processing</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Process construction and infrastructure videos from MinIO to detect visible surface cracks. Recent run analysis will show crack detections, affected frames, crack rate, and confidence summary.
+          </p>
+        </section>
+      )}
+
+      {isUnsafeBehaviorDetection && (
+        <section className="rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] p-5 shadow-panel">
+          <div className="text-sm font-semibold text-slate-900">Unsafe Behavior Detection Processing</div>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Smoking is detected with the fine-tuned smoking model. Phone usage is inferred using person + cell phone detection and an upper-body overlap rule. Recent run analysis will show event counts, confidence summary, and unsafe event details.
           </p>
         </section>
       )}
@@ -639,7 +987,16 @@ export default function Integration({
       )}
 
       {isAutoMode ? (
-        <IntegrationAutoPanel connection={connection} isConnected={integrationOverview.connected} isProcessing={integrationOverview.processing} useCaseLabel={useCaseLabel} />
+        <IntegrationAutoPanel
+          connection={connection}
+          isConnected={integrationOverview.connected}
+          isProcessing={integrationOverview.processing}
+          modelState={integrationModelState}
+          selectedModelMode={integrationAutoModelMode}
+          supportsMediaInputs={supportsMediaInputs}
+          useCaseLabel={useCaseLabel}
+          onModelModeChange={onIntegrationAutoModelModeChange}
+        />
       ) : (
         <IntegrationManualPanel
           connection={connection}
@@ -647,11 +1004,15 @@ export default function Integration({
           fetchCount={integrationFetchCount}
           fetchedVideos={integrationFetchedVideos}
           isFetching={isFetchingIntegrationVideos}
+          modelState={integrationModelState}
           isProcessing={isProcessingIntegrationVideos}
           fetchMessage={integrationFetchMessage}
           processMessage={integrationProcessMessage}
+          selectedModelMode={integrationManualModelMode}
           selectedVideos={selectedIntegrationVideos}
+          supportsMediaInputs={supportsMediaInputs}
           useCaseLabel={useCaseLabel}
+          onModelModeChange={onIntegrationManualModelModeChange}
           onFetchCountChange={onIntegrationFetchCountChange}
           onFetchVideos={onIntegrationFetchVideos}
           onProcessSelected={onIntegrationProcessSelected}

@@ -27,6 +27,18 @@ from use_cases.base import (
 # Vehicle classes in COCO: car=2, motorcycle=3, bus=5, truck=7
 VEHICLE_CLASSES = [2, 3, 5, 7]
 VEHICLE_NAMES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
+VEHICLE_NAME_ALIASES = {
+    "car": "car",
+    "vehicle": "car",
+    "sedan": "car",
+    "truck": "truck",
+    "lorry": "truck",
+    "bus": "bus",
+    "motorcycle": "motorcycle",
+    "motorbike": "motorcycle",
+    "bike": "motorcycle",
+}
+DEFAULT_VEHICLE_CLASS_NAMES = ["car", "motorcycle", "bus", "truck"]
 
 # Speed estimation parameters
 PIXELS_PER_METER = 8.0   # approximate calibration (adjustable)
@@ -64,6 +76,45 @@ class VehicleTracker:
         return self.speeds.get(track_id, 0.0)
 
 
+def normalize_vehicle_name(raw_name: str | int | None) -> str:
+    normalized = str(raw_name or "").strip().lower().replace("-", " ").replace("_", " ")
+    normalized = " ".join(normalized.split())
+    if normalized in VEHICLE_NAME_ALIASES:
+        return VEHICLE_NAME_ALIASES[normalized]
+    if normalized in DEFAULT_VEHICLE_CLASS_NAMES:
+        return normalized
+    return normalized or "vehicle"
+
+
+def vehicle_display_name(object_type: str) -> str:
+    value = normalize_vehicle_name(object_type)
+    if value == "motorcycle":
+        return "Motorcycle"
+    if value == "car":
+        return "Car"
+    if value == "bus":
+        return "Bus"
+    if value == "truck":
+        return "Truck"
+    return value.title()
+
+
+def ensure_class_count_keys(source: dict[str, int]) -> dict[str, int]:
+    return {name: int(source.get(name, 0)) for name in DEFAULT_VEHICLE_CLASS_NAMES}
+
+
+def resolve_vehicle_tracking_class_ids(model) -> list[int]:
+    raw_names = getattr(model, "names", {}) or {}
+    if isinstance(raw_names, list):
+        raw_names = {index: value for index, value in enumerate(raw_names)}
+    resolved = [
+        int(class_id)
+        for class_id, name in raw_names.items()
+        if normalize_vehicle_name(name) in DEFAULT_VEHICLE_CLASS_NAMES
+    ]
+    return resolved or list(VEHICLE_CLASSES)
+
+
 def process_video(
     *,
     input_path: str,
@@ -80,6 +131,7 @@ def process_video(
     out_p = build_output_path(input_p, output_path, "_speed")
 
     model = load_model(model_path)
+    vehicle_class_ids = resolve_vehicle_tracking_class_ids(model)
     tracker = VehicleTracker()
 
     cap = open_video(input_p)
@@ -88,10 +140,21 @@ def process_video(
     sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     writer = create_writer(out_p, sfps, fw, fh)
+    line_x = fw // 2
 
     frame_num = 0
     total_vehicles = 0
     seen_ids = set()
+    class_track_ids: dict[str, set[int]] = defaultdict(set)
+    class_crossed_ids: dict[str, set[int]] = defaultdict(set)
+    prev_positions: dict[int, float] = {}
+    crossed_ids: set[int] = set()
+    per_class_speed_samples: dict[str, list[float]] = defaultdict(list)
+    direction_by_track: dict[int, str] = {}
+    current_objects_by_class: dict[str, int] = defaultdict(int)
+    volume_windows: list[int] = []
+    window_count = 0
+    window_frames = max(1, int(sfps * 60))
     all_speeds = []
     speeding_count = 0
     track_summaries: dict[int, dict[str, float | int | str]] = {}
@@ -109,7 +172,7 @@ def process_video(
                 results = run_tracking_inference(
                     model,
                     frame,
-                    classes=VEHICLE_CLASSES,
+                    classes=vehicle_class_ids,
                     conf=conf,
                     iou=0.70,
                     device=device,
@@ -118,7 +181,8 @@ def process_video(
                 writer.write(frame)
                 continue
 
-            boxes, tids, class_ids, confs, _ = extract_detection_payload(results)
+            boxes, tids, class_ids, confs, names = extract_detection_payload(results)
+            current_objects_by_class = defaultdict(int)
 
             for i, bbox in enumerate(boxes):
                 x1, y1, x2, y2 = map(int, bbox)
@@ -129,16 +193,37 @@ def process_video(
 
                 tracker.update(tid, cx, cy, timestamp)
                 speed = tracker.get_speed(tid)
-                veh_name = VEHICLE_NAMES.get(cls_id, "Vehicle")
+                detected_name = names.get(cls_id, VEHICLE_NAMES.get(cls_id, cls_id)) if isinstance(names, dict) else VEHICLE_NAMES.get(cls_id, cls_id)
+                veh_type = normalize_vehicle_name(detected_name)
+                veh_name = vehicle_display_name(veh_type)
+                current_objects_by_class[veh_type] += 1
 
                 if tid not in seen_ids:
                     seen_ids.add(tid)
                     total_vehicles += 1
+                class_track_ids[veh_type].add(tid)
+
+                crossed_line = False
+                direction = direction_by_track.get(tid, "unknown")
+                if tid in prev_positions:
+                    prev_x = prev_positions[tid]
+                    if prev_x < line_x <= cx:
+                        direction = "left_to_right"
+                        direction_by_track[tid] = direction
+                        if tid not in crossed_ids:
+                            crossed_ids.add(tid)
+                            class_crossed_ids[veh_type].add(tid)
+                            crossed_line = True
+                            window_count += 1
+                    elif prev_x > line_x >= cx:
+                        direction = "right_to_left"
+                        direction_by_track[tid] = direction
+                prev_positions[tid] = cx
 
                 summary = track_summaries.setdefault(
                     tid,
                     {
-                        "object_type": veh_name.lower(),
+                        "object_type": veh_type,
                         "first_seen_frame": frame_num,
                         "last_seen_frame": frame_num,
                         "observations": 0,
@@ -147,17 +232,25 @@ def process_video(
                         "speed_sum": 0.0,
                         "speed_samples": 0,
                         "max_speed_kmh": 0.0,
+                        "crossed_line": False,
+                        "direction": "unknown",
                     },
                 )
+                if summary.get("object_type") in {None, "", "vehicle"} and veh_type != "vehicle":
+                    summary["object_type"] = veh_type
                 summary["last_seen_frame"] = frame_num
                 summary["observations"] = int(summary["observations"]) + 1
                 summary["confidence_sum"] = float(summary["confidence_sum"]) + conf_score
                 summary["confidence_max"] = max(float(summary["confidence_max"]), conf_score)
+                summary["direction"] = direction
+                if crossed_line:
+                    summary["crossed_line"] = True
                 if speed > 0:
                     summary["speed_sum"] = float(summary["speed_sum"]) + speed
                     summary["speed_samples"] = int(summary["speed_samples"]) + 1
                     summary["max_speed_kmh"] = max(float(summary["max_speed_kmh"]), speed)
                     all_speeds.append(speed)
+                    per_class_speed_samples[veh_type].append(speed)
 
                 is_speeding = speed > SPEED_LIMIT_KMH
 
@@ -174,16 +267,29 @@ def process_video(
                 if is_speeding:
                     draw_label(frame, "SPEEDING", x1, y2 + 18, C_RED)
 
+            if frame_num % window_frames == 0:
+                volume_windows.append(window_count)
+                window_count = 0
+
+            cv2.line(frame, (line_x, 0), (line_x, fh), C_CYAN, 2, cv2.LINE_AA)
+            cv2.putText(frame, "COUNT LINE", (line_x + 10, 30), FONT, 0.5, C_CYAN, 2, cv2.LINE_AA)
+
             # HUD
             fps_live = frame_num / max(1e-6, time.time() - t0)
             avg_speed = round(np.mean(all_speeds), 1) if all_speeds else 0.0
             max_speed = round(max(all_speeds), 1) if all_speeds else 0.0
+            class_wise_counts = ensure_class_count_keys({name: len(track_ids) for name, track_ids in class_track_ids.items()})
+            crossed_counts = ensure_class_count_keys({name: len(track_ids) for name, track_ids in class_crossed_ids.items()})
+            current_frame_counts = ensure_class_count_keys(current_objects_by_class)
 
-            draw_hud_panel(frame, "SPEED MONITOR", [
+            draw_hud_panel(frame, "VEHICLE ANALYTICS", [
                 (f"Vehicles:     {total_vehicles}", C_WHITE),
+                (f"Cars/Moto:    {class_wise_counts['car']}/{class_wise_counts['motorcycle']}", C_CYAN),
+                (f"Bus/Truck:    {class_wise_counts['bus']}/{class_wise_counts['truck']}", C_CYAN),
                 (f"Avg Speed:    {avg_speed} km/h", C_CYAN),
                 (f"Max Speed:    {max_speed} km/h", C_RED if max_speed > SPEED_LIMIT_KMH else C_GREEN),
                 (f"Violations:   {speeding_count}", C_RED if speeding_count > 0 else C_GREEN),
+                (f"Crossed:      {len(crossed_ids)}", C_BLUE),
                 (f"FPS:          {fps_live:.1f}", C_GRAY),
             ])
 
@@ -204,6 +310,9 @@ def process_video(
         if show:
             cv2.destroyAllWindows()
 
+    if frame_num % window_frames != 0:
+        volume_windows.append(window_count)
+
     if not os.path.isfile(out_p) or os.path.getsize(out_p) == 0:
         raise RuntimeError(f"Output missing or empty: {out_p}")
 
@@ -211,6 +320,20 @@ def process_video(
     processing_time_sec = round(time.time() - t0, 2)
     duration_sec = round(frame_num / sfps, 2) if sfps else None
     speed_summaries = []
+    class_wise_counts = ensure_class_count_keys({name: len(track_ids) for name, track_ids in class_track_ids.items()})
+    class_wise_crossed_counts = ensure_class_count_keys({name: len(track_ids) for name, track_ids in class_crossed_ids.items()})
+    current_objects_by_class_final = ensure_class_count_keys(current_objects_by_class)
+    per_class_speed_stats = {
+        name: {
+            "avg_speed_kmh": round(float(np.mean(samples)), 1) if samples else 0.0,
+            "max_speed_kmh": round(float(max(samples)), 1) if samples else 0.0,
+            "samples": len(samples),
+        }
+        for name, samples in {
+            vehicle_name: per_class_speed_samples.get(vehicle_name, [])
+            for vehicle_name in DEFAULT_VEHICLE_CLASS_NAMES
+        }.items()
+    }
 
     for track_id, summary in sorted(track_summaries.items()):
         max_speed = round(float(summary["max_speed_kmh"]), 1)
@@ -218,10 +341,11 @@ def process_video(
         avg_speed = round(float(summary["speed_sum"]) / max(1, speed_samples), 1) if speed_samples else 0.0
         detected_speed = max_speed if max_speed > 0 else avg_speed
         is_overspeeding = detected_speed > SPEED_LIMIT_KMH
+        object_type = normalize_vehicle_name(str(summary["object_type"]))
         speed_summaries.append(
             {
                 "object_id": str(track_id),
-                "object_type": str(summary["object_type"]),
+                "object_type": object_type,
                 "detected_speed_kmh": detected_speed,
                 "speed_limit_kmh": SPEED_LIMIT_KMH,
                 "is_overspeeding": is_overspeeding,
@@ -229,6 +353,9 @@ def process_video(
                 "confidence_score": round(float(summary["confidence_sum"]) / max(1, int(summary["observations"])), 4),
                 "status": "violation" if is_overspeeding else "normal",
                 "notes": "detected_speed_kmh uses pixel-displacement calibration and is derived from tracked motion.",
+                "crossed_line": bool(summary.get("crossed_line")),
+                "class_count_for_type": class_wise_counts.get(object_type, 0),
+                "direction": str(summary.get("direction") or "unknown"),
                 "metadata": {
                     "first_seen_frame": int(summary["first_seen_frame"]),
                     "last_seen_frame": int(summary["last_seen_frame"]),
@@ -239,6 +366,9 @@ def process_video(
                     "avg_speed_kmh": avg_speed,
                     "max_speed_kmh": max_speed,
                     "max_confidence": round(float(summary["confidence_max"]), 4),
+                    "crossed_line": bool(summary.get("crossed_line")),
+                    "direction": str(summary.get("direction") or "unknown"),
+                    "class_count_for_type": class_wise_counts.get(object_type, 0),
                 },
             }
         )
@@ -247,6 +377,9 @@ def process_video(
         "output_video": out_p,
         "metrics": {
             "total_vehicles": total_vehicles,
+            "class_wise_counts": class_wise_counts,
+            "crossed_vehicle_count": len(crossed_ids),
+            "class_wise_crossed_counts": class_wise_crossed_counts,
             "avg_speed_kmh": round(np.mean(unique_speeds), 1) if unique_speeds else 0.0,
             "max_speed_kmh": round(max(unique_speeds), 1) if unique_speeds else 0.0,
             "speeding_violations": speeding_count,
@@ -263,6 +396,13 @@ def process_video(
                 "processing_time_sec": processing_time_sec,
                 "simulated_timestamp": datetime.now(timezone.utc).isoformat(),
                 "zone_speed_limit_kmh": SPEED_LIMIT_KMH,
+                "total_vehicles": total_vehicles,
+                "class_wise_counts": class_wise_counts,
+                "crossed_vehicle_count": len(crossed_ids),
+                "class_wise_crossed_counts": class_wise_crossed_counts,
+                "current_objects_by_class": current_objects_by_class_final,
+                "per_class_speed_stats": per_class_speed_stats,
+                "peak_volume_window": max(volume_windows) if volume_windows else 0,
             },
             "speed_summaries": speed_summaries,
         },

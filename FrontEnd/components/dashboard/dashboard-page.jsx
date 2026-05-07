@@ -21,7 +21,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, AlertTriangle, Filter, Flame, HardHat, LayoutDashboard, Menu, Route, ShieldAlert, TimerReset, X } from "lucide-react";
+import { Activity, AlertTriangle, Filter, Flame, HardHat, LayoutDashboard, Menu, Route, ShieldAlert, Smartphone, TimerReset, X } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Button } from "../ui/button";
@@ -34,6 +34,8 @@ import { useFireData } from "../../src/hooks/useFireData";
 import { usePPEData } from "../../src/hooks/usePPEData";
 import { useRegionAlertsData } from "../../src/hooks/useRegionAlertsData";
 import { useSpeedEstimationData } from "../../src/hooks/useSpeedEstimationData";
+import { useCrackDetectionData } from "../../src/hooks/useCrackDetectionData";
+import { useUnsafeBehaviorData } from "../../src/hooks/useUnsafeBehaviorData";
 import { average, byTimestamp, formatDate, formatDateTime, formatSeconds, groupBy, shiftFromTimestamp, sortRows, sum, toneForStatus, uniqueOptions } from "./helpers";
 
 const chartPalette = ["#27235C", "#DE1B54", "#3D3880", "#F04E7A", "#6B6B8A", "#C8C6E8"];
@@ -344,6 +346,18 @@ function normalizeFireVideoSummary(row, index) {
 }
 
 function normalizeSpeedRow(row, index) {
+  const metadata =
+    row.metadata_json && typeof row.metadata_json === "string"
+      ? (() => {
+          try {
+            return JSON.parse(row.metadata_json);
+          } catch {
+            return {};
+          }
+        })()
+      : row.metadata_json && typeof row.metadata_json === "object"
+        ? row.metadata_json
+        : {};
   const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
   const speedLimit = Number(row.speed_limit ?? row.speed_limit_kmh ?? row.speedLimitKmh ?? row.zone_speed_limit_kmh ?? row.zoneSpeedLimitKmh ?? 0);
   const detectedSpeed = Number(row.estimated_speed ?? row.detected_speed_kmh ?? row.detectedSpeedKmh ?? 0);
@@ -365,6 +379,9 @@ function normalizeSpeedRow(row, index) {
         : excessSpeed > 0
           ? "Low"
           : "None";
+  const crossedValue = row.crossed_line ?? row.crossedLine ?? metadata.crossed_line;
+  const crossedLine =
+    crossedValue === true || crossedValue === 1 || String(crossedValue).toLowerCase() === "true" || String(crossedValue).toLowerCase() === "yes";
 
   return {
     id: row.output_id ?? row.id ?? `SE-${index + 1}`,
@@ -387,12 +404,116 @@ function normalizeSpeedRow(row, index) {
     confidenceScore: Number(row.confidence_score ?? row.confidence ?? row.confidenceScore ?? 0),
     violationType: row.violation_type ?? row.violationType ?? (isOverspeeding === "Yes" ? "overspeed" : ""),
     status: row.status ?? (isOverspeeding === "Yes" ? "Violation" : "Normal"),
+    crossedLine: crossedLine ? "Yes" : "No",
+    direction: String(row.direction ?? row.directionLabel ?? metadata.direction ?? "unknown").replaceAll("_", " "),
+    classCountForType: Number(row.class_count_for_type ?? row.classCountForType ?? metadata.class_count_for_type ?? 0),
     severity,
     speedPriority: (severity === "High" ? 1000 : severity === "Medium" ? 500 : severity === "Low" ? 200 : 0) + excessSpeed * 10 + detectedSpeed,
   };
 }
 
+function normalizeCrackRow(row, index) {
+  const metadata =
+    row.metadata_json && typeof row.metadata_json === "string"
+      ? (() => {
+          try {
+            return JSON.parse(row.metadata_json);
+          } catch {
+            return {};
+          }
+        })()
+      : row.metadata_json && typeof row.metadata_json === "object"
+        ? row.metadata_json
+        : {};
+  const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
+  const crackDetectedValue = row.crack_detected ?? row.crackDetected;
+  const crackDetected =
+    crackDetectedValue === true || crackDetectedValue === 1 || String(crackDetectedValue).toLowerCase() === "true" || String(crackDetectedValue).toLowerCase() === "yes";
+  const crackCount = Number(row.crack_count ?? row.crackCount ?? 0);
+  const maxConfidence = Number(row.max_confidence ?? row.maxConfidence ?? 0);
+  const severity = String(row.severity ?? metadata.severity ?? (maxConfidence >= 0.75 ? "high" : maxConfidence >= 0.5 ? "medium" : maxConfidence > 0 ? "low" : "none"));
+  const normalizedSeverity = severity.replace(/\b\w/g, (char) => char.toUpperCase());
+
+  return {
+    id: row.output_id ?? row.id ?? `CR-${index + 1}`,
+    inputId: row.input_id ?? row.inputId ?? "",
+    outputId: row.output_id ?? row.outputId ?? "",
+    timestamp,
+    simulatedTimestamp: row.simulated_timestamp ?? timestamp,
+    cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    location: row.location ?? "Construction Site A",
+    zone: row.zone ?? "Inspection Zone",
+    filename: row.filename ?? "",
+    crackDetected: crackDetected ? "Yes" : "No",
+    crackCount,
+    framesAnalyzed: Number(row.frames_analyzed ?? row.framesAnalyzed ?? 0),
+    framesWithCracks: Number(row.frames_with_cracks ?? row.framesWithCracks ?? 0),
+    crackRatePct: Number(row.crack_rate_pct ?? row.crackRatePct ?? 0),
+    maxConfidence,
+    avgConfidence: Number(row.avg_confidence ?? row.avgConfidence ?? 0),
+    severity: normalizedSeverity,
+    status: row.status ?? (crackDetected ? "cracks_detected" : "clear"),
+    outputVideoUrl: row.output_video_url ?? row.outputVideoUrl ?? "",
+    metadata,
+    crackPriority: (normalizedSeverity === "High" ? 1000 : normalizedSeverity === "Medium" ? 450 : normalizedSeverity === "Low" ? 180 : 0) + crackCount * 10 + maxConfidence,
+  };
+}
+
+function normalizeUnsafeBehaviorRow(row, index) {
+  const metadata =
+    row.metadata_json && typeof row.metadata_json === "string"
+      ? (() => {
+          try {
+            return JSON.parse(row.metadata_json);
+          } catch {
+            return {};
+          }
+        })()
+      : row.metadata_json && typeof row.metadata_json === "object"
+        ? row.metadata_json
+        : {};
+  const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
+  const severity = String(row.severity ?? metadata.severity ?? "low").replace(/\b\w/g, (char) => char.toUpperCase());
+  const eventType = String(row.event_type ?? row.eventType ?? "unsafe").replaceAll("_", " ");
+  const confidence = Number(row.confidence ?? row.confidence_score ?? row.confidenceScore ?? 0);
+
+  return {
+    id: row.output_id ?? row.id ?? `UB-${index + 1}`,
+    inputId: row.input_id ?? row.inputId ?? "",
+    outputId: row.output_id ?? row.outputId ?? "",
+    timestamp,
+    simulatedTimestamp: row.simulated_timestamp ?? timestamp,
+    cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    location: row.location ?? "Workplace A",
+    zone: row.zone ?? "Inspection Zone",
+    eventType: eventType.replace(/\b\w/g, (char) => char.toUpperCase()),
+    confidence,
+    severity,
+    source: String(row.source ?? metadata.source ?? ""),
+    frameNumber: Number(row.frame_number ?? row.frameNumber ?? 0),
+    timestampSec: Number(row.timestamp_sec ?? row.timestampSec ?? 0),
+    status: String(row.status ?? "unsafe"),
+    outputVideoUrl: row.output_video_url ?? row.outputVideoUrl ?? "",
+    totalUnsafeEvents: Number(row.total_unsafe_events ?? row.totalUnsafeEvents ?? 0),
+    smokingEvents: Number(row.smoking_events ?? row.smokingEvents ?? 0),
+    phoneUsageEvents: Number(row.phone_usage_events ?? row.phoneUsageEvents ?? 0),
+    framesAnalyzed: Number(row.frames_analyzed ?? row.framesAnalyzed ?? 0),
+    framesWithUnsafeBehavior: Number(row.frames_with_unsafe_behavior ?? row.framesWithUnsafeBehavior ?? 0),
+    unsafeRatePct: Number(row.unsafe_rate_pct ?? row.unsafeRatePct ?? 0),
+    maxConfidence: Number(row.max_confidence ?? row.maxConfidence ?? confidence),
+    avgConfidence: Number(row.avg_confidence ?? row.avgConfidence ?? confidence),
+    metadata,
+    unsafePriority: (severity === "High" ? 1000 : severity === "Medium" ? 450 : severity === "Low" ? 180 : 0) + confidence * 100 + (row.frame_number ?? 0),
+  };
+}
+
+function countUniqueSpeedObjects(items) {
+  return new Set(items.map((item) => `${item.inputId || item.input_id || "row"}:${item.objectId || item.object_id || item.id}`)).size;
+}
+
 const icons = {
+  "crack-detection": AlertTriangle,
+  "unsafe-behavior-detection": ShieldAlert,
   "region-alerts": ShieldAlert,
   "queue-management": Activity,
   "speed-estimation": Route,
@@ -431,7 +552,7 @@ function getGlobalFilters(rows, slug) {
     zone: [],
     cameraId: [],
   };
-  if ((slug === "region-alerts" || slug === "fire-detection" || slug === "ppe-detection" || slug === "speed-estimation") && rows.length) {
+  if ((slug === "region-alerts" || slug === "fire-detection" || slug === "ppe-detection" || slug === "speed-estimation" || slug === "crack-detection" || slug === "unsafe-behavior-detection") && rows.length) {
     const latest = [...rows]
       .sort((a, b) => new Date(a.timestamp || a.entry_time || a.entryTime) - new Date(b.timestamp || b.entry_time || b.entryTime))
       .at(-1);
@@ -439,7 +560,7 @@ function getGlobalFilters(rows, slug) {
     if (latestTimestamp) {
       const to = new Date(latestTimestamp);
       const from = new Date(to);
-      if (slug === "ppe-detection" || slug === "speed-estimation") {
+      if (slug === "ppe-detection" || slug === "speed-estimation" || slug === "crack-detection" || slug === "unsafe-behavior-detection") {
         from.setDate(to.getDate() - 1);
       } else {
         from.setDate(to.getDate() - 6);
@@ -471,6 +592,8 @@ function initialSortStateFor(slug, columns) {
   if (slug === "region-alerts") return { key: "escalationPriority", direction: "desc" };
   if (slug === "fire-detection") return { key: "firePriority", direction: "desc" };
   if (slug === "speed-estimation") return { key: "speedPriority", direction: "desc" };
+  if (slug === "crack-detection") return { key: "crackPriority", direction: "desc" };
+  if (slug === "unsafe-behavior-detection") return { key: "unsafePriority", direction: "desc" };
   return { key: columns[0].key, direction: "asc" };
 }
 
@@ -945,6 +1068,20 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
     }
     case "speed-estimation": {
       const violationRows = rows.filter((row) => row.isOverspeeding === "Yes");
+      const classWiseVehicleCounts = aggregateBy(rows, "objectType", () => 1, sum)
+        .map((item, index) => ({
+          label: item.label,
+          value: item.value,
+          barFill: chartPalette[index % chartPalette.length],
+        }))
+        .sort((a, b) => b.value - a.value);
+      const classWiseCrossedCounts = aggregateBy(rows.filter((row) => row.crossedLine === "Yes"), "objectType", () => 1, sum)
+        .map((item, index) => ({
+          label: item.label,
+          value: item.value,
+          barFill: [ "#DE1B54", "#27235C", "#F04E7A", "#3D3880", "#6B6B8A", "#C8C6E8" ][index % 6],
+        }))
+        .sort((a, b) => b.value - a.value);
       const byZoneCounts = aggregateBy(violationRows, "zone", () => 1, sum)
         .map((item) => ({ label: item.label, value: item.value }))
         .sort((a, b) => b.value - a.value);
@@ -992,9 +1129,150 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           xAxisLabel="Timestamp"
           yAxisLabel="Detected Speed (km/h)"
         />,
-        <BarChartCard key="3" title="Violations by Object Type" description="Reveals which moving object categories contribute most to unsafe speed behavior." data={byType} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
-        <DonutChartCard key="4" title="Violation vs Normal Distribution" description="Summarizes how much of total monitored movement is within safe limits versus violating limits." data={donut} showSlicePercent />,
-        <DonutChartCard key="5" title="Violation Severity Distribution" description="Shows how far above the configured speed limit violating detections are, using rule-based severity bands." data={severityData} showSlicePercent />,
+        <BarChartCard key="3" title="Class-wise Vehicle Count" description="Unique vehicle analytics rows grouped by detected vehicle class for the selected filters." data={classWiseVehicleCounts} bars={[{ dataKey: "value", color: "#27235C" }]} xAxisLabel="Vehicle Class" yAxisLabel="Vehicle Count" cellFillForBar="value" showLegend={false} />,
+        <BarChartCard key="4" title="Class-wise Crossed Count" description="Vehicles that crossed the counting line, grouped by vehicle class when crossed-line data is available." data={classWiseCrossedCounts} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Vehicle Class" yAxisLabel="Crossed Count" cellFillForBar="value" showLegend={false} />,
+        <BarChartCard key="5" title="Violations by Object Type" description="Reveals which moving object categories contribute most to unsafe speed behavior." data={byType} bars={[{ dataKey: "value", color: "#DE1B54" }]} xAxisLabel="Object Type" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
+        <DonutChartCard key="6" title="Violation vs Normal Distribution" description="Summarizes how much of total monitored movement is within safe limits versus violating limits." data={donut} showSlicePercent />,
+        <DonutChartCard key="7" title="Violation Severity Distribution" description="Shows how far above the configured speed limit violating detections are, using rule-based severity bands." data={severityData} showSlicePercent />,
+      ];
+    }
+    case "crack-detection": {
+      const severityData = ["High", "Medium", "Low"].map((label, index) => ({
+        label,
+        value: rows.filter((row) => row.severity === label).length,
+        color: ["#DE1B54", "rgba(222, 27, 84, 0.6)", "#27235C"][index],
+      }));
+      const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
+        label,
+        inspectedItems: items.length,
+        crackDetected: items.filter((item) => item.crackDetected === "Yes").length,
+        crackCount: sum(items.map((item) => item.crackCount)),
+      }));
+      const byLocation = Object.entries(groupBy(rows, "location"))
+        .map(([label, items]) => ({
+          label,
+          crackCount: sum(items.map((item) => item.crackCount)),
+          crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
+          totalDetected: items.filter((item) => item.crackDetected === "Yes").length,
+        }))
+        .sort((a, b) => b.crackCount - a.crackCount);
+      const byCamera = Object.entries(groupBy(rows, "cameraId"))
+        .map(([label, items]) => ({
+          label,
+          crackCount: sum(items.map((item) => item.crackCount)),
+          crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.crackCount - a.crackCount)
+        .slice(0, 8);
+
+      return [
+        <DonutChartCard key="1" title="Severity Distribution" description="Shows the split of low, medium, and high-severity crack findings in the selected inspection set." data={severityData} showSlicePercent />,
+        <LineChartCard
+          key="2"
+          title="Crack Detection Trend"
+          description="Tracks how many inspections reported cracks and how many total crack detections were produced over time."
+          data={trend}
+          lines={[
+            { dataKey: "crackDetected", color: "#27235C" },
+            { dataKey: "crackCount", color: "#DE1B54" },
+          ]}
+          xAxisLabel={granularity}
+          yAxisLabel="Crack Events"
+        />,
+        <BarChartCard
+          key="3"
+          title="Location Crack Breakdown"
+          description="Compares inspected locations by total crack detections and highlights where crack activity is concentrating."
+          data={byLocation}
+          bars={[{ dataKey: "crackCount", color: "#DE1B54", showLabels: true }]}
+          xAxisLabel="Location"
+          yAxisLabel="Crack Detections"
+          showLegend={false}
+        />,
+        <BarChartCard
+          key="4"
+          title="Camera Crack Breakdown"
+          description="Shows which cameras are contributing the most crack findings across the filtered inspection window."
+          data={byCamera}
+          bars={[{ dataKey: "crackCount", color: "#27235C", showLabels: true }]}
+          xAxisLabel="Crack Detections"
+          yAxisLabel="Camera ID"
+          layout="horizontal"
+          showLegend={false}
+        />,
+      ];
+    }
+    case "unsafe-behavior-detection": {
+      const eventTypeDistribution = [
+        { label: "Smoking", value: rows.filter((row) => row.eventType === "Smoking").length, color: "#DE1B54" },
+        { label: "Phone Usage", value: rows.filter((row) => row.eventType === "Phone Usage").length, color: "#27235C" },
+      ];
+      const severityData = ["High", "Medium", "Low"].map((label, index) => ({
+        label,
+        value: rows.filter((row) => row.severity === label).length,
+        color: ["#DE1B54", "rgba(222, 27, 84, 0.6)", "#27235C"][index],
+      }));
+      const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
+        label,
+        smokingCount: items.filter((item) => item.eventType === "Smoking").length,
+        phoneUsageCount: items.filter((item) => item.eventType === "Phone Usage").length,
+        totalUnsafeCount: items.length,
+      }));
+      const byLocation = Object.entries(groupBy(rows, "location"))
+        .map(([label, items]) => ({
+          label,
+          unsafeEventCount: items.length,
+          smokingCount: items.filter((item) => item.eventType === "Smoking").length,
+          phoneUsageCount: items.filter((item) => item.eventType === "Phone Usage").length,
+        }))
+        .sort((a, b) => b.unsafeEventCount - a.unsafeEventCount);
+      const byCamera = Object.entries(groupBy(rows, "cameraId"))
+        .map(([label, items]) => ({
+          label,
+          unsafeEventCount: items.length,
+          smokingCount: items.filter((item) => item.eventType === "Smoking").length,
+          phoneUsageCount: items.filter((item) => item.eventType === "Phone Usage").length,
+        }))
+        .sort((a, b) => b.unsafeEventCount - a.unsafeEventCount)
+        .slice(0, 8);
+
+      return [
+        <DonutChartCard key="1" title="Event Type Distribution" description="Shows the split between smoking incidents and mobile phone usage incidents." data={eventTypeDistribution} showSlicePercent />,
+        <DonutChartCard key="2" title="Severity Distribution" description="Shows the low, medium, and high-severity mix across unsafe behavior events." data={severityData} showSlicePercent />,
+        <LineChartCard
+          key="3"
+          title="Unsafe Event Trend"
+          description="Tracks smoking, phone usage, and total unsafe events over time."
+          data={trend}
+          lines={[
+            { dataKey: "smokingCount", color: "#DE1B54" },
+            { dataKey: "phoneUsageCount", color: "#27235C" },
+            { dataKey: "totalUnsafeCount", color: "#3D3880" },
+          ]}
+          xAxisLabel={granularity}
+          yAxisLabel="Unsafe Event Count"
+        />,
+        <BarChartCard
+          key="4"
+          title="Location Unsafe Breakdown"
+          description="Compares locations by unsafe event count and shows the split between smoking and phone usage."
+          data={byLocation}
+          bars={[{ dataKey: "unsafeEventCount", color: "#27235C", showLabels: true }]}
+          xAxisLabel="Location"
+          yAxisLabel="Unsafe Event Count"
+          showLegend={false}
+        />,
+        <BarChartCard
+          key="5"
+          title="Camera Unsafe Breakdown"
+          description="Shows which cameras are contributing the most unsafe behavior detections."
+          data={byCamera}
+          bars={[{ dataKey: "unsafeEventCount", color: "#DE1B54", showLabels: true }]}
+          xAxisLabel="Unsafe Event Count"
+          yAxisLabel="Camera ID"
+          layout="horizontal"
+          showLegend={false}
+        />,
       ];
     }
     case "fire-detection": {
@@ -1167,11 +1445,12 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
 }
 
 const DASHBOARD_NAV = [
+  ["crack-detection", "Crack Detection"],
+  ["unsafe-behavior-detection", "Unsafe Behavior"],
   ["region-alerts", "Region Alerts"],
   ["queue-management", "Queue Management"],
-  ["speed-estimation", "Speed Estimation"],
+  ["speed-estimation", "Vehicle Analytics"],
   ["fire-detection", "Fire Detection"],
-  ["class-wise-counting", "Class-Wise Counting"],
   ["object-tracking", "Object Tracking"],
   ["ppe-detection", "PPE Detection"],
 ];
@@ -1179,6 +1458,8 @@ const DASHBOARD_NAV = [
 function getMultiSelectKeys(slug) {
   const baseKeys = ["zone"];
   const dashboardSpecific = {
+    "crack-detection": ["cameraId", "severity"],
+    "unsafe-behavior-detection": ["cameraId", "eventType", "severity"],
     "region-alerts": ["cameraId", "severity", "zoneType", "shift"],
     "queue-management": ["cameraId", "counterId"],
     "speed-estimation": ["cameraId", "objectType", "speedLimitKmh", "severity"],
@@ -1211,7 +1492,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const resolvedExtraFilterDefs = resolvedDefinition.extraFilterDefs;
   const Icon = icons[slug] ?? LayoutDashboard;
   const skeletonLoading = useLoadingSkeleton();
-  const usesLiveDashboardData = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts" || slug === "speed-estimation";
+  const usesLiveDashboardData = slug === "ppe-detection" || slug === "fire-detection" || slug === "region-alerts" || slug === "speed-estimation" || slug === "crack-detection" || slug === "unsafe-behavior-detection";
   const initialRows = usesLiveDashboardData ? [] : rows;
   const [filters, setFilters] = useState(() => getGlobalFilters(initialRows, slug));
   const [extraFilters, setExtraFilters] = useState(() => getInitialExtraFilters(slug, resolvedExtraFilterDefs, initialRows));
@@ -1228,10 +1509,14 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const { data: ppeApiData, loading: ppeApiLoading, error: ppeApiError } = usePPEData({}, slug === "ppe-detection");
   const { data: regionApiData, loading: regionApiLoading, error: regionApiError } = useRegionAlertsData({}, slug === "region-alerts");
   const { data: speedApiData, loading: speedApiLoading, error: speedApiError } = useSpeedEstimationData({}, slug === "speed-estimation");
+  const { data: crackApiData, loading: crackApiLoading, error: crackApiError } = useCrackDetectionData({}, slug === "crack-detection");
+  const { data: unsafeApiData, loading: unsafeApiLoading, error: unsafeApiError } = useUnsafeBehaviorData({}, slug === "unsafe-behavior-detection");
 
   const sourceRows = useMemo(() => {
     if (slug === "ppe-detection") return ppeApiData.map(normalizePPERecord);
     if (slug === "speed-estimation") return speedApiData.map(normalizeSpeedRow);
+    if (slug === "crack-detection") return crackApiData.map(normalizeCrackRow);
+    if (slug === "unsafe-behavior-detection") return unsafeApiData.map(normalizeUnsafeBehaviorRow);
     if (slug === "fire-detection") {
       return fireApiData.map(normalizeFireVideoSummary);
     }
@@ -1239,7 +1524,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       return regionApiData.map(normalizeRegionAlertRow);
     }
     return rows;
-  }, [slug, fireApiData, ppeApiData, regionApiData, speedApiData, rows]);
+  }, [slug, fireApiData, ppeApiData, regionApiData, speedApiData, crackApiData, unsafeApiData, rows]);
 
   const effectiveSourceRows = useMemo(() => {
     if (slug !== "region-alerts" || usesLiveDashboardData) return sourceRows;
@@ -1273,8 +1558,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
 
   useEffect(() => {
     if (!usesLiveDashboardData || liveFiltersInitialized) return;
-    const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : ppeApiLoading;
-    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : slug === "speed-estimation" ? speedApiData : ppeApiData;
+    const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : slug === "crack-detection" ? crackApiLoading : slug === "unsafe-behavior-detection" ? unsafeApiLoading : ppeApiLoading;
+    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : slug === "speed-estimation" ? speedApiData : slug === "crack-detection" ? crackApiData : slug === "unsafe-behavior-detection" ? unsafeApiData : ppeApiData;
     if (liveLoading || liveRows.length === 0) return;
     setFilters(getGlobalFilters(liveRows, slug));
     setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, liveRows));
@@ -1288,16 +1573,20 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     ppeApiLoading,
     regionApiLoading,
     speedApiLoading,
+    crackApiLoading,
+    unsafeApiLoading,
     fireApiData,
     ppeApiData,
     regionApiData,
     speedApiData,
+    crackApiData,
+    unsafeApiData,
     resolvedExtraFilterDefs,
     resolvedColumns,
   ]);
 
-  const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : ppeApiLoading) : false;
-  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : ppeApiError) : "";
+  const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : slug === "crack-detection" ? crackApiLoading : slug === "unsafe-behavior-detection" ? unsafeApiLoading : ppeApiLoading) : false;
+  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : slug === "crack-detection" ? crackApiError : slug === "unsafe-behavior-detection" ? unsafeApiError : ppeApiError) : "";
   const loading = skeletonLoading || dataLoading;
 
   const filterDefs = [
@@ -1502,7 +1791,21 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
           {slug === "speed-estimation" ? (
             <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
               <CardContent className="p-4 text-sm text-slate-700">
-                <span className="font-semibold text-slate-900">Speed Estimation note.</span> Speed values depend on camera calibration and scene geometry.
+                <span className="font-semibold text-slate-900">Vehicle Analytics note.</span> Speed values depend on camera calibration and scene geometry, while vehicle counts and crossed-line totals reflect tracked detections captured for this run.
+              </CardContent>
+            </Card>
+          ) : null}
+          {slug === "crack-detection" ? (
+            <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
+              <CardContent className="p-4 text-sm text-slate-700">
+                <span className="font-semibold text-slate-900">Crack Detection note.</span> This dashboard reflects crack inspection results stored from Integration processing, including crack counts, severity, and confidence signals per inspected item.
+              </CardContent>
+            </Card>
+          ) : null}
+          {slug === "unsafe-behavior-detection" ? (
+            <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
+              <CardContent className="p-4 text-sm text-slate-700">
+                <span className="font-semibold text-slate-900">Unsafe Behavior note.</span> This dashboard reflects smoking and mobile phone usage incidents stored from Integration processing, including severity, confidence, source, and per-event timing.
               </CardContent>
             </Card>
           ) : null}
@@ -1655,9 +1958,13 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                         ? "No PPE records available yet"
                         : slug === "region-alerts"
                           ? "No Region Alerts records available yet"
-                          : slug === "speed-estimation"
-                            ? "No Speed Estimation records available yet"
-                            : "No fire or smoke alerts available yet"}
+                        : slug === "speed-estimation"
+                            ? "No Vehicle Analytics records available yet"
+                            : slug === "crack-detection"
+                              ? "No crack inspection results yet"
+                              : slug === "unsafe-behavior-detection"
+                                ? "No unsafe behavior results yet"
+                              : "No fire or smoke alerts available yet"}
                     </p>
                     <p className="mt-2 text-sm text-muted">
                       {slug === "ppe-detection"
@@ -1665,7 +1972,11 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                         : slug === "region-alerts"
                           ? "Process a Region Alerts video to populate the database. The dashboard will refresh automatically every 5 seconds."
                           : slug === "speed-estimation"
-                            ? "Process a Speed Estimation video to populate the database. The dashboard will refresh automatically every 5 seconds."
+                            ? "Process a speed-estimation video to populate vehicle counts, crossed-line analytics, and speed KPIs. The dashboard will refresh automatically every 5 seconds."
+                            : slug === "crack-detection"
+                              ? "No crack inspection results yet. Process crack images or videos from the Integration tab."
+                              : slug === "unsafe-behavior-detection"
+                                ? "No unsafe behavior results yet. Process workplace images or videos from the Integration tab."
                           : "Process a fire or smoke video to populate the database. The dashboard will refresh automatically every 5 seconds."}
                     </p>
                   </CardContent>
@@ -1791,8 +2102,20 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
           {!showLiveEmptyState ? (
           <Card>
             <CardHeader>
-              <CardTitle>Filtered Records</CardTitle>
-              <CardDescription>Sortable detailed records for the current filter selection.</CardDescription>
+              <CardTitle>
+                {slug === "crack-detection"
+                  ? "Recent Crack Events"
+                  : slug === "unsafe-behavior-detection"
+                    ? "Recent Unsafe Events"
+                    : "Filtered Records"}
+              </CardTitle>
+              <CardDescription>
+                {slug === "crack-detection"
+                  ? "Sortable recent crack inspection events for the current filter selection."
+                  : slug === "unsafe-behavior-detection"
+                    ? "Sortable recent smoking and mobile phone usage events for the current filter selection."
+                    : "Sortable detailed records for the current filter selection."}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <DataTable
@@ -1806,6 +2129,10 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       ? (row) => (row.isLatestDemoAlert ? "bg-brand-red-tint/90" : row.severity === "High" ? "bg-brand-red-tint/60" : "")
                       : slug === "speed-estimation"
                         ? (row) => (row.status === "Violation" ? "bg-brand-red-tint/40" : "")
+                        : slug === "crack-detection"
+                          ? (row) => (row.crackDetected === "Yes" ? "bg-brand-red-tint/35" : "")
+                          : slug === "unsafe-behavior-detection"
+                            ? (row) => (row.status === "unsafe" || row.status === "unsafe_detected" ? "bg-brand-red-tint/35" : "")
                         : slug === "ppe-detection"
                           ? (row) => (row.complianceStatus === "FAIL" ? "bg-brand-red-tint/35" : "")
                     : undefined
@@ -2006,7 +2333,7 @@ export function buildDashboardDefinition(slug, rows, info) {
       ],
     },
     "speed-estimation": {
-      title: "Industrial Movement Speed Risk Monitor",
+      title: "Vehicle Analytics Dashboard",
       description: info,
       extraFilterDefs: [
         { key: "objectType", label: "Object Type" },
@@ -2015,13 +2342,43 @@ export function buildDashboardDefinition(slug, rows, info) {
         { key: "severity", label: "Severity" },
       ],
       metricDefs: [
-        { label: "Total Detected Objects", icon: LayoutDashboard, compute: (items) => items.length, format: String, subtext: "All tracked movement detections in the selected period." },
-        { label: "Speed Violation Events", icon: AlertTriangle, compute: (items) => items.filter((item) => item.isOverspeeding === "Yes").length, format: String, subtext: "Detections traveling above the configured zone speed limit.", valueClassName: () => "text-brand-red" },
-        { label: "Violation Rate", icon: Activity, compute: (items) => (items.length ? (items.filter((item) => item.isOverspeeding === "Yes").length / items.length) * 100 : 0), format: (value) => `${Number(value || 0).toFixed(1)}%`, subtext: "Share of monitored movement occurring above safe speed." },
-        { label: "Average Detected Speed", icon: Activity, compute: (items) => average(items.map((item) => item.detectedSpeedKmh)), format: (value) => `${Number(value || 0).toFixed(1)} km/h`, subtext: "Average movement speed across all tracked objects." },
-        { label: "Maximum Speed Recorded", icon: Activity, compute: (items) => (items.length ? Math.max(...items.map((item) => item.detectedSpeedKmh)) : 0), format: (value) => `${value} km/h`, subtext: "Fastest object detected during the selected monitoring window.", valueClassName: () => "text-brand-red" },
-        { label: "Most Violated Zone", icon: AlertTriangle, compute: (items) => Object.entries(groupBy(items.filter((item) => item.isOverspeeding === "Yes"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String, subtext: "Area showing the most overspeed detections." },
-        { label: "Highest-Risk Object Type", icon: Route, compute: (items) => Object.entries(groupBy(items.filter((item) => item.isOverspeeding === "Yes"), "objectType")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String, subtext: "Object category most often exceeding safe speed." },
+        {
+          label: "Total Vehicles",
+          icon: LayoutDashboard,
+          compute: (items) => countUniqueSpeedObjects(items),
+          format: String,
+          subtext: "Unique tracked vehicles across the selected monitoring window.",
+        },
+        {
+          label: "Average Speed",
+          icon: Activity,
+          compute: (items) => average(items.map((item) => item.detectedSpeedKmh)),
+          format: (value) => `${Number(value || 0).toFixed(1)} km/h`,
+          subtext: "Average detected speed across tracked vehicles.",
+        },
+        {
+          label: "Maximum Speed",
+          icon: Activity,
+          compute: (items) => (items.length ? Math.max(...items.map((item) => item.detectedSpeedKmh)) : 0),
+          format: (value) => `${Number(value || 0).toFixed(1)} km/h`,
+          subtext: "Fastest tracked vehicle in the current filtered dataset.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Speeding Violations",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => item.isOverspeeding === "Yes").length,
+          format: String,
+          subtext: "Vehicles traveling above the configured zone speed limit.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Crossed Vehicles",
+          icon: Route,
+          compute: (items) => items.filter((item) => item.crossedLine === "Yes").length,
+          format: String,
+          subtext: "Vehicles that crossed the counting line during the selected period.",
+        },
       ],
       columns: [
         { key: "timestamp", label: "Timestamp", sortable: true, render: formatDateTime },
@@ -2034,8 +2391,152 @@ export function buildDashboardDefinition(slug, rows, info) {
         { key: "speedLimitKmh", label: "Speed Limit (km/h)", sortable: true },
         { key: "isOverspeeding", label: "Overspeeding", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Violation" : "Normal") },
         { key: "excessSpeedKmh", label: "Excess Speed (km/h)", sortable: true },
+        { key: "crossedLine", label: "Crossed Line", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Crossed" : "Not crossed") },
+        { key: "direction", label: "Direction", sortable: true, render: (value) => String(value || "unknown").replace(/\b\w/g, (char) => char.toUpperCase()) },
+        { key: "classCountForType", label: "Class Count", sortable: true },
         { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "warning" : value === "Low" ? "alert" : "normal"}>{value}</Badge> },
         { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "status", label: "Status", sortable: true, render: badgeRender },
+      ],
+    },
+    "crack-detection": {
+      title: "Crack Detection Dashboard",
+      description: info,
+      extraFilterDefs: [
+        { key: "severity", label: "Severity" },
+        { key: "status", label: "Status" },
+      ],
+      metricDefs: [
+        {
+          label: "Total Inspected Items",
+          icon: LayoutDashboard,
+          compute: (items) => items.length,
+          format: String,
+          subtext: "Processed crack inspection images or videos in the selected window.",
+        },
+        {
+          label: "Crack Detected",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => item.crackDetected === "Yes").length,
+          format: String,
+          subtext: "Inspected items where at least one crack was detected.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Crack Rate",
+          icon: Activity,
+          compute: (items) => (items.length ? (items.filter((item) => item.crackDetected === "Yes").length / items.length) * 100 : 0),
+          format: (value) => `${Number(value || 0).toFixed(1)}%`,
+          subtext: "Share of inspected items with at least one crack detection.",
+        },
+        {
+          label: "Total Crack Detections",
+          icon: AlertTriangle,
+          compute: (items) => sum(items.map((item) => item.crackCount)),
+          format: String,
+          subtext: "Total crack bounding boxes detected across the filtered inspection set.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Average Confidence",
+          icon: Activity,
+          compute: (items) => average(items.map((item) => item.avgConfidence)),
+          format: (value) => `${(Number(value || 0) * 100).toFixed(1)}%`,
+          subtext: "Average model confidence on crack-positive inspections.",
+        },
+        {
+          label: "High Severity Cracks",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => item.severity === "High").length,
+          format: String,
+          subtext: "Items where the strongest crack signal is currently marked high severity.",
+          valueClassName: () => "text-brand-red",
+        },
+      ],
+      columns: [
+        { key: "timestamp", label: "Time", sortable: true, render: formatDateTime },
+        { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "location", label: "Location", sortable: true },
+        { key: "zone", label: "Zone", sortable: true },
+        { key: "crackDetected", label: "Crack Detected", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Detected" : "Clear") },
+        { key: "crackCount", label: "Crack Count", sortable: true },
+        { key: "framesAnalyzed", label: "Frames Analyzed", sortable: true },
+        { key: "crackRatePct", label: "Crack Rate", sortable: true, render: (value) => `${Number(value || 0).toFixed(1)}%` },
+        { key: "maxConfidence", label: "Max Confidence", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "avgConfidence", label: "Average Confidence", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "warning" : value === "Low" ? "alert" : "normal"}>{value}</Badge> },
+        { key: "status", label: "Status", sortable: true, render: badgeRender },
+      ],
+    },
+    "unsafe-behavior-detection": {
+      title: "Unsafe Behavior Dashboard",
+      description: info,
+      extraFilterDefs: [
+        { key: "eventType", label: "Event Type" },
+        { key: "severity", label: "Severity" },
+        { key: "status", label: "Status" },
+      ],
+      metricDefs: [
+        {
+          label: "Total Inspected Items",
+          icon: LayoutDashboard,
+          compute: (items) => new Set(items.map((item) => item.inputId)).size,
+          format: String,
+          subtext: "Processed workplace images or videos in the selected monitoring window.",
+        },
+        {
+          label: "Total Unsafe Events",
+          icon: ShieldAlert,
+          compute: (items) => items.length,
+          format: String,
+          subtext: "All smoking and phone usage incidents detected for the current filters.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Smoking Events",
+          icon: Flame,
+          compute: (items) => items.filter((item) => item.eventType === "Smoking").length,
+          format: String,
+          subtext: "Unsafe events classified as smoking incidents.",
+          valueClassName: () => "text-brand-red",
+        },
+        {
+          label: "Phone Usage Events",
+          icon: Smartphone,
+          compute: (items) => items.filter((item) => item.eventType === "Phone Usage").length,
+          format: String,
+          subtext: "Unsafe events classified as mobile phone usage.",
+        },
+        {
+          label: "Unsafe Rate",
+          icon: Activity,
+          compute: (items) => {
+            const uniqueInputs = new Set(items.map((item) => item.inputId)).size;
+            return uniqueInputs ? (items.length / uniqueInputs) * 100 : 0;
+          },
+          format: (value) => `${Number(value || 0).toFixed(1)}%`,
+          subtext: "Average unsafe event volume per processed item in the filtered set.",
+        },
+        {
+          label: "High Severity Events",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => item.severity === "High").length,
+          format: String,
+          subtext: "Unsafe events currently tagged as high severity.",
+          valueClassName: () => "text-brand-red",
+        },
+      ],
+      columns: [
+        { key: "timestamp", label: "Time", sortable: true, render: formatDateTime },
+        { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "location", label: "Location", sortable: true },
+        { key: "zone", label: "Zone", sortable: true },
+        { key: "eventType", label: "Event Type", sortable: true, render: badgeRender },
+        { key: "confidence", label: "Confidence", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "warning" : value === "Low" ? "alert" : "normal"}>{value}</Badge> },
+        { key: "source", label: "Source", sortable: true },
+        { key: "frameNumber", label: "Frame", sortable: true },
+        { key: "timestampSec", label: "Frame Time (sec)", sortable: true, render: (value) => Number(value || 0).toFixed(2) },
         { key: "status", label: "Status", sortable: true, render: badgeRender },
       ],
     },

@@ -385,7 +385,7 @@ export function runDatasetAudit(state) {
       eta: "Ready to train",
       plain_english_status:
         "The dataset has been checked. We can now convert formats, generate clean splits, and begin guided training when you are ready.",
-      next_up: "Choose what matters most, then pick how deep the tuning run should go.",
+      next_up: "Pick a starting model, then choose how deep the tuning run should go.",
       activity_feed: [
         { id: "job-activity-audit", time: "Just now", title: "Data check finished", detail: "The dataset passed the first health check and is ready for the next step." },
         ...state.trainingJob.activity_feed,

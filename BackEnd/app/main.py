@@ -35,28 +35,34 @@ from app.core.database import (
     list_integration_runs,
     list_jobs,
     replace_class_wise_object_counting_outputs,
+    replace_crack_detection_outputs,
     replace_fire_detection_outputs,
     replace_object_tracking_outputs,
     replace_ppe_detection_outputs,
     replace_queue_management_outputs,
     replace_region_alert_outputs,
     replace_speed_estimation_outputs,
+    replace_unsafe_behavior_outputs,
     upsert_class_wise_object_counting_input,
+    upsert_crack_detection_input,
     upsert_fire_detection_input,
     upsert_object_tracking_input,
     upsert_ppe_detection_input,
     upsert_queue_management_input,
     upsert_region_alert_input,
     upsert_speed_estimation_input,
+    upsert_unsafe_behavior_input,
     update_integration_run,
     update_job,
     upsert_integration_run,
 )
 from app.core.minio_integration import (
+    IMAGE_EXTENSIONS as MINIO_IMAGE_EXTENSIONS,
     MinioConnectionConfig,
     build_output_object_key,
     build_presigned_get_url,
     create_client,
+    list_media_objects,
     list_video_objects,
     normalize_endpoint,
     normalize_prefix,
@@ -65,6 +71,7 @@ from app.core.minio_integration import (
 )
 from app.schemas.job import UseCaseInfo, VideoJobResponse
 from app.schemas.integration import (
+    IntegrationModelStateResponse,
     IntegrationRunItem,
     IntegrationVideoItem,
     MinioConnectRequest,
@@ -75,6 +82,13 @@ from app.schemas.integration import (
     MinioProcessSelectedResponse,
     MinioUploadItem,
     MinioUploadResponse,
+)
+from app.routers.fine_tuning import router as fine_tuning_router
+from app.services.inference_model_resolver import (
+    get_integration_model_state,
+    normalize_model_mode,
+    resolve_default_inference_model_path,
+    resolve_inference_model_path,
 )
 from app.schemas.fine_tuning import (
     FineTuningAutoLabelRequest,
@@ -119,9 +133,11 @@ from app.services.fine_tuning import (
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
 from use_cases.base import ensure_browser_playable_mp4, validate_output_video
+from use_cases.crack_detection import process_image as crack_process_image
 from use_cases.fire_smoke import detect_fire_smoke_hsv
 from use_cases.registry import USE_CASE_REGISTRY, get_processor, get_metadata, list_use_cases
 from use_cases.speed_estimation import process_video as speed_process_video
+from use_cases.unsafe_behavior_detection import process_image as unsafe_behavior_process_image
 from use_cases.zone_intrusion import PERSON_CLASS, create_default_zone, point_in_polygon
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -145,6 +161,8 @@ LOCAL_FALLBACK_MODEL_PATH = BASE_DIR / FALLBACK_MODEL_NAME
 PROCESSED_DIR = STATIC_DIR / "processed"
 YOLO_MODEL: YOLO | None = None
 YOLO_MODEL_SOURCE = ""
+FIRE_SMOKE_PREVIEW_MODEL: YOLO | None = None
+FIRE_SMOKE_PREVIEW_MODEL_SOURCE = ""
 PPE_PREVIEW_PERSON_MODEL: YOLO | None = None
 PPE_PREVIEW_MODEL_SOURCE = ""
 PPE_PREVIEW_DETECTOR: ppe_engine.PPEDetector | None = None
@@ -152,11 +170,13 @@ INTEGRATION_PROVIDER = "minio"
 INTEGRATION_USE_CASE_ID = "ppe-detection"
 INTEGRATION_SUPPORTED_USE_CASES = {
     "class-wise-object-counting",
+    "crack-detection",
     "ppe-detection",
     "queue-management",
     "region-alerts",
     "speed-estimation",
     "fire-detection",
+    "unsafe-behavior-detection",
     "object-tracking",
 }
 INTEGRATION_USE_CASE_ALIASES = {
@@ -165,29 +185,35 @@ INTEGRATION_USE_CASE_ALIASES = {
 }
 INTEGRATION_USE_CASE_PREFIXES = {
     "class-wise-object-counting": ("counting/input/", "counting/output/"),
+    "crack-detection": ("crack/input/", "crack/output/"),
     "queue-management": ("queue/input/", "queue/output/"),
     "ppe-detection": ("ppe/input/", "ppe/output/"),
     "region-alerts": ("region/input/", "region/output/"),
     "fire-detection": ("fire/input/", "fire/output/"),
     "speed-estimation": ("speed/input/", "speed/output/"),
+    "unsafe-behavior-detection": ("unsafe_behavior/input/", "unsafe_behavior/output/"),
     "object-tracking": ("tracking/input/", "tracking/output/"),
 }
 INTEGRATION_USE_CASE_OUTPUT_SUFFIXES = {
     "class-wise-object-counting": "class_wise_object_counting",
+    "crack-detection": "crack_detection",
     "queue-management": "queue_management",
     "ppe-detection": "ppe_detection",
     "region-alerts": "region_alert",
     "fire-detection": "fire_detection",
     "speed-estimation": "speed_estimation",
+    "unsafe-behavior-detection": "unsafe_behavior",
     "object-tracking": "object_tracking",
 }
 INTEGRATION_PROCESSING_VERSIONS = {
     "class-wise-object-counting": 1,
+    "crack-detection": 1,
     "fire-detection": 1,
     "ppe-detection": 3,
     "queue-management": 1,
     "region-alerts": 1,
     "speed-estimation": 1,
+    "unsafe-behavior-detection": 1,
     "object-tracking": 1,
 }
 INTEGRATION_OVERVIEW_LIMIT = 5
@@ -199,6 +225,7 @@ REGION_SYNTHETIC_METADATA_KEY = "synthetic_demo"
 REGION_SYNTHETIC_MIN_OUTPUTS = 180
 DEFAULT_ZONE_SPEED_LIMIT_KMH = 35.0
 DEFAULT_QUEUE_MAX_LIMIT = 6
+INTEGRATION_IMAGE_EXTENSIONS = set(MINIO_IMAGE_EXTENSIONS)
 
 
 app = FastAPI(
@@ -220,6 +247,7 @@ STATIC_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(fine_tuning_router)
 
 
 class AnalyzeVideoRequest(BaseModel):
@@ -278,6 +306,23 @@ def load_yolo_model() -> None:
     YOLO_MODEL_SOURCE = f"unavailable: {last_error}" if last_error else "unavailable"
 
 
+def load_fire_smoke_preview_components() -> None:
+    global FIRE_SMOKE_PREVIEW_MODEL, FIRE_SMOKE_PREVIEW_MODEL_SOURCE
+
+    model_source = BASE_DIR / "models" / "fire_smoke" / "best.pt"
+    if not model_source.exists():
+        FIRE_SMOKE_PREVIEW_MODEL = None
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = "unavailable: models/fire_smoke/best.pt not found"
+        return
+
+    try:
+        FIRE_SMOKE_PREVIEW_MODEL = YOLO(str(model_source))
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = str(model_source)
+    except Exception as error:
+        FIRE_SMOKE_PREVIEW_MODEL = None
+        FIRE_SMOKE_PREVIEW_MODEL_SOURCE = f"unavailable: {error}"
+
+
 def load_ppe_preview_components() -> None:
     global PPE_PREVIEW_PERSON_MODEL, PPE_PREVIEW_MODEL_SOURCE, PPE_PREVIEW_DETECTOR
 
@@ -305,11 +350,7 @@ def load_ppe_preview_components() -> None:
 
 
 def resolve_default_model_path() -> str:
-    if BEST_MODEL_PATH.exists():
-        return str(BEST_MODEL_PATH)
-    if LOCAL_FALLBACK_MODEL_PATH.exists():
-        return str(LOCAL_FALLBACK_MODEL_PATH)
-    return FALLBACK_MODEL_NAME
+    return resolve_default_inference_model_path()
 
 
 def _normalize_integration_use_case_id(value: str | None) -> str:
@@ -352,6 +393,12 @@ def _build_empty_integration_state(use_case_id: str) -> dict[str, Any]:
         "processing": False,
         "pending_rescan": False,
         "processing_mode": "manual",
+        "model_mode": "active",
+        "model_version_id": None,
+        "model_mode_used": "active",
+        "model_path_used": resolve_default_model_path(),
+        "fallback_used": False,
+        "fallback_reason": None,
         "message": "",
         "last_sync_at": None,
         "connected_at": None,
@@ -428,6 +475,12 @@ def _build_connection_details(
     connected_at: str | None,
     credential_mode: str,
     processing_mode: str,
+    model_mode: str,
+    model_version_id: str | None,
+    model_mode_used: str | None,
+    model_path_used: str | None,
+    fallback_used: bool,
+    fallback_reason: str | None,
     zone_points_normalized: list[list[float]] | None = None,
     rule_config: dict[str, Any] | None = None,
 ) -> MinioConnectionDetails:
@@ -440,10 +493,33 @@ def _build_connection_details(
         use_case_id=use_case_id,
         credential_mode=credential_mode,
         processing_mode=processing_mode,
+        model_mode=model_mode,
+        model_version_id=model_version_id,
+        model_mode_used=model_mode_used,
+        model_path_used=model_path_used,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
         connected_at=connected_at,
         zone_points_normalized=zone_points_normalized,
         rule_config=rule_config,
     )
+
+
+def _list_integration_objects(
+    *,
+    client,
+    bucket: str,
+    prefix: str,
+    use_case_id: str,
+) -> list[dict[str, object]]:
+    if use_case_id in {"crack-detection", "unsafe-behavior-detection"}:
+        return list_media_objects(
+            client,
+            bucket,
+            prefix,
+            allowed_extensions=INTEGRATION_IMAGE_EXTENSIONS.union({".mp4", ".avi", ".mov", ".mkv", ".webm"}),
+        )
+    return list_video_objects(client, bucket, prefix)
 
 
 def _payload_field_provided(payload: BaseModel, field_name: str) -> bool:
@@ -975,6 +1051,175 @@ def _persist_fire_detection_analytics(
     }
 
 
+def _persist_crack_detection_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    crack_events = analytics.get("crack_events", []) if isinstance(analytics.get("crack_events"), list) else []
+    metrics = result.get("metrics", {}) if isinstance(result.get("metrics"), dict) else {}
+
+    minio_input_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_input_link or (f"job://crack-detection/{job_id}" if job_id is not None else f"file://{filename}")
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+
+    severity_rank = {"low": 1, "medium": 2, "high": 3}
+    dominant_severity = "none"
+    for event in crack_events:
+        event_severity = str(event.get("severity") or "").strip().lower()
+        if severity_rank.get(event_severity, 0) > severity_rank.get(dominant_severity, 0):
+            dominant_severity = event_severity
+
+    input_row = upsert_crack_detection_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        filename=filename,
+        minio_input_link=minio_input_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": metrics,
+            "crack_events": crack_events,
+            "source_type": "minio" if minio_input_link else "local",
+        },
+    )
+
+    output_rows = replace_crack_detection_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "crack_detected": bool(metrics.get("crack_detections", 0)),
+                "crack_count": metrics.get("crack_detections"),
+                "frames_analyzed": metrics.get("frames_analyzed"),
+                "frames_with_cracks": metrics.get("frames_with_cracks"),
+                "crack_rate_pct": metrics.get("crack_rate_pct"),
+                "max_confidence": metrics.get("max_confidence"),
+                "avg_confidence": metrics.get("avg_confidence"),
+                "severity": dominant_severity,
+                "status": "cracks_detected" if metrics.get("crack_detections", 0) else "clear",
+                "metadata_json": {
+                    "crack_events": crack_events,
+                    "video_summary": video_summary,
+                },
+            }
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
+def _persist_unsafe_behavior_analytics(
+    *,
+    result: dict[str, Any],
+    filename: str,
+    job_id: int | None = None,
+    integration_run_id: int | None = None,
+    input_bucket: str | None = None,
+    input_object_key: str | None = None,
+    output_object_key: str | None = None,
+    output_video_link: str | None = None,
+    run_status: str = "processed",
+) -> dict[str, Any] | None:
+    analytics = result.get("analytics") if isinstance(result, dict) else None
+    if not isinstance(analytics, dict):
+        return None
+
+    video_summary = analytics.get("video_summary", {}) if isinstance(analytics.get("video_summary"), dict) else {}
+    unsafe_events = analytics.get("unsafe_events", []) if isinstance(analytics.get("unsafe_events"), list) else []
+    metrics = result.get("metrics", {}) if isinstance(result.get("metrics"), dict) else {}
+
+    minio_input_link = _build_minio_uri(input_bucket, input_object_key)
+    stable_output_link = _build_minio_uri(input_bucket, output_object_key) or output_video_link
+    source_ref = minio_input_link or (
+        f"job://unsafe-behavior-detection/{job_id}" if job_id is not None else f"file://{filename}"
+    )
+    simulated_timestamp = str(video_summary.get("simulated_timestamp") or _utc_now_iso())
+    source_metadata = _derive_demo_source_metadata(source_ref, simulated_timestamp)
+
+    input_row = upsert_unsafe_behavior_input(
+        source_ref=source_ref,
+        integration_run_id=integration_run_id,
+        job_id=job_id,
+        camera_id=source_metadata["camera_id"],
+        location=source_metadata["location"],
+        zone=source_metadata["zone"],
+        filename=filename,
+        minio_input_link=minio_input_link,
+        output_video_link=stable_output_link,
+        input_bucket=input_bucket,
+        input_object_key=input_object_key,
+        output_object_key=output_object_key,
+        load_time_sec=video_summary.get("duration_sec"),
+        processing_time_sec=video_summary.get("processing_time_sec"),
+        simulated_timestamp=simulated_timestamp,
+        run_status=run_status,
+        metadata_json={
+            "frame_count": video_summary.get("frame_count"),
+            "fps": video_summary.get("fps"),
+            "metrics": metrics,
+            "unsafe_events": unsafe_events,
+            "source_type": "minio" if minio_input_link else "local",
+        },
+    )
+
+    output_rows = replace_unsafe_behavior_outputs(
+        input_id=int(input_row["input_id"]),
+        outputs=[
+            {
+                "event_type": str(event.get("event_type") or "unsafe"),
+                "confidence": event.get("confidence"),
+                "bbox_json": event.get("bbox") or [],
+                "source": event.get("source"),
+                "associated_person_box_json": event.get("associated_person_box") or [],
+                "severity": event.get("severity"),
+                "status": event.get("status") or "unsafe",
+                "frame_number": event.get("frame_number"),
+                "timestamp_sec": event.get("timestamp_sec"),
+                "metadata_json": {
+                    "video_summary": video_summary,
+                    "summary_metrics": metrics,
+                },
+            }
+            for event in unsafe_events
+            if isinstance(event, dict)
+        ],
+    )
+
+    return {
+        "input_row": input_row,
+        "output_rows": output_rows,
+    }
+
+
 def _persist_speed_estimation_analytics(
     *,
     result: dict[str, Any],
@@ -1040,7 +1285,12 @@ def _persist_speed_estimation_analytics(
                 "confidence_score": summary.get("confidence_score"),
                 "status": summary.get("status", "normal"),
                 "notes": summary.get("notes", ""),
-                "metadata_json": summary.get("metadata", {}),
+                "metadata_json": {
+                    **(summary.get("metadata", {}) if isinstance(summary.get("metadata"), dict) else {}),
+                    "crossed_line": summary.get("crossed_line"),
+                    "class_count_for_type": summary.get("class_count_for_type"),
+                    "direction": summary.get("direction"),
+                },
             }
             for summary in speed_summaries
         ],
@@ -1332,6 +1582,30 @@ def _persist_use_case_analytics(
             output_video_link=output_video_link,
             run_status=run_status,
         )
+    if canonical_use_case_id == "crack-detection":
+        return _persist_crack_detection_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
+    if canonical_use_case_id == "unsafe-behavior-detection":
+        return _persist_unsafe_behavior_analytics(
+            result=result,
+            filename=filename,
+            job_id=job_id,
+            integration_run_id=integration_run_id,
+            input_bucket=input_bucket,
+            input_object_key=input_object_key,
+            output_object_key=output_object_key,
+            output_video_link=output_video_link,
+            run_status=run_status,
+        )
     if canonical_use_case_id == "speed-estimation":
         return _persist_speed_estimation_analytics(
             result=result,
@@ -1394,6 +1668,12 @@ def _build_integration_overview(
     credential_mode = str(snapshot.get("credential_mode") or "direct")
     connected_at = snapshot.get("connected_at")
     processing_mode = str(snapshot.get("processing_mode") or "manual")
+    model_mode = str(snapshot.get("model_mode") or "active")
+    model_version_id = snapshot.get("model_version_id")
+    model_mode_used = snapshot.get("model_mode_used")
+    model_path_used = snapshot.get("model_path_used")
+    fallback_used = bool(snapshot.get("fallback_used"))
+    fallback_reason = snapshot.get("fallback_reason")
     use_case_title = _get_integration_use_case_title(canonical_use_case_id)
 
     overview = MinioIntegrationOverviewResponse(
@@ -1407,6 +1687,12 @@ def _build_integration_overview(
             connected_at=connected_at,
             credential_mode=credential_mode,
             processing_mode=processing_mode,
+            model_mode=model_mode,
+            model_version_id=model_version_id,
+            model_mode_used=model_mode_used,
+            model_path_used=model_path_used,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
             zone_points_normalized=snapshot.get("zone_points_normalized") if canonical_use_case_id == "region-alerts" else None,
             rule_config=snapshot.get("rule_config") if canonical_use_case_id == "region-alerts" else None,
         ) if config else None,
@@ -1418,8 +1704,18 @@ def _build_integration_overview(
     try:
         client = create_client(config)
         validate_bucket_access(client, config.bucket)
-        input_objects = list_video_objects(client, config.bucket, config.input_prefix)
-        output_objects = list_video_objects(client, config.bucket, config.output_prefix)
+        input_objects = _list_integration_objects(
+            client=client,
+            bucket=config.bucket,
+            prefix=config.input_prefix,
+            use_case_id=canonical_use_case_id,
+        )
+        output_objects = _list_integration_objects(
+            client=client,
+            bucket=config.bucket,
+            prefix=config.output_prefix,
+            use_case_id=canonical_use_case_id,
+        )
         all_runs = list_integration_runs(
             limit=50,
             provider=INTEGRATION_PROVIDER,
@@ -1501,12 +1797,17 @@ def _build_manual_input_video_items(
     config = snapshot.get("connection")
 
     if not snapshot.get("connected") or config is None:
-        raise HTTPException(status_code=400, detail="Connect to MinIO before fetching input videos.")
+        raise HTTPException(status_code=400, detail="Connect to MinIO before fetching input files.")
 
     try:
         client = create_client(config)
         validate_bucket_access(client, config.bucket)
-        input_objects = list_video_objects(client, config.bucket, config.input_prefix)
+        input_objects = _list_integration_objects(
+            client=client,
+            bucket=config.bucket,
+            prefix=config.input_prefix,
+            use_case_id=canonical_use_case_id,
+        )
         all_runs = list_integration_runs(
             limit=500,
             provider=INTEGRATION_PROVIDER,
@@ -1514,7 +1815,7 @@ def _build_manual_input_video_items(
             bucket=config.bucket,
         )
     except Exception as error:
-        raise HTTPException(status_code=400, detail=f"Unable to load MinIO input videos: {error}") from error
+        raise HTTPException(status_code=400, detail=f"Unable to load MinIO input files: {error}") from error
 
     run_by_input = {str(run["input_key"]): run for run in all_runs}
     items: list[IntegrationVideoItem] = []
@@ -1588,7 +1889,13 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
         )
         return
 
-    model_path = resolve_default_model_path()
+    auto_model_mode = normalize_model_mode(str(snapshot.get("model_mode") or "active"))
+    auto_model_version_id = str(snapshot.get("model_version_id") or "") or None
+    auto_model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=auto_model_mode,
+        model_version_id=auto_model_version_id,
+    )
     found_any_inputs = False
 
     try:
@@ -1597,7 +1904,12 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
             current_mode = str(snapshot.get("processing_mode") or "manual")
 
             try:
-                input_objects = list_video_objects(client, config.bucket, config.input_prefix)
+                input_objects = _list_integration_objects(
+                    client=client,
+                    bucket=config.bucket,
+                    prefix=config.input_prefix,
+                    use_case_id=canonical_use_case_id,
+                )
             except Exception as error:
                 _set_integration_state(
                     canonical_use_case_id,
@@ -1717,6 +2029,16 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     local_output = temp_dir_path / Path(next_output_key).name
                     client.fget_object(config.bucket, input_key, str(local_input))
 
+                    model_resolution = auto_model_resolution
+                    if current_mode == "manual":
+                        existing_metrics = next_existing_run.get("metrics", {}) if next_existing_run else {}
+                        requested_model_mode = normalize_model_mode(existing_metrics.get("requested_model_mode"))
+                        requested_model_version_id = str(existing_metrics.get("requested_model_version_id") or "") or None
+                        model_resolution = resolve_inference_model_path(
+                            canonical_use_case_id,
+                            model_mode=requested_model_mode,
+                            model_version_id=requested_model_version_id,
+                        )
                     processor_kwargs: dict[str, Any] = {}
                     if canonical_use_case_id == "region-alerts":
                         integration_state = _get_integration_state(canonical_use_case_id)
@@ -1730,7 +2052,8 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                     result = processor(
                         input_path=str(local_input),
                         output_path=str(local_output),
-                        model_path=model_path,
+                        model_path=str(model_resolution["model_path"]),
+                        model_mode=str(model_resolution["model_mode_used"]),
                         device=auto_device(),
                         show=False,
                         **processor_kwargs,
@@ -1738,16 +2061,56 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
 
                     actual_output = _resolve_completed_output_path(local_output, result)
 
-                    client.fput_object(config.bucket, next_output_key, str(actual_output), content_type="video/mp4")
+                    output_content_type = mimetypes.guess_type(str(actual_output))[0] or "application/octet-stream"
+                    client.fput_object(config.bucket, next_output_key, str(actual_output), content_type=output_content_type)
                     metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
                     if not isinstance(metrics, dict):
                         metrics = {}
+                    if canonical_use_case_id == "crack-detection":
+                        crack_events = (
+                            result.get("analytics", {}).get("crack_events", [])
+                            if isinstance(result.get("analytics"), dict)
+                            else []
+                        )
+                        if not isinstance(crack_events, list):
+                            crack_events = []
+                        severity_rank = {"low": 1, "medium": 2, "high": 3}
+                        dominant_severity = "none"
+                        for event in crack_events:
+                            event_severity = str((event or {}).get("severity") or "").strip().lower()
+                            if severity_rank.get(event_severity, 0) > severity_rank.get(dominant_severity, 0):
+                                dominant_severity = event_severity
+                        crack_count = int(metrics.get("crack_detections") or 0)
+                        metrics.setdefault("crack_detected", crack_count > 0)
+                        metrics.setdefault("severity", dominant_severity)
+                        metrics.setdefault("status", "cracks_detected" if crack_count > 0 else "clear")
+                    if canonical_use_case_id == "unsafe-behavior-detection":
+                        unsafe_events = (
+                            result.get("analytics", {}).get("unsafe_events", [])
+                            if isinstance(result.get("analytics"), dict)
+                            else []
+                        )
+                        if not isinstance(unsafe_events, list):
+                            unsafe_events = []
+                        severity_rank = {"low": 1, "medium": 2, "high": 3}
+                        dominant_severity = "none"
+                        for event in unsafe_events:
+                            event_severity = str((event or {}).get("severity") or "").strip().lower()
+                            if severity_rank.get(event_severity, 0) > severity_rank.get(dominant_severity, 0):
+                                dominant_severity = event_severity
+                        metrics.setdefault("severity", dominant_severity)
+                        metrics.setdefault(
+                            "status",
+                            "unsafe_detected" if int(metrics.get("total_unsafe_events") or 0) > 0 else "clear",
+                        )
+                        metrics.setdefault("unsafe_events_preview", unsafe_events[:10])
+                    metrics.setdefault("model_mode_used", model_resolution["model_mode_used"])
+                    metrics.setdefault("model_path_used", model_resolution["display_model_path"])
+                    metrics.setdefault("fallback_used", bool(model_resolution["fallback_used"]))
+                    metrics.setdefault("fallback_reason", model_resolution["fallback_reason"])
                     processing_version = _get_integration_processing_version(canonical_use_case_id)
                     if processing_version > 0:
-                        metrics = {
-                            **metrics,
-                            "processing_version": processing_version,
-                        }
+                        metrics.setdefault("processing_version", processing_version)
                     analytics_rows = _persist_use_case_analytics(
                         use_case_id=canonical_use_case_id,
                         result=result,
@@ -1759,11 +2122,8 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                         run_status="completed",
                     )
                     if analytics_rows is not None:
-                        metrics = {
-                            **metrics,
-                            "analytics_input_id": analytics_rows["input_row"]["input_id"],
-                            "analytics_output_rows": len(analytics_rows["output_rows"]),
-                        }
+                        metrics.setdefault("analytics_input_id", analytics_rows["input_row"]["input_id"])
+                        metrics.setdefault("analytics_output_rows", len(analytics_rows["output_rows"]))
                     update_integration_run(
                         int(run["id"]),
                         status="completed",
@@ -1772,11 +2132,36 @@ def _process_minio_inputs_worker(use_case_id: str) -> None:
                         metrics=metrics,
                     )
             except Exception as error:
+                failure_message = str(error)
+                if (
+                    canonical_use_case_id == "crack-detection"
+                    and "Crack detection model not found at models/crack_detection/best.pt" in failure_message
+                ):
+                    failure_message = (
+                        "Crack detection model is not installed yet. "
+                        "Place best.pt under BackEnd/models/crack_detection/best.pt."
+                    )
+                if (
+                    canonical_use_case_id == "unsafe-behavior-detection"
+                    and "Smoking model not found at models/unsafe_behavior/smoking_best.pt" in failure_message
+                ):
+                    failure_message = (
+                        "Smoking model is not installed yet. "
+                        "Place smoking_best.pt under BackEnd/models/unsafe_behavior/."
+                    )
+                if (
+                    canonical_use_case_id == "unsafe-behavior-detection"
+                    and "COCO model not found or could not be loaded" in failure_message
+                ):
+                    failure_message = (
+                        "COCO YOLO model could not be loaded. "
+                        "Place yolov8n.pt under BackEnd/models/common/ or allow Ultralytics to load yolov8n.pt."
+                    )
                 update_integration_run(
                     int(run["id"]),
                     status="failed",
                     output_key=next_output_key,
-                    message=f"{use_case_title} processing failed: {error}",
+                    message=f"{use_case_title} processing failed: {failure_message}",
                 )
     finally:
         with INTEGRATION_STATE_LOCK:
@@ -1818,6 +2203,7 @@ def startup_event() -> None:
     sync_static_assets()
     ensure_mock_video()
     load_yolo_model()
+    load_fire_smoke_preview_components()
     load_ppe_preview_components()
 
 
@@ -2558,6 +2944,40 @@ def run_fire_detection_preview(
     detection_mode: str = "both",
     roi: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+    normalized_mode = _normalize_fire_detection_mode(detection_mode)
+    include_fire = normalized_mode in {"fire", "both"}
+    include_smoke = normalized_mode in {"smoke", "both"}
+    detections: list[dict[str, str | float]] = []
+
+    if FIRE_SMOKE_PREVIEW_MODEL is not None:
+        try:
+            results = FIRE_SMOKE_PREVIEW_MODEL.predict(
+                source=frame,
+                conf=0.40,
+                verbose=False,
+                imgsz=640,
+            )
+            annotated = results[0].plot() if results else frame.copy()
+            names: dict[int, Any] = results[0].names if results else {}
+            if results and results[0].boxes is not None:
+                for box in results[0].boxes:
+                    confidence = float(box.conf[0]) if box.conf is not None else 0.0
+                    class_id = int(box.cls[0]) if box.cls is not None else -1
+                    class_name = str(names.get(class_id, class_id)).lower()
+                    if "smoke" in class_name and not include_smoke:
+                        continue
+                    if ("fire" in class_name or "flame" in class_name) and not include_fire:
+                        continue
+                    detections.append(
+                        {
+                            "class": class_name,
+                            "confidence": round(confidence, 4),
+                        }
+                    )
+            return annotated, detections
+        except Exception:
+            pass
+
     annotated = frame.copy()
     fh, fw = annotated.shape[:2]
     roi_polygon = _roi_polygon_from_normalized(roi, fw, fh) if roi else None
@@ -2565,10 +2985,6 @@ def run_fire_detection_preview(
         _apply_roi_overlay(annotated, roi_polygon, "ROI FILTER")
 
     fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
-    detections: list[dict[str, str | float]] = []
-    normalized_mode = _normalize_fire_detection_mode(detection_mode)
-    include_fire = normalized_mode in {"fire", "both"}
-    include_smoke = normalized_mode in {"smoke", "both"}
 
     for region in fire_regions if include_fire else []:
         x1, y1, x2, y2 = region["bbox"]
@@ -2621,6 +3037,112 @@ def run_speed_estimation_preview(
         preview_frame = extract_preview_frame(output_path)
         detections = _build_speed_preview_detections(result if isinstance(result, dict) else {}, normalized_speed_class)
         return preview_frame, detections
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def run_crack_detection_preview(
+    *,
+    frame: np.ndarray | None = None,
+    video_path: Path | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
+    if frame is not None:
+        result = crack_process_image(
+            frame=frame,
+            model_path="models/crack_detection/best.pt",
+            device=auto_device(),
+            conf=0.35,
+        )
+        return (
+            result["annotated_image"],
+            result.get("detections", []),
+            result.get("metrics", {}),
+        )
+
+    if video_path is None:
+        raise HTTPException(status_code=400, detail="Crack detection preview requires an image or video input.")
+
+    processor = get_processor("crack-detection")
+    if processor is None:
+        raise HTTPException(status_code=500, detail="Crack detection processor is not available.")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
+        output_path = Path(temp_output.name)
+
+    try:
+        result = processor(
+            input_path=str(video_path),
+            output_path=str(output_path),
+            model_path="models/crack_detection/best.pt",
+            device=auto_device(),
+            show=False,
+            conf=0.35,
+        )
+        preview_frame = extract_preview_frame(output_path)
+        analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
+        crack_events = analytics.get("crack_events", []) if isinstance(analytics.get("crack_events"), list) else []
+        detections = [
+            {
+                "class": str(event.get("class_name", "crack")).lower(),
+                "confidence": round(float(event.get("confidence_score") or 0), 4),
+                "severity": str(event.get("severity") or "low"),
+            }
+            for event in crack_events[:20]
+        ]
+        return preview_frame, detections, result.get("metrics", {})
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def run_unsafe_behavior_preview(
+    *,
+    frame: np.ndarray | None = None,
+    video_path: Path | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
+    if frame is not None:
+        result = unsafe_behavior_process_image(
+            frame=frame,
+            model_path="models/unsafe_behavior/smoking_best.pt",
+            device=auto_device(),
+            conf=0.35,
+        )
+        return (
+            result["annotated_image"],
+            result.get("detections", []),
+            result.get("metrics", {}),
+        )
+
+    if video_path is None:
+        raise HTTPException(status_code=400, detail="Unsafe behavior preview requires an image or video input.")
+
+    processor = get_processor("unsafe-behavior-detection")
+    if processor is None:
+        raise HTTPException(status_code=500, detail="Unsafe behavior processor is not available.")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
+        output_path = Path(temp_output.name)
+
+    try:
+        result = processor(
+            input_path=str(video_path),
+            output_path=str(output_path),
+            model_path="models/unsafe_behavior/smoking_best.pt",
+            device=auto_device(),
+            show=False,
+            conf=0.35,
+        )
+        preview_frame = extract_preview_frame(output_path)
+        analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
+        unsafe_events = analytics.get("unsafe_events", []) if isinstance(analytics.get("unsafe_events"), list) else []
+        detections = [
+            {
+                "class": str(event.get("event_type", "unsafe")).lower(),
+                "confidence": round(float(event.get("confidence") or 0), 4),
+                "severity": str(event.get("severity") or "low"),
+            }
+            for event in unsafe_events[:20]
+        ]
+        return preview_frame, detections, result.get("metrics", {})
     finally:
         output_path.unlink(missing_ok=True)
 
@@ -2747,7 +3269,7 @@ def build_playground_preview_response(
                 model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "fire-detection":
             annotated_image, detections = run_fire_detection_preview(frame, detection_mode=fire_detection_mode, roi=roi)
-            model_source = "fire-smoke-hsv-preview"
+            model_source = FIRE_SMOKE_PREVIEW_MODEL_SOURCE or "fire-smoke-hsv-preview"
         elif use_case_id == "speed-estimation":
             if file_kind != "video" or temp_path is None:
                 raise HTTPException(
@@ -2756,9 +3278,27 @@ def build_playground_preview_response(
                 )
             annotated_image, detections = run_speed_estimation_preview(temp_path, speed_detection_class=speed_detection_class)
             model_source = "use_cases.speed_estimation"
+        elif use_case_id == "crack-detection":
+            if file_kind == "video":
+                if temp_path is None:
+                    raise HTTPException(status_code=400, detail="Crack detection playground preview requires a valid uploaded video.")
+                annotated_image, detections, crack_metrics = run_crack_detection_preview(video_path=temp_path)
+            else:
+                annotated_image, detections, crack_metrics = run_crack_detection_preview(frame=frame)
+            model_source = "use_cases.crack_detection"
+        elif use_case_id == "unsafe-behavior-detection":
+            if file_kind == "video":
+                if temp_path is None:
+                    raise HTTPException(status_code=400, detail="Unsafe behavior playground preview requires a valid uploaded video.")
+                annotated_image, detections, unsafe_metrics = run_unsafe_behavior_preview(video_path=temp_path)
+            else:
+                annotated_image, detections, unsafe_metrics = run_unsafe_behavior_preview(frame=frame)
+            model_source = "use_cases.unsafe_behavior_detection"
         else:
             annotated_image, detections = run_yolo_inference(frame)
             model_source = YOLO_MODEL_SOURCE
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     finally:
         if cleanup_temp_path and temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -2777,6 +3317,10 @@ def build_playground_preview_response(
             "roi_applied": bool(roi),
         },
     }
+    if use_case_id == "crack-detection":
+        response["metrics"] = crack_metrics
+    if use_case_id == "unsafe-behavior-detection":
+        response["metrics"] = unsafe_metrics
     if use_case_id == "region-alerts" and file_kind == "video" and temp_path is not None and region_video_preview is not None:
         response["image_base64"] = region_video_preview["preview_image_base64"]
         response["output_video_url"] = region_video_preview["output_video_url"]
@@ -3381,7 +3925,179 @@ def _build_speed_dashboard_records() -> list[dict[str, Any]]:
                 "excess_speed_kmh": round(float(row["excess_speed_kmh"] or max(estimated_speed - speed_limit, 0)), 1),
                 "first_seen_sec": output_meta.get("first_seen_sec"),
                 "last_seen_sec": output_meta.get("last_seen_sec"),
+                "crossed_line": bool(output_meta.get("crossed_line")),
+                "direction": str(output_meta.get("direction") or "unknown"),
+                "class_count_for_type": int(output_meta.get("class_count_for_type") or 0),
                 "notes": str(row["notes"] or ""),
+            }
+        )
+    return records
+
+
+def _build_crack_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.filename,
+            i.minio_input_link,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            i.run_status,
+            i.metadata_json AS input_metadata_json,
+            o.output_id,
+            o.crack_detected,
+            o.crack_count,
+            o.frames_analyzed,
+            o.frames_with_cracks,
+            o.crack_rate_pct,
+            o.max_confidence,
+            o.avg_confidence,
+            o.severity,
+            o.status,
+            o.metadata_json AS output_metadata_json
+        FROM crack_detection_outputs o
+        JOIN crack_detection_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        input_meta = _parse_json_blob(row["input_metadata_json"])
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        crack_events = output_meta.get("crack_events", [])
+        if not isinstance(crack_events, list):
+            crack_events = []
+
+        output_url = _build_integration_proxy_url("crack-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
+        simulated_timestamp = str(row["simulated_timestamp"] or _utc_now_iso())
+        confidence_values = [
+            float(event.get("confidence_score") or 0)
+            for event in crack_events
+            if isinstance(event, dict)
+        ]
+        highest_event_confidence = max(confidence_values) if confidence_values else 0.0
+
+        records.append(
+            {
+                "input_id": int(row["input_id"]),
+                "output_id": int(row["output_id"]),
+                "camera_id": str(row["camera_id"] or ""),
+                "location": str(row["location"] or ""),
+                "zone": str(row["zone"] or ""),
+                "filename": str(row["filename"] or ""),
+                "minio_input_link": str(row["minio_input_link"] or ""),
+                "output_video_url": output_url,
+                "simulated_timestamp": simulated_timestamp,
+                "timestamp": simulated_timestamp,
+                "crack_detected": bool(int(row["crack_detected"] or 0)),
+                "crack_count": int(row["crack_count"] or 0),
+                "frames_analyzed": int(row["frames_analyzed"] or 0),
+                "frames_with_cracks": int(row["frames_with_cracks"] or 0),
+                "crack_rate_pct": float(row["crack_rate_pct"] or 0),
+                "max_confidence": float(row["max_confidence"] or 0),
+                "avg_confidence": float(row["avg_confidence"] or 0),
+                "severity": str(row["severity"] or "none"),
+                "status": str(row["status"] or row["run_status"] or "processed"),
+                "metadata_json": output_meta,
+                "crack_events": crack_events,
+                "highest_event_confidence": highest_event_confidence,
+                "video_summary": output_meta.get("video_summary", {}) if isinstance(output_meta.get("video_summary"), dict) else {},
+                "input_metadata": input_meta,
+            }
+        )
+    return records
+
+
+def _build_unsafe_behavior_dashboard_records() -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            i.input_id,
+            i.camera_id,
+            i.location,
+            i.zone,
+            i.filename,
+            i.minio_input_link,
+            i.output_video_link,
+            i.output_object_key,
+            i.simulated_timestamp,
+            i.run_status,
+            i.metadata_json AS input_metadata_json,
+            o.output_id,
+            o.event_type,
+            o.confidence,
+            o.bbox_json,
+            o.source,
+            o.associated_person_box_json,
+            o.severity,
+            o.status,
+            o.frame_number,
+            o.timestamp_sec,
+            o.metadata_json AS output_metadata_json
+        FROM unsafe_behavior_outputs o
+        JOIN unsafe_behavior_inputs i ON i.input_id = o.input_id
+        ORDER BY datetime(i.simulated_timestamp) DESC, o.output_id DESC
+    """
+
+    with get_connection() as connection:
+        rows = connection.execute(query).fetchall()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        input_meta = _parse_json_blob(row["input_metadata_json"])
+        output_meta = _parse_json_blob(row["output_metadata_json"])
+        summary_metrics = output_meta.get("summary_metrics", {}) if isinstance(output_meta.get("summary_metrics"), dict) else {}
+        video_summary = output_meta.get("video_summary", {}) if isinstance(output_meta.get("video_summary"), dict) else {}
+        output_url = _build_integration_proxy_url("unsafe-behavior-detection", row["output_object_key"]) or str(row["output_video_link"] or "")
+        simulated_timestamp = str(row["simulated_timestamp"] or _utc_now_iso())
+
+        try:
+            bbox = json.loads(row["bbox_json"]) if row["bbox_json"] else []
+        except Exception:
+            bbox = []
+        try:
+            associated_person_box = json.loads(row["associated_person_box_json"]) if row["associated_person_box_json"] else []
+        except Exception:
+            associated_person_box = []
+
+        records.append(
+            {
+                "input_id": int(row["input_id"]),
+                "output_id": int(row["output_id"]),
+                "camera_id": str(row["camera_id"] or ""),
+                "location": str(row["location"] or ""),
+                "zone": str(row["zone"] or ""),
+                "filename": str(row["filename"] or ""),
+                "minio_input_link": str(row["minio_input_link"] or ""),
+                "output_video_url": output_url,
+                "simulated_timestamp": simulated_timestamp,
+                "timestamp": simulated_timestamp,
+                "event_type": str(row["event_type"] or "unsafe"),
+                "confidence": float(row["confidence"] or 0),
+                "severity": str(row["severity"] or "low"),
+                "source": str(row["source"] or ""),
+                "status": str(row["status"] or row["run_status"] or "unsafe"),
+                "frame_number": int(row["frame_number"] or 0),
+                "timestamp_sec": float(row["timestamp_sec"] or 0),
+                "bbox": bbox,
+                "associated_person_box": associated_person_box,
+                "total_unsafe_events": int(summary_metrics.get("total_unsafe_events") or 0),
+                "smoking_events": int(summary_metrics.get("smoking_events") or 0),
+                "phone_usage_events": int(summary_metrics.get("phone_usage_events") or 0),
+                "frames_analyzed": int(summary_metrics.get("frames_analyzed") or 0),
+                "frames_with_unsafe_behavior": int(summary_metrics.get("frames_with_unsafe_behavior") or 0),
+                "unsafe_rate_pct": float(summary_metrics.get("unsafe_rate_pct") or 0),
+                "max_confidence": float(summary_metrics.get("max_confidence") or 0),
+                "avg_confidence": float(summary_metrics.get("avg_confidence") or 0),
+                "video_summary": video_summary,
+                "metadata_json": output_meta,
+                "input_metadata": input_meta,
             }
         )
     return records
@@ -3412,6 +4128,56 @@ def _filter_speed_dashboard_records(
             or normalized_status == "all"
             or str(record["status"]).lower() == normalized_status
         )
+    ]
+
+
+def _filter_crack_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    severity: list[str] | None,
+    status: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(status or "").strip().lower()
+    return [
+        record
+        for record in records
+        if _within_date_range(record["timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["severity"], severity)
+        and (not normalized_status or normalized_status == "all" or str(record["status"]).lower() == normalized_status)
+    ]
+
+
+def _filter_unsafe_behavior_dashboard_records(
+    records: list[dict[str, Any]],
+    *,
+    date_from: str | None,
+    date_to: str | None,
+    location: str | None,
+    zone: list[str] | None,
+    camera_id: list[str] | None,
+    event_type: list[str] | None,
+    severity: list[str] | None,
+    status: str | None,
+) -> list[dict[str, Any]]:
+    normalized_status = str(status or "").strip().lower()
+    return [
+        record
+        for record in records
+        if _within_date_range(record["timestamp"], date_from, date_to)
+        and (not location or location == "All" or record["location"] == location)
+        and _matches_filter(record["zone"], zone)
+        and _matches_filter(record["camera_id"], camera_id)
+        and _matches_filter(record["event_type"], event_type)
+        and _matches_filter(record["severity"], severity)
+        and (not normalized_status or normalized_status == "all" or str(record["status"]).lower() == normalized_status)
     ]
 
 
@@ -3696,16 +4462,267 @@ def get_speed_estimation_metrics(
 
     speeds = [float(record["estimated_speed"]) for record in records if record.get("estimated_speed") is not None]
     violations = [record for record in records if record["violation_type"] == "overspeed"]
+    unique_objects: dict[tuple[int, str], dict[str, Any]] = {}
+    for record in records:
+        object_key = (int(record.get("input_id") or 0), str(record.get("object_id") or record.get("output_id") or ""))
+        unique_objects[object_key] = record
+
+    class_wise_counts: dict[str, int] = {}
+    class_wise_crossed_counts: dict[str, int] = {}
+    crossed_vehicle_count = 0
+    for record in unique_objects.values():
+        object_type = str(record.get("object_type") or "vehicle")
+        class_wise_counts[object_type] = class_wise_counts.get(object_type, 0) + 1
+        if bool(record.get("crossed_line")):
+            crossed_vehicle_count += 1
+            class_wise_crossed_counts[object_type] = class_wise_crossed_counts.get(object_type, 0) + 1
+
     summary = {
         "total_records": len(records),
+        "total_vehicles": len(unique_objects),
         "violations": len(violations),
+        "speeding_violations": len(violations),
         "avg_speed": round(sum(speeds) / len(speeds), 1) if speeds else 0.0,
+        "avg_speed_kmh": round(sum(speeds) / len(speeds), 1) if speeds else 0.0,
         "max_speed": round(max(speeds), 1) if speeds else 0.0,
+        "max_speed_kmh": round(max(speeds), 1) if speeds else 0.0,
+        "crossed_vehicle_count": crossed_vehicle_count,
+        "class_wise_counts": class_wise_counts,
+        "class_wise_crossed_counts": class_wise_crossed_counts,
     }
 
     return {
         "records": records,
         "summary": summary,
+    }
+
+
+@app.get("/api/crack-detection/metrics", tags=["Dashboard"])
+def get_crack_detection_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+    status: str | None = None,
+) -> dict[str, Any]:
+    records = _filter_crack_dashboard_records(
+        _build_crack_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        severity=severity,
+        status=status,
+    )
+
+    crack_detected_rows = [record for record in records if record["crack_detected"]]
+    total_items = len(records)
+    crack_detected_count = len(crack_detected_rows)
+    crack_free_count = total_items - crack_detected_count
+    total_crack_detections = sum(int(record["crack_count"] or 0) for record in records)
+    avg_confidence_values = [float(record["avg_confidence"] or 0) for record in crack_detected_rows if float(record["avg_confidence"] or 0) > 0]
+    max_confidence_values = [float(record["max_confidence"] or 0) for record in records if float(record["max_confidence"] or 0) > 0]
+
+    severity_distribution = {
+        "low": sum(1 for record in records if str(record["severity"]).lower() == "low"),
+        "medium": sum(1 for record in records if str(record["severity"]).lower() == "medium"),
+        "high": sum(1 for record in records if str(record["severity"]).lower() == "high"),
+    }
+
+    trend_buckets: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        date_label = str(record.get("timestamp", ""))[:10]
+        trend_buckets.setdefault(date_label, []).append(record)
+    crack_detection_trend = [
+        {
+            "date": date_label,
+            "crack_count": sum(int(item["crack_count"] or 0) for item in items),
+            "crack_detected": sum(1 for item in items if item["crack_detected"]),
+            "inspected_items": len(items),
+        }
+        for date_label, items in sorted(trend_buckets.items(), key=lambda item: item[0])
+    ]
+
+    location_groups = _group_records(records, "location")
+    camera_or_location_breakdown = [
+        {
+            "location": location_key,
+            "camera_ids": sorted({str(item["camera_id"]) for item in items if item.get("camera_id")}),
+            "zones": sorted({str(item["zone"]) for item in items if item.get("zone")}),
+            "inspected_items": len(items),
+            "crack_detected_count": sum(1 for item in items if item["crack_detected"]),
+            "crack_count": sum(int(item["crack_count"] or 0) for item in items),
+            "crack_rate_pct": round(
+                (sum(1 for item in items if item["crack_detected"]) / len(items)) * 100,
+                1,
+            ) if items else 0.0,
+        }
+        for location_key, items in sorted(location_groups.items(), key=lambda item: len(item[1]), reverse=True)
+    ]
+
+    recent_crack_events = [
+        {
+            "input_id": record["input_id"],
+            "output_id": record["output_id"],
+            "camera_id": record["camera_id"],
+            "location": record["location"],
+            "zone": record["zone"],
+            "crack_detected": record["crack_detected"],
+            "crack_count": record["crack_count"],
+            "frames_analyzed": record["frames_analyzed"],
+            "crack_rate_pct": record["crack_rate_pct"],
+            "max_confidence": record["max_confidence"],
+            "avg_confidence": record["avg_confidence"],
+            "severity": record["severity"],
+            "status": record["status"],
+            "simulated_timestamp": record["timestamp"],
+            "output_video_url": record["output_video_url"],
+        }
+        for record in records[:25]
+    ]
+
+    latest_inspection_time = records[0]["timestamp"] if records else None
+
+    summary = {
+        "total_inspected_items": total_items,
+        "crack_detected_count": crack_detected_count,
+        "crack_free_count": crack_free_count,
+        "crack_rate_pct": round((crack_detected_count / total_items) * 100, 1) if total_items else 0.0,
+        "total_crack_detections": total_crack_detections,
+        "avg_confidence": round(sum(avg_confidence_values) / len(avg_confidence_values), 4) if avg_confidence_values else 0.0,
+        "max_confidence": round(max(max_confidence_values), 4) if max_confidence_values else 0.0,
+        "high_severity_count": severity_distribution["high"],
+        "medium_severity_count": severity_distribution["medium"],
+        "low_severity_count": severity_distribution["low"],
+        "latest_inspection_time": latest_inspection_time,
+    }
+
+    return {
+        "summary": summary,
+        "severity_distribution": severity_distribution,
+        "crack_detection_trend": crack_detection_trend,
+        "camera_or_location_breakdown": camera_or_location_breakdown,
+        "recent_crack_events": recent_crack_events,
+        "records": records,
+    }
+
+
+@app.get("/api/unsafe-behavior/metrics", tags=["Dashboard"])
+def get_unsafe_behavior_metrics(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    location: str | None = None,
+    zone: list[str] | None = Query(default=None),
+    camera_id: list[str] | None = Query(default=None),
+    event_type: list[str] | None = Query(default=None),
+    severity: list[str] | None = Query(default=None),
+    status: str | None = None,
+) -> dict[str, Any]:
+    records = _filter_unsafe_behavior_dashboard_records(
+        _build_unsafe_behavior_dashboard_records(),
+        date_from=date_from,
+        date_to=date_to,
+        location=location,
+        zone=zone,
+        camera_id=camera_id,
+        event_type=event_type,
+        severity=severity,
+        status=status,
+    )
+
+    total_inspected_items = len({int(record["input_id"]) for record in records}) if records else 0
+    total_unsafe_events = len(records)
+    smoking_events = sum(1 for record in records if str(record["event_type"]).lower() == "smoking")
+    phone_usage_events = sum(1 for record in records if str(record["event_type"]).lower() == "phone_usage")
+    frames_analyzed = max((int(record["frames_analyzed"] or 0) for record in records), default=0)
+    frames_with_unsafe_behavior = max((int(record["frames_with_unsafe_behavior"] or 0) for record in records), default=0)
+    confidence_values = [float(record["confidence"] or 0) for record in records if float(record["confidence"] or 0) > 0]
+
+    event_type_distribution = {
+        "smoking": smoking_events,
+        "phone_usage": phone_usage_events,
+    }
+    severity_distribution = {
+        "low": sum(1 for record in records if str(record["severity"]).lower() == "low"),
+        "medium": sum(1 for record in records if str(record["severity"]).lower() == "medium"),
+        "high": sum(1 for record in records if str(record["severity"]).lower() == "high"),
+    }
+
+    trend_buckets: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        date_label = str(record.get("timestamp", ""))[:10]
+        trend_buckets.setdefault(date_label, []).append(record)
+    unsafe_event_trend = [
+        {
+            "date": date_label,
+            "smoking_count": sum(1 for item in items if str(item["event_type"]).lower() == "smoking"),
+            "phone_usage_count": sum(1 for item in items if str(item["event_type"]).lower() == "phone_usage"),
+            "total_unsafe_count": len(items),
+        }
+        for date_label, items in sorted(trend_buckets.items(), key=lambda item: item[0])
+    ]
+
+    location_groups = _group_records(records, "location")
+    camera_or_location_breakdown = [
+        {
+            "location": location_key,
+            "camera_ids": sorted({str(item["camera_id"]) for item in items if item.get("camera_id")}),
+            "zones": sorted({str(item["zone"]) for item in items if item.get("zone")}),
+            "unsafe_event_count": len(items),
+            "smoking_count": sum(1 for item in items if str(item["event_type"]).lower() == "smoking"),
+            "phone_usage_count": sum(1 for item in items if str(item["event_type"]).lower() == "phone_usage"),
+        }
+        for location_key, items in sorted(location_groups.items(), key=lambda item: len(item[1]), reverse=True)
+    ]
+
+    recent_unsafe_events = [
+        {
+            "input_id": record["input_id"],
+            "output_id": record["output_id"],
+            "camera_id": record["camera_id"],
+            "location": record["location"],
+            "zone": record["zone"],
+            "event_type": record["event_type"],
+            "confidence": record["confidence"],
+            "severity": record["severity"],
+            "source": record["source"],
+            "frame_number": record["frame_number"],
+            "timestamp_sec": record["timestamp_sec"],
+            "status": record["status"],
+            "simulated_timestamp": record["timestamp"],
+            "output_video_url": record["output_video_url"],
+        }
+        for record in records[:50]
+    ]
+
+    latest_event_time = records[0]["timestamp"] if records else None
+    summary = {
+        "total_inspected_items": total_inspected_items,
+        "total_unsafe_events": total_unsafe_events,
+        "smoking_events": smoking_events,
+        "phone_usage_events": phone_usage_events,
+        "unsafe_rate_pct": round((total_unsafe_events / total_inspected_items) * 100, 1) if total_inspected_items else 0.0,
+        "frames_analyzed": frames_analyzed,
+        "frames_with_unsafe_behavior": frames_with_unsafe_behavior,
+        "avg_confidence": round(sum(confidence_values) / len(confidence_values), 4) if confidence_values else 0.0,
+        "max_confidence": round(max(confidence_values), 4) if confidence_values else 0.0,
+        "high_severity_count": severity_distribution["high"],
+        "medium_severity_count": severity_distribution["medium"],
+        "low_severity_count": severity_distribution["low"],
+        "latest_event_time": latest_event_time,
+    }
+
+    return {
+        "summary": summary,
+        "event_type_distribution": event_type_distribution,
+        "severity_distribution": severity_distribution,
+        "unsafe_event_trend": unsafe_event_trend,
+        "camera_or_location_breakdown": camera_or_location_breakdown,
+        "recent_unsafe_events": recent_unsafe_events,
+        "records": records,
     }
 
 
@@ -4077,6 +5094,16 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
     return _build_integration_overview(use_case_id=canonical_use_case_id)
 
 
+@app.get(
+    "/api/integrations/model-state/{use_case_id}",
+    tags=["Integration"],
+    response_model=IntegrationModelStateResponse,
+)
+def get_integration_model_state_endpoint(use_case_id: str) -> IntegrationModelStateResponse:
+    canonical_use_case_id = _normalize_integration_use_case_id(use_case_id)
+    return IntegrationModelStateResponse(**get_integration_model_state(canonical_use_case_id))
+
+
 @app.post(
     "/api/integrations/minio/connect",
     tags=["Integration"],
@@ -4085,6 +5112,13 @@ def get_minio_integration_status(use_case_id: str = INTEGRATION_USE_CASE_ID) -> 
 def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationOverviewResponse:
     canonical_use_case_id = _normalize_integration_use_case_id(payload.use_case_id)
     processing_mode = _normalize_processing_mode(payload.processing_mode)
+    selected_model_mode = normalize_model_mode(payload.model_mode)
+    selected_model_version_id = str(payload.model_version_id or "").strip() or None
+    model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+    )
     snapshot = _get_integration_state(canonical_use_case_id)
     zone_points_normalized = None
     rule_config = None
@@ -4122,6 +5156,12 @@ def connect_minio_integration(payload: MinioConnectRequest) -> MinioIntegrationO
         connected_at=connected_at,
         credential_mode=credential_mode,
         processing_mode=processing_mode,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+        model_mode_used=model_resolution["model_mode_used"],
+        model_path_used=model_resolution["display_model_path"],
+        fallback_used=bool(model_resolution["fallback_used"]),
+        fallback_reason=model_resolution["fallback_reason"],
         connection=config,
         zone_points_normalized=zone_points_normalized,
         rule_config=rule_config,
@@ -4200,6 +5240,13 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"Unable to access the configured MinIO bucket: {error}") from error
 
+    selected_model_mode = normalize_model_mode(payload.model_mode)
+    selected_model_version_id = str(payload.model_version_id or "").strip() or None
+    model_resolution = resolve_inference_model_path(
+        canonical_use_case_id,
+        model_mode=selected_model_mode,
+        model_version_id=selected_model_version_id,
+    )
     if canonical_use_case_id == "region-alerts":
         _set_integration_state(
             canonical_use_case_id,
@@ -4257,7 +5304,15 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
             output_key=output_key,
             status="queued",
             message=f"Queued for manual {use_case_title} processing from MinIO input.",
-            metrics=existing_run.get("metrics", {}) if existing_run else {},
+            metrics={
+                **(existing_run.get("metrics", {}) if existing_run else {}),
+                "requested_model_mode": selected_model_mode,
+                "requested_model_version_id": selected_model_version_id,
+                "model_mode_used": model_resolution["model_mode_used"],
+                "model_path_used": model_resolution["display_model_path"],
+                "fallback_used": bool(model_resolution["fallback_used"]),
+                "fallback_reason": model_resolution["fallback_reason"],
+            },
         )
         queued_count += 1
 
@@ -4286,6 +5341,10 @@ def process_selected_minio_videos(payload: MinioProcessSelectedRequest) -> Minio
         queued_count=queued_count,
         skipped_count=skipped_count,
         message=message,
+        model_mode_used=str(model_resolution["model_mode_used"]),
+        model_path_used=str(model_resolution["display_model_path"]),
+        fallback_used=bool(model_resolution["fallback_used"]),
+        fallback_reason=model_resolution["fallback_reason"],
         overview=overview,
     )
 
@@ -4567,6 +5626,10 @@ def _resolve_completed_output_path(expected_output: Path, result: Any) -> Path:
         fallback_output = Path(str(result.get("output_video", ""))) if isinstance(result, dict) else None
         if fallback_output and fallback_output.exists():
             actual_output = fallback_output
+    if actual_output.suffix.lower() in INTEGRATION_IMAGE_EXTENSIONS:
+        if not actual_output.exists() or actual_output.stat().st_size <= 0:
+            raise RuntimeError(f"Integration output artifact is missing or empty: {actual_output}")
+        return actual_output
     validate_output_video(str(actual_output))
     ensure_browser_playable_mp4(str(actual_output))
     validate_output_video(str(actual_output))

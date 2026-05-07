@@ -3,7 +3,7 @@
 import Image from "next/image";
 
 import BrandHeader from "./BrandHeader";
-import { categoryDetails, useCases } from "./visionLabConfig";
+import { categoryDetails, visibleUseCases } from "./visionLabConfig";
 
 function SidebarLink({ active = false, label, onClick }) {
   return (
@@ -46,7 +46,7 @@ function UseCaseCard({ item, onClick }) {
 }
 
 export default function UseCasesPage({ activeSection, onChangeSection, onGoHome, onOpenUseCase }) {
-  const filteredUseCases = useCases.filter((item) => item.category === activeSection);
+  const filteredUseCases = visibleUseCases.filter((item) => item.category === activeSection);
 
   return (
     <div className="min-h-screen bg-white">
@@ -62,7 +62,7 @@ export default function UseCasesPage({ activeSection, onChangeSection, onGoHome,
           </nav>
           <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Total Use Cases</div>
-            <div className="mt-2 text-3xl font-semibold text-brandBlue">{useCases.length}</div>
+            <div className="mt-2 text-3xl font-semibold text-brandBlue">{visibleUseCases.length}</div>
             <div className="mt-1 text-xs text-slate-400">{categoryDetails.length} categories</div>
           </div>
         </aside>

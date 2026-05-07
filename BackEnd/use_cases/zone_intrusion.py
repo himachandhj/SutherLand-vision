@@ -1,6 +1,6 @@
 """
-Zone Intrusion Detection — Pre-built Use Case
-===============================================
+Zone Intrusion Detection - Pre-built Use Case
+---------------------------------------------
 Detect unauthorized entry into predefined restricted zones.
 
 Industry Application:
@@ -24,7 +24,42 @@ from use_cases.base import (
 )
 
 
+DETECTION_CLASSES = {
+    0: "person",
+    1: "bicycle",
+    2: "car",
+    3: "motorcycle",
+    5: "bus",
+    7: "truck",
+}
+# Backward-compatibility alias expected by app/main.py and older call sites.
+# Person remains COCO class id 0.
 PERSON_CLASS = 0
+REQUIRED_REGION_CLASSES = {
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "bus",
+    "truck",
+}
+
+
+def _normalize_model_names(names: object) -> list[str]:
+    if isinstance(names, dict):
+        raw_names = list(names.values())
+    elif isinstance(names, (list, tuple)):
+        raw_names = list(names)
+    else:
+        raw_names = []
+    return [str(name).strip().lower() for name in raw_names if str(name).strip()]
+
+
+def _region_model_is_compatible(model_class_names: list[str]) -> bool:
+    normalized = set(model_class_names)
+    has_person = "person" in normalized
+    has_vehicle = bool(normalized.intersection(REQUIRED_REGION_CLASSES - {"person"}))
+    return has_person and has_vehicle
 
 
 def create_default_zone(fw: int, fh: int) -> np.ndarray:
@@ -67,13 +102,13 @@ def zone_from_normalized_points(points: list[list[float]] | tuple[tuple[float, f
     return np.asarray(normalized_points, dtype=np.int32)
 
 
-def _extract_person_detections(results) -> tuple[list, list[int], list[float]]:
+def _extract_person_detections(results) -> tuple[list, list[int], list[float], list[int]]:
     if not results or results[0].boxes is None:
-        return [], [], []
+        return [], [], [], []
 
     det = results[0].boxes
     if det.xyxy is None or len(det.xyxy) == 0:
-        return [], [], []
+        return [], [], [], []
 
     boxes = det.xyxy.cpu().numpy()
     tids = (
@@ -84,7 +119,11 @@ def _extract_person_detections(results) -> tuple[list, list[int], list[float]]:
         det.conf.cpu().numpy().tolist()
         if det.conf is not None else [1.0] * len(boxes)
     )
-    return boxes, tids, confs
+    class_ids = (
+        det.cls.cpu().numpy().astype(int).tolist()
+        if det.cls is not None else [0] * len(boxes)
+    )
+    return boxes, tids, confs, class_ids
 
 
 def process_video(
@@ -101,6 +140,10 @@ def process_video(
     device = device or auto_device()
     input_p = os.path.abspath(input_path)
     out_p = build_output_path(input_p, output_path, "_zone_intrusion")
+    requested_mode = str(kwargs.get("model_mode") or "active").strip().lower()
+    selected_model_path = str(model_path or "yolov8n.pt")
+    fallback_used = False
+    fallback_reason: str | None = None
     rule_config = kwargs.get("rule_config") or {}
 
     try:
@@ -118,7 +161,34 @@ def process_video(
     alerts_enabled = bool(rule_config.get("alerts_enabled", True))
     trigger_type = str(rule_config.get("trigger_type") or "enter").strip().lower()
 
-    model = load_model(model_path)
+    try:
+        model = load_model(selected_model_path)
+    except Exception:
+        fallback_used = True
+        fallback_reason = "region_model_unavailable"
+        selected_model_path = "yolov8n.pt"
+        model = load_model(selected_model_path)
+
+    model_class_names = _normalize_model_names(getattr(model, "names", {}))
+    requested_model_class_names = list(model_class_names)
+    model_is_compatible = _region_model_is_compatible(model_class_names)
+    if not model_is_compatible and selected_model_path != "yolov8n.pt":
+        fallback_used = True
+        fallback_reason = (
+            "staged_region_model_missing_required_classes"
+            if requested_mode == "staging"
+            else "region_model_missing_required_classes"
+        )
+        selected_model_path = "yolov8n.pt"
+        model = load_model(selected_model_path)
+        model_class_names = _normalize_model_names(getattr(model, "names", {}))
+        model_is_compatible = _region_model_is_compatible(model_class_names)
+
+    inference_conf = (
+        min(confidence_threshold, 0.20)
+        if requested_mode == "staging" and model_is_compatible
+        else confidence_threshold
+    )
 
     cap = open_video(input_p)
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -138,6 +208,8 @@ def process_video(
     frame_num = 0
     t0 = time.time()
     intrusion_events: dict[int, dict[str, float | int | str]] = {}
+    detections_before_filter = 0
+    detections_after_filter = 0
     person_in_zone_frames: dict[int, int] = {}
 
     try:
@@ -157,15 +229,15 @@ def process_video(
 
             try:
                 results = model.track(
-                    source=frame, classes=[PERSON_CLASS], conf=effective_conf,
+                    source=frame, classes=list(DETECTION_CLASSES.keys()), conf=inference_conf,
                     iou=0.70, device=device, persist=True, verbose=False
                 )
             except Exception:
                 try:
                     results = model.predict(
                         source=frame,
-                        classes=[PERSON_CLASS],
-                        conf=effective_conf,
+                        classes=list(DETECTION_CLASSES.keys()),
+                        conf=inference_conf,
                         device=device,
                         verbose=False,
                     )
@@ -176,12 +248,15 @@ def process_video(
             zone_count = 0
             active_tids = set()
 
-            boxes, tids, confs = _extract_person_detections(results)
+            boxes, tids, confs, class_ids = _extract_person_detections(results)
+            detections_before_filter += len(boxes)
 
             for i, bbox in enumerate(boxes):
                 x1, y1, x2, y2 = map(int, bbox)
                 tid = tids[i] if i < len(tids) else i
                 conf_score = float(confs[i]) if i < len(confs) else 1.0
+                class_id = int(class_ids[i]) if i < len(class_ids) else 0
+                object_type = DETECTION_CLASSES.get(class_id, "object")
                 if conf_score < confidence_threshold:
                     continue
                 cx = (x1 + x2) // 2
@@ -196,16 +271,17 @@ def process_video(
                     delay_satisfied = required_frames == 0 or person_in_zone_frames[tid] >= required_frames
                     if alerts_enabled and delay_satisfied:
                         zone_count += 1
+                        detections_after_filter += 1
                         if tid not in seen_intruders:
                             total_intrusions += 1
                             seen_intruders.add(tid)
                         cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 3)
-                        draw_label(frame, f"#{tid} INTRUDER", x1, y1, C_RED)
+                        draw_label(frame, f"#{tid} {object_type} INTRUDER", x1, y1, C_RED)
                         radius = max(15, (x2 - x1) // 2)
                         cv2.circle(frame, (cx, cy), radius, C_RED, 2, cv2.LINE_AA)
                         if tid not in intrusion_events:
                             intrusion_events[tid] = {
-                                "object_type": "person",
+                                "object_type": object_type,
                                 "first_seen_frame": frame_num,
                                 "last_seen_frame": frame_num,
                                 "observations": 0,
@@ -213,6 +289,7 @@ def process_video(
                                 "confidence_max": 0.0,
                             }
                         event = intrusion_events[tid]
+                        event["object_type"] = object_type
                         event["last_seen_frame"] = frame_num
                         event["observations"] = int(event["observations"]) + 1
                         event["confidence_sum"] = float(event["confidence_sum"]) + conf_score
@@ -220,11 +297,11 @@ def process_video(
                     else:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), C_YELLOW, 2)
                         status_label = "IN ZONE" if not alerts_enabled else "VERIFYING"
-                        draw_label(frame, f"#{tid} {status_label}", x1, y1, C_YELLOW)
+                        draw_label(frame, f"#{tid} {object_type} {status_label}", x1, y1, C_YELLOW)
                 else:
                     person_in_zone_frames.pop(tid, None)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), C_GREEN, 2)
-                    draw_label(frame, f"#{tid}", x1, y1, C_GREEN)
+                    draw_label(frame, f"#{tid} {object_type}", x1, y1, C_GREEN)
 
             for tracked_tid in list(person_in_zone_frames.keys()):
                 if tracked_tid not in active_tids:
@@ -246,7 +323,7 @@ def process_video(
             ])
 
             if zone_count > 0:
-                draw_alert_bar(frame, f"  ZONE BREACH — {zone_count} UNAUTHORIZED PERSON(S) IN RESTRICTED ZONE  ")
+                draw_alert_bar(frame, f"  ZONE BREACH — {zone_count} UNAUTHORIZED OBJECT(S) IN RESTRICTED ZONE  ")
 
             writer.write(frame)
 
@@ -315,6 +392,14 @@ def process_video(
             "processing_time_sec": processing_time_sec,
             "video_duration_sec": duration_sec,
             "event_rows_generated": len(intrusion_summaries),
+            "model_mode_used": requested_mode or "active",
+            "model_path_used": selected_model_path,
+            "model_class_names": model_class_names,
+            "requested_model_class_names": requested_model_class_names,
+            "detections_before_filter": detections_before_filter,
+            "detections_after_filter": detections_after_filter,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
         },
         "analytics": {
             "video_summary": {

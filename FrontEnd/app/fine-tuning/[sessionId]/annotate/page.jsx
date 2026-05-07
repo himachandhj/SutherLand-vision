@@ -195,6 +195,8 @@ function defaultClassOptions(useCaseId) {
   const defaults = {
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "fire-detection": ["fire", "smoke"],
+    "crack-detection": ["crack"],
+    "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "ppe-detection": ["person", "helmet", "vest"],
     "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "region-alerts": ["person"],

@@ -10,7 +10,7 @@ export default function FineTuningStepRail({
   completedStepIds,
   currentPlanState,
   selectedDataset,
-  selectedGoal,
+  selectedBaseModel,
   selectedTrainingMode,
   trainingJob,
   onStepSelect,
@@ -88,8 +88,8 @@ export default function FineTuningStepRail({
             <span className="max-w-[150px] truncate font-semibold text-slate-800">{selectedDataset?.name ?? "Not selected"}</span>
           </div>
           <div className="flex justify-between gap-3">
-            <span className="text-slate-500">Goal</span>
-            <span className="max-w-[150px] truncate font-semibold text-slate-800">{selectedGoal?.label ?? "Balanced"}</span>
+            <span className="text-slate-500">Model</span>
+            <span className="max-w-[150px] truncate font-semibold text-slate-800">{selectedBaseModel?.label ?? "Recommended"}</span>
           </div>
           <div className="flex justify-between gap-3">
             <span className="text-slate-500">Run</span>

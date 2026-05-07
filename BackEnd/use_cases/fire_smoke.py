@@ -16,6 +16,7 @@ for any fire-related classes if available in the model.
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -26,6 +27,9 @@ from use_cases.base import (
     load_model, draw_hud_panel, draw_alert_bar, draw_label, validate_output_video,
 )
 
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_FIRE_SMOKE_MODEL_PATH = BASE_DIR / "models" / "fire_smoke" / "best.pt"
 
 # HSV ranges for fire and smoke detection
 FIRE_RANGES = [
@@ -42,6 +46,42 @@ SMOKE_RANGES = [
 MIN_FIRE_AREA = 500     # minimum pixel area for fire blob
 MIN_SMOKE_AREA = 1000   # minimum pixel area for smoke blob
 K5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+
+def normalize_fire_class_name(name: str | None) -> str | None:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        return None
+    if "smoke" in normalized:
+        return "smoke"
+    if "fire" in normalized or "flame" in normalized:
+        return "fire"
+    return None
+
+
+def _normalize_model_names(names: object) -> list[str]:
+    if isinstance(names, dict):
+        raw_names = list(names.values())
+    elif isinstance(names, (list, tuple)):
+        raw_names = list(names)
+    else:
+        raw_names = []
+    return [str(name).strip().lower() for name in raw_names if str(name).strip()]
+
+
+def _resolve_fire_class_label(class_name: str | None, class_id: int, class_names: list[str]) -> str | None:
+    normalized = normalize_fire_class_name(class_name)
+    if normalized:
+        return normalized
+    if len(class_names) == 1:
+        return "fire"
+    if len(class_names) == 2:
+        return "fire" if class_id == 0 else "smoke"
+    if class_id == 0:
+        return "fire"
+    if class_id == 1:
+        return "smoke"
+    return None
 
 
 def detect_fire_smoke_hsv(frame):
@@ -87,33 +127,77 @@ def detect_fire_smoke_hsv(frame):
     return fire_regions, smoke_regions
 
 
-def process_video(
+def _resolve_fire_smoke_model_path(model_path: str | None) -> str | None:
+    candidates: list[Path] = []
+    if model_path:
+        candidates.append(Path(model_path))
+    candidates.append(DEFAULT_FIRE_SMOKE_MODEL_PATH)
+
+    for candidate in candidates:
+        resolved = candidate if candidate.is_absolute() else BASE_DIR / candidate
+        if resolved.is_file():
+            return str(resolved)
+    return None
+
+
+def _extract_yolo_fire_smoke_regions(results, model) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    if not results or results[0].boxes is None:
+        return [], [], {
+            "model_class_names": [],
+            "detections_before_filter": 0,
+            "detections_after_filter": 0,
+        }
+
+    fire_regions: list[dict[str, object]] = []
+    smoke_regions: list[dict[str, object]] = []
+    names = getattr(results[0], "names", None) or getattr(model, "names", {}) or {}
+    model_class_names = _normalize_model_names(names)
+    detections_before_filter = 0
+
+    for box in results[0].boxes:
+        detections_before_filter += 1
+        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        conf_score = float(box.conf[0]) if box.conf is not None else 1.0
+        cls_id = int(box.cls[0]) if box.cls is not None else -1
+        class_name = str(names.get(cls_id, f"class_{cls_id}")).lower()
+        semantic_class = _resolve_fire_class_label(class_name, cls_id, model_class_names)
+
+        if semantic_class == "smoke":
+            smoke_regions.append({
+                "bbox": (x1, y1, x2, y2),
+                "confidence": conf_score,
+                "class_name": class_name,
+                "semantic_class": semantic_class,
+            })
+        elif semantic_class == "fire":
+            fire_regions.append({
+                "bbox": (x1, y1, x2, y2),
+                "confidence": conf_score,
+                "class_name": class_name,
+                "semantic_class": semantic_class,
+            })
+
+    return fire_regions, smoke_regions, {
+        "model_class_names": model_class_names,
+        "detections_before_filter": detections_before_filter,
+        "detections_after_filter": len(fire_regions) + len(smoke_regions),
+    }
+
+
+def _run_fire_smoke_pass(
     *,
-    input_path: str,
-    output_path: str | None = None,
-    model_path: str = "yolov8n.pt",
-    device: str | None = None,
-    show: bool = False,
-    conf: float = 0.40,
-    **kwargs,
-) -> dict:
-    """
-    Process video for fire and smoke detection.
-
-    Returns dict with output_video path and metrics.
-    """
-    device = device or auto_device()
-    input_p = os.path.abspath(input_path)
-    out_p = build_output_path(input_p, output_path, "_fire_smoke")
-
-    model = load_model(model_path)
-
+    input_p: str,
+    out_p: str,
+    cap_width: int,
+    cap_height: int,
+    sfps: float,
+    yolo_model,
+    use_yolo: bool,
+    conf: float,
+    show: bool,
+) -> dict[str, object]:
     cap = open_video(input_p)
-    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    writer = create_writer(out_p, sfps, fw, fh)
+    writer = create_writer(out_p, sfps, cap_width, cap_height)
 
     frame_num = 0
     total_fire_events = 0
@@ -125,6 +209,9 @@ def process_video(
     smoke_detected_any = False
     first_alert_frame: int | None = None
     t0 = time.time()
+    model_class_names: list[str] = []
+    detections_before_filter = 0
+    detections_after_filter = 0
 
     try:
         while cap.isOpened():
@@ -133,9 +220,24 @@ def process_video(
                 break
             frame_num += 1
 
-            fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
+            if use_yolo and yolo_model is not None:
+                try:
+                    results = yolo_model.predict(
+                        source=frame,
+                        conf=conf,
+                        verbose=False,
+                        imgsz=640,
+                    )
+                    fire_regions, smoke_regions, yolo_summary = _extract_yolo_fire_smoke_regions(results, yolo_model)
+                    detections_before_filter += int(yolo_summary.get("detections_before_filter", 0))
+                    detections_after_filter += int(yolo_summary.get("detections_after_filter", 0))
+                    if not model_class_names:
+                        model_class_names = list(yolo_summary.get("model_class_names", []))
+                except Exception:
+                    fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
+            else:
+                fire_regions, smoke_regions = detect_fire_smoke_hsv(frame)
 
-            # Draw fire detections
             for region in fire_regions:
                 x1, y1, x2, y2 = region["bbox"]
                 cv2.rectangle(frame, (x1, y1), (x2, y2), C_RED, 2)
@@ -144,7 +246,6 @@ def process_video(
                 max_severity = max(max_severity, region["confidence"])
                 fire_detected_any = True
 
-            # Draw smoke detections
             for region in smoke_regions:
                 x1, y1, x2, y2 = region["bbox"]
                 cv2.rectangle(frame, (x1, y1), (x2, y2), C_ORANGE, 2)
@@ -160,9 +261,8 @@ def process_video(
             if (fire_regions or smoke_regions) and first_alert_frame is None:
                 first_alert_frame = frame_num
 
-            # HUD
             fps_live = frame_num / max(1e-6, time.time() - t0)
-            has_alert = len(fire_regions) > 0
+            has_alert = bool(fire_regions or smoke_regions)
 
             draw_hud_panel(frame, "FIRE & SMOKE MONITOR", [
                 (f"Fire Events:  {total_fire_events}", C_RED if total_fire_events > 0 else C_GREEN),
@@ -172,23 +272,20 @@ def process_video(
             ])
 
             if has_alert:
-                draw_alert_bar(frame, f"  FIRE DETECTED — IMMEDIATE ATTENTION REQUIRED  ")
+                draw_alert_bar(frame, "  FIRE / SMOKE DETECTED — IMMEDIATE ATTENTION REQUIRED  ")
 
             writer.write(frame)
 
             if show:
-                disp = cv2.resize(frame, (min(fw, 1280), min(fh, 720)))
+                disp = cv2.resize(frame, (min(cap_width, 1280), min(cap_height, 720)))
                 cv2.imshow("Fire & Smoke Detection", disp)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
-
     finally:
         cap.release()
         writer.release()
         if show:
             cv2.destroyAllWindows()
-
-    validate_output_video(out_p)
 
     processing_time_sec = round(time.time() - t0, 2)
     duration_sec = round(frame_num / sfps, 2) if sfps else None
@@ -217,7 +314,7 @@ def process_video(
         "confidence_score": round(max_severity, 4),
         "response_time_sec": round(first_alert_frame / sfps, 2) if first_alert_frame and sfps else None,
         "status": "alert" if (fire_detected_any or smoke_detected_any) else "clear",
-        "notes": "confidence_score is derived from HSV blob-area heuristics in the current fire/smoke detector.",
+        "notes": "confidence_score is derived from the active fire/smoke detector and may fall back to HSV when the fine-tuned YOLO model is unavailable or produces no valid detections.",
         "metadata": {
             "total_fire_events": total_fire_events,
             "total_smoke_events": total_smoke_events,
@@ -238,6 +335,9 @@ def process_video(
             "processing_time_sec": processing_time_sec,
             "video_duration_sec": duration_sec,
             "event_rows_generated": 1,
+            "model_class_names": model_class_names,
+            "detections_before_filter": detections_before_filter,
+            "detections_after_filter": detections_after_filter,
         },
         "analytics": {
             "video_summary": {
@@ -250,3 +350,110 @@ def process_video(
             "alert_summary": alert_summary,
         },
     }
+
+
+def process_video(
+    *,
+    input_path: str,
+    output_path: str | None = None,
+    model_path: str | None = None,
+    device: str | None = None,
+    show: bool = False,
+    conf: float = 0.40,
+    **kwargs,
+) -> dict:
+    """
+    Process video for fire and smoke detection.
+
+    Returns dict with output_video path and metrics.
+    """
+    device = device or auto_device()
+    input_p = os.path.abspath(input_path)
+    out_p = build_output_path(input_p, output_path, "_fire_smoke")
+    resolved_model_path = _resolve_fire_smoke_model_path(model_path)
+    requested_mode = str(kwargs.get("model_mode") or "active").strip().lower()
+    use_staged_threshold = requested_mode == "staging"
+    yolo_conf = min(conf, 0.20 if use_staged_threshold else conf)
+    yolo_model = None
+    if resolved_model_path is not None:
+        try:
+            yolo_model = load_model(resolved_model_path)
+        except Exception:
+            yolo_model = None
+
+    cap = open_video(input_p)
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.release()
+
+    final_result: dict[str, object]
+    if yolo_model is not None:
+        final_result = _run_fire_smoke_pass(
+            input_p=input_p,
+            out_p=out_p,
+            cap_width=fw,
+            cap_height=fh,
+            sfps=sfps,
+            yolo_model=yolo_model,
+            use_yolo=True,
+            conf=yolo_conf,
+            show=show,
+        )
+        attempted_model_class_names = list(final_result["metrics"].get("model_class_names", []))
+        attempted_detections_before = int(final_result["metrics"].get("detections_before_filter", 0))
+        attempted_detections_after = int(final_result["metrics"].get("detections_after_filter", 0))
+        if int(final_result["metrics"]["detections_after_filter"]) == 0:
+            fallback_result = _run_fire_smoke_pass(
+                input_p=input_p,
+                out_p=out_p,
+                cap_width=fw,
+                cap_height=fh,
+                sfps=sfps,
+                yolo_model=yolo_model,
+                use_yolo=False,
+                conf=conf,
+                show=show,
+            )
+            fallback_result["metrics"]["model_class_names"] = attempted_model_class_names
+            fallback_result["metrics"]["detections_before_filter"] = attempted_detections_before
+            fallback_result["metrics"]["detections_after_filter"] = attempted_detections_after
+            fallback_result["metrics"]["fallback_used"] = True
+            fallback_result["metrics"]["fallback_reason"] = (
+                "staged_fire_model_no_valid_detections"
+                if use_staged_threshold
+                else "fire_model_no_valid_detections"
+            )
+            fallback_result["metrics"]["inference_backend_used"] = "hsv_fallback"
+            fallback_result["metrics"]["model_mode_used"] = requested_mode or "active"
+            fallback_result["metrics"]["model_path_used"] = str(resolved_model_path)
+            final_result = fallback_result
+    else:
+        final_result = _run_fire_smoke_pass(
+            input_p=input_p,
+            out_p=out_p,
+            cap_width=fw,
+            cap_height=fh,
+            sfps=sfps,
+            yolo_model=None,
+            use_yolo=False,
+            conf=conf,
+            show=show,
+        )
+        final_result["metrics"]["fallback_used"] = True
+        final_result["metrics"]["fallback_reason"] = "fire_model_unavailable"
+        final_result["metrics"]["inference_backend_used"] = "hsv_fallback"
+        final_result["metrics"]["model_mode_used"] = requested_mode or "active"
+        final_result["metrics"]["model_path_used"] = str(resolved_model_path) if resolved_model_path else None
+
+    final_result["metrics"].setdefault("model_mode_used", requested_mode or "active")
+    final_result["metrics"].setdefault("model_path_used", str(resolved_model_path) if resolved_model_path else None)
+    final_result["metrics"].setdefault("fallback_used", False)
+    final_result["metrics"].setdefault("fallback_reason", None)
+    final_result["metrics"].setdefault(
+        "inference_backend_used",
+        "yolo" if yolo_model is not None else "hsv_fallback",
+    )
+
+    validate_output_video(out_p)
+    return final_result
