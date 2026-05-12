@@ -132,13 +132,13 @@ from app.services.fine_tuning import (
 )
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
-from use_cases.base import ensure_browser_playable_mp4, validate_output_video
+from use_cases.base import ensure_browser_playable_mp4, read_video_profile, validate_output_video
 from use_cases.crack_detection import process_image as crack_process_image
 from use_cases.fire_smoke import detect_fire_smoke_hsv
 from use_cases.registry import USE_CASE_REGISTRY, get_processor, get_metadata, list_use_cases
 from use_cases.speed_estimation import process_video as speed_process_video
 from use_cases.unsafe_behavior_detection import process_image as unsafe_behavior_process_image
-from use_cases.zone_intrusion import PERSON_CLASS, create_default_zone, point_in_polygon
+from use_cases.zone_intrusion import PERSON_CLASS, create_default_zone, point_in_polygon, zone_from_normalized_points
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = BASE_DIR / "static"
@@ -2498,6 +2498,13 @@ def extract_preview_frame(video_path: Path) -> np.ndarray:
     return frame
 
 
+def try_extract_preview_frame(video_path: Path) -> np.ndarray | None:
+    try:
+        return extract_preview_frame(video_path)
+    except HTTPException:
+        return None
+
+
 def run_yolo_inference(image: np.ndarray) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     if YOLO_MODEL is None:
         raise HTTPException(
@@ -2535,7 +2542,84 @@ def _normalize_fire_detection_mode(value: str | None) -> str:
     return "both"
 
 
-def _parse_preview_roi(roi_json: str | None) -> dict[str, float] | None:
+def _coerce_roi_number(value: Any, *, detail: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=detail) from error
+
+
+def _coerce_roi_normalized_flag(value: Any, *, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized_value = value.strip().lower()
+        if normalized_value in {"true", "1", "yes", "on"}:
+            return True
+        if normalized_value in {"false", "0", "no", "off"}:
+            return False
+    return fallback
+
+
+def _rectangle_roi_points(x1: float, y1: float, x2: float, y2: float) -> list[list[float]]:
+    left = min(x1, x2)
+    right = max(x1, x2)
+    top = min(y1, y2)
+    bottom = max(y1, y2)
+    return [
+        [left, top],
+        [right, top],
+        [right, bottom],
+        [left, bottom],
+    ]
+
+
+def _normalize_roi_points(points: list[list[float]], *, normalized: bool) -> list[list[float]] | None:
+    normalized_points: list[list[float]] = []
+    for raw_x, raw_y in points:
+        if normalized:
+            x = max(0.0, min(1.0, float(raw_x)))
+            y = max(0.0, min(1.0, float(raw_y)))
+        else:
+            x = max(0.0, float(raw_x))
+            y = max(0.0, float(raw_y))
+        normalized_points.append([x, y])
+
+    if len(normalized_points) < 4:
+        return None
+
+    xs = [point[0] for point in normalized_points]
+    ys = [point[1] for point in normalized_points]
+    if max(xs) - min(xs) <= 0 or max(ys) - min(ys) <= 0:
+        return None
+    return normalized_points
+
+
+def _parse_roi_points_payload(points: Any) -> list[list[float]]:
+    if not isinstance(points, (list, tuple)):
+        raise HTTPException(status_code=400, detail="ROI points must be a list.")
+
+    parsed_points: list[list[float]] = []
+    for point in points:
+        if isinstance(point, dict):
+            raw_x = point.get("x")
+            raw_y = point.get("y")
+        elif isinstance(point, (list, tuple)) and len(point) == 2:
+            raw_x, raw_y = point
+        else:
+            raise HTTPException(status_code=400, detail="Each ROI point must contain x and y coordinates.")
+
+        parsed_points.append([
+            _coerce_roi_number(raw_x, detail="ROI point coordinates must be numeric."),
+            _coerce_roi_number(raw_y, detail="ROI point coordinates must be numeric."),
+        ])
+
+    if len(parsed_points) < 4:
+        raise HTTPException(status_code=400, detail="Region Alerts ROI requires at least four points.")
+    return parsed_points
+
+
+def _parse_preview_roi(roi_json: str | None) -> dict[str, Any] | None:
     if not roi_json:
         return None
     try:
@@ -2546,27 +2630,50 @@ def _parse_preview_roi(roi_json: str | None) -> dict[str, float] | None:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="ROI payload must be an object.")
 
-    try:
-        x = max(0.0, min(1.0, float(payload.get("x", 0.0))))
-        y = max(0.0, min(1.0, float(payload.get("y", 0.0))))
-        width = max(0.0, min(1.0, float(payload.get("width", 0.0))))
-        height = max(0.0, min(1.0, float(payload.get("height", 0.0))))
-    except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=400, detail="ROI coordinates must be numeric.") from error
+    roi_type = str(payload.get("type") or "").strip().lower()
+    if roi_type == "polygon" or "points" in payload:
+        raw_points = _parse_roi_points_payload(payload.get("points"))
+        inferred_normalized = all(0.0 <= point[0] <= 1.0 and 0.0 <= point[1] <= 1.0 for point in raw_points)
+        is_normalized = _coerce_roi_normalized_flag(payload.get("normalized"), fallback=inferred_normalized)
+        normalized_points = _normalize_roi_points(raw_points, normalized=is_normalized)
+        if not normalized_points:
+            return None
+        return {
+            "type": "polygon",
+            "normalized": is_normalized,
+            "points": normalized_points,
+        }
 
-    if width <= 0.0 or height <= 0.0:
-        return None
+    if all(key in payload for key in ("x1", "y1", "x2", "y2")):
+        x1 = _coerce_roi_number(payload.get("x1"), detail="ROI coordinates must be numeric.")
+        y1 = _coerce_roi_number(payload.get("y1"), detail="ROI coordinates must be numeric.")
+        x2 = _coerce_roi_number(payload.get("x2"), detail="ROI coordinates must be numeric.")
+        y2 = _coerce_roi_number(payload.get("y2"), detail="ROI coordinates must be numeric.")
+    else:
+        x = _coerce_roi_number(payload.get("x", 0.0), detail="ROI coordinates must be numeric.")
+        y = _coerce_roi_number(payload.get("y", 0.0), detail="ROI coordinates must be numeric.")
+        width = _coerce_roi_number(payload.get("width", 0.0), detail="ROI coordinates must be numeric.")
+        height = _coerce_roi_number(payload.get("height", 0.0), detail="ROI coordinates must be numeric.")
+        if width <= 0.0 or height <= 0.0:
+            return None
+        x1 = x
+        y1 = y
+        x2 = x + width
+        y2 = y + height
 
-    width = min(width, 1.0 - x)
-    height = min(height, 1.0 - y)
-    if width <= 0.0 or height <= 0.0:
+    inferred_normalized = all(0.0 <= coordinate <= 1.0 for coordinate in (x1, y1, x2, y2))
+    is_normalized = _coerce_roi_normalized_flag(payload.get("normalized"), fallback=inferred_normalized)
+    normalized_points = _normalize_roi_points(
+        _rectangle_roi_points(x1, y1, x2, y2),
+        normalized=is_normalized,
+    )
+    if not normalized_points:
         return None
 
     return {
-        "x": x,
-        "y": y,
-        "width": width,
-        "height": height,
+        "type": "rectangle",
+        "normalized": is_normalized,
+        "points": normalized_points,
     }
 
 
@@ -2628,33 +2735,119 @@ def _normalize_region_alert_rule_config(rule_config: Any) -> dict[str, Any] | No
     }
 
 
-def _roi_polygon_from_normalized(roi: dict[str, float], frame_width: int, frame_height: int) -> np.ndarray:
-    x1 = int(round(roi["x"] * frame_width))
-    y1 = int(round(roi["y"] * frame_height))
-    x2 = int(round((roi["x"] + roi["width"]) * frame_width))
-    y2 = int(round((roi["y"] + roi["height"]) * frame_height))
-    x1 = max(0, min(frame_width - 1, x1))
-    y1 = max(0, min(frame_height - 1, y1))
-    x2 = max(x1 + 1, min(frame_width, x2))
-    y2 = max(y1 + 1, min(frame_height, y2))
-    return np.array(
-        [
-            [x1, y1],
-            [x2, y1],
-            [x2, y2],
-            [x1, y2],
-        ],
-        dtype=np.int32,
-    )
+def _roi_points_normalized(
+    roi: dict[str, Any],
+    *,
+    frame_width: int | None = None,
+    frame_height: int | None = None,
+) -> list[list[float]] | None:
+    raw_points = roi.get("points")
+    if not isinstance(raw_points, list) or len(raw_points) < 4:
+        return None
+
+    is_normalized = bool(roi.get("normalized", True))
+    normalized_points: list[list[float]] = []
+    for point in raw_points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            continue
+        try:
+            raw_x = float(point[0])
+            raw_y = float(point[1])
+        except (TypeError, ValueError):
+            continue
+
+        if is_normalized:
+            x = max(0.0, min(1.0, raw_x))
+            y = max(0.0, min(1.0, raw_y))
+        else:
+            if not frame_width or not frame_height:
+                return None
+            x = max(0.0, min(1.0, raw_x / max(frame_width, 1)))
+            y = max(0.0, min(1.0, raw_y / max(frame_height, 1)))
+        normalized_points.append([x, y])
+
+    if len(normalized_points) < 4:
+        return None
+    return normalized_points
 
 
-def _roi_points_normalized(roi: dict[str, float]) -> list[list[float]]:
-    return [
-        [roi["x"], roi["y"]],
-        [roi["x"] + roi["width"], roi["y"]],
-        [roi["x"] + roi["width"], roi["y"] + roi["height"]],
-        [roi["x"], roi["y"] + roi["height"]],
-    ]
+def _roi_polygon_from_payload(roi: dict[str, Any], frame_width: int, frame_height: int) -> np.ndarray:
+    normalized_points = _roi_points_normalized(roi, frame_width=frame_width, frame_height=frame_height)
+    if not normalized_points:
+        return create_default_zone(frame_width, frame_height)
+    return zone_from_normalized_points(normalized_points, frame_width, frame_height)
+
+
+def _roi_debug_coordinates(roi_type: str, points: list[list[float]], *, normalized: bool) -> dict[str, Any]:
+    if roi_type == "rectangle" and len(points) >= 4:
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        value_factory = (lambda value: round(float(value), 6)) if normalized else (lambda value: int(round(float(value))))
+        return {
+            "type": "rectangle",
+            "normalized": normalized,
+            "x1": value_factory(min(xs)),
+            "y1": value_factory(min(ys)),
+            "x2": value_factory(max(xs)),
+            "y2": value_factory(max(ys)),
+        }
+
+    if normalized:
+        serialized_points = [
+            {"x": round(float(point[0]), 6), "y": round(float(point[1]), 6)}
+            for point in points
+        ]
+    else:
+        serialized_points = [
+            {"x": int(round(float(point[0]))), "y": int(round(float(point[1])))}
+            for point in points
+        ]
+    return {
+        "type": "polygon",
+        "normalized": normalized,
+        "points": serialized_points,
+    }
+
+
+def _region_alert_roi_debug_payload(
+    roi: dict[str, Any] | None,
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> dict[str, Any]:
+    roi_mode = "default"
+    roi_payload = None
+
+    if roi is None:
+        roi_type = "rectangle"
+        normalized_points = [
+            [0.25, 0.25],
+            [0.75, 0.25],
+            [0.75, 0.75],
+            [0.25, 0.75],
+        ]
+        pixel_polygon = create_default_zone(frame_width, frame_height)
+    else:
+        roi_type = str(roi.get("type") or "rectangle").strip().lower() or "rectangle"
+        roi_mode = "manual_polygon" if roi_type == "polygon" else "manual_rectangle"
+        normalized_points = _roi_points_normalized(roi, frame_width=frame_width, frame_height=frame_height) or []
+        pixel_polygon = _roi_polygon_from_payload(roi, frame_width, frame_height)
+        raw_points = roi.get("points") if isinstance(roi.get("points"), list) else []
+        roi_payload = _roi_debug_coordinates(
+            roi_type,
+            raw_points,
+            normalized=bool(roi.get("normalized", True)),
+        ) if raw_points else None
+
+    pixel_points = [[int(point[0]), int(point[1])] for point in pixel_polygon.tolist()]
+    return {
+        "input_frame_width": int(frame_width),
+        "input_frame_height": int(frame_height),
+        "roi_payload": roi_payload,
+        "roi_pixel_coordinates": _roi_debug_coordinates(roi_type, pixel_points, normalized=False),
+        "roi_normalized_coordinates": _roi_debug_coordinates(roi_type, normalized_points, normalized=True),
+        "roi_mode": roi_mode,
+    }
 
 
 def _apply_roi_overlay(image: np.ndarray, polygon: np.ndarray, label: str) -> None:
@@ -2844,10 +3037,10 @@ def run_ppe_preview(
     return annotated, detections
 
 
-def run_region_alerts_preview(frame: np.ndarray, roi: dict[str, float] | None = None) -> tuple[np.ndarray, list[dict[str, str | float]]]:
+def run_region_alerts_preview(frame: np.ndarray, roi: dict[str, Any] | None = None) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     annotated = frame.copy()
     fh, fw = annotated.shape[:2]
-    zone = _roi_polygon_from_normalized(roi, fw, fh) if roi else create_default_zone(fw, fh)
+    zone = _roi_polygon_from_payload(roi, fw, fh) if roi else create_default_zone(fw, fh)
 
     overlay = annotated.copy()
     cv2.fillPoly(overlay, [zone], (0, 0, 80))
@@ -2894,10 +3087,30 @@ def run_region_alerts_preview(frame: np.ndarray, roi: dict[str, float] | None = 
     return annotated, detections
 
 
+def _build_region_alert_preview_cache_key(video_path: Path, roi: dict[str, Any] | None = None) -> str:
+    digest = hashlib.sha1()
+    with video_path.open("rb") as source_file:
+        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if roi:
+        digest.update(json.dumps(roi, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+def _round_video_metric(value: Any, *, digits: int = 3) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return round(number, digits)
+
+
 def run_region_alerts_video_preview(
     video_path: Path,
     source_name: str | None = None,
-    roi: dict[str, float] | None = None,
+    roi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     processor = get_processor("region-alerts")
     if processor is None:
@@ -2905,7 +3118,11 @@ def run_region_alerts_video_preview(
 
     source_stem = Path(source_name or video_path.name).stem or f"region_preview_{uuid4().hex[:8]}"
     safe_stem = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in source_stem).strip("_") or "region_preview"
-    output_path = PROCESSED_DIR / f"{safe_stem}_region_alerts_preview.mp4"
+    preview_cache_key = _build_region_alert_preview_cache_key(video_path, roi=roi)
+    input_profile = read_video_profile(str(video_path))
+    frame_width = int(input_profile.get("width") or 0)
+    frame_height = int(input_profile.get("height") or 0)
+    output_path = PROCESSED_DIR / f"{safe_stem}_{preview_cache_key}_region_alerts_preview.mp4"
 
     result = processor(
         input_path=str(video_path),
@@ -2913,13 +3130,24 @@ def run_region_alerts_video_preview(
         model_path=resolve_default_model_path(),
         device=auto_device(),
         show=False,
-        zone_points_normalized=_roi_points_normalized(roi) if roi else None,
+        zone_points_normalized=_roi_points_normalized(roi, frame_width=frame_width, frame_height=frame_height) if roi else None,
     )
     actual_output = _resolve_completed_output_path(output_path, result)
-    preview_frame = extract_preview_frame(actual_output)
+    output_profile = read_video_profile(str(actual_output))
+    preview_frame = try_extract_preview_frame(actual_output)
 
     analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
+    result_metrics = result.get("metrics", {}) if isinstance(result, dict) and isinstance(result.get("metrics"), dict) else {}
     intrusion_summaries = analytics.get("intrusion_summaries", []) if isinstance(analytics.get("intrusion_summaries"), list) else []
+    explicit_intrusion_count = analytics.get("intrusion_count") if isinstance(analytics, dict) else None
+    metrics_intrusion_count = result_metrics.get("total_intrusions") if isinstance(result_metrics.get("total_intrusions"), (int, float)) else None
+    intrusion_count = int(
+        explicit_intrusion_count
+        if isinstance(explicit_intrusion_count, (int, float))
+        else metrics_intrusion_count
+        if isinstance(metrics_intrusion_count, (int, float))
+        else len(intrusion_summaries)
+    )
     detections = [
         {
             "class": str(event.get("alert_type", "zone_intrusion")).replace("_", " "),
@@ -2930,11 +3158,60 @@ def run_region_alerts_video_preview(
         }
         for event in intrusion_summaries
     ]
+    frames_processed = int(result_metrics.get("frames_analyzed") or input_profile.get("frame_count") or 0)
+    normalized_input_fps = _round_video_metric(
+        result_metrics.get("normalized_input_fps", result_metrics.get("input_fps")),
+        digits=4,
+    )
+    output_fps = _round_video_metric(
+        result_metrics.get("output_fps", normalized_input_fps or output_profile.get("fps")),
+        digits=4,
+    )
+    input_duration_sec = _round_video_metric(
+        result_metrics.get("input_duration_sec", input_profile.get("duration_sec")),
+        digits=4,
+    )
+    output_duration_sec = _round_video_metric(
+        result_metrics.get("output_duration_sec", output_profile.get("duration_sec")),
+        digits=4,
+    )
+    response_metrics = {
+        **result_metrics,
+        "input_duration_sec": input_duration_sec,
+        "output_duration_sec": output_duration_sec,
+        "input_fps": normalized_input_fps,
+        "output_fps": output_fps,
+        "frames_processed": frames_processed,
+        "input_frame_count": int(input_profile.get("frame_count") or 0) or None,
+        "output_frame_count": int(output_profile.get("frame_count") or 0) or None,
+        "raw_input_fps": _round_video_metric(result_metrics.get("raw_input_fps", input_profile.get("raw_fps")), digits=4),
+        "normalized_input_fps": normalized_input_fps,
+        "fps_source": str(result_metrics.get("fps_source") or input_profile.get("fps_source") or "fallback_default"),
+        "input_fps_source": input_profile.get("fps_source"),
+        "output_fps_source": output_profile.get("fps_source"),
+    }
+    output_video_url = f"/static/processed/{actual_output.name}?v={actual_output.stat().st_mtime_ns}"
+    roi_debug = _region_alert_roi_debug_payload(
+        roi,
+        frame_width=frame_width or int(output_profile.get("width") or 0),
+        frame_height=frame_height or int(output_profile.get("height") or 0),
+    )
 
     return {
-        "preview_image_base64": image_to_base64(preview_frame),
+        "preview_image_base64": image_to_base64(preview_frame) if preview_frame is not None else "",
         "detections": detections,
-        "output_video_url": f"/static/processed/{actual_output.name}",
+        "intrusion_count": intrusion_count,
+        "output_video_url": output_video_url,
+        "input_duration_sec": input_duration_sec,
+        "output_duration_sec": output_duration_sec,
+        "input_fps": normalized_input_fps,
+        "output_fps": output_fps,
+        "frames_processed": frames_processed,
+        "raw_input_fps": response_metrics["raw_input_fps"],
+        "normalized_input_fps": normalized_input_fps,
+        "fps_source": response_metrics["fps_source"],
+        "metrics": response_metrics,
+        **roi_debug,
     }
 
 
@@ -2942,7 +3219,7 @@ def run_fire_detection_preview(
     frame: np.ndarray,
     *,
     detection_mode: str = "both",
-    roi: dict[str, float] | None = None,
+    roi: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, str | float]]]:
     normalized_mode = _normalize_fire_detection_mode(detection_mode)
     include_fire = normalized_mode in {"fire", "both"}
@@ -2980,7 +3257,7 @@ def run_fire_detection_preview(
 
     annotated = frame.copy()
     fh, fw = annotated.shape[:2]
-    roi_polygon = _roi_polygon_from_normalized(roi, fw, fh) if roi else None
+    roi_polygon = _roi_polygon_from_payload(roi, fw, fh) if roi else None
     if roi_polygon is not None:
         _apply_roi_overlay(annotated, roi_polygon, "ROI FILTER")
 
@@ -3236,7 +3513,7 @@ def build_playground_preview_response(
     use_case_id: str,
     meta: dict[str, Any],
     file_kind: str,
-    frame: np.ndarray,
+    frame: np.ndarray | None,
     temp_path: Path | None = None,
     cleanup_temp_path: bool = True,
     source_name: str | None = None,
@@ -3247,14 +3524,21 @@ def build_playground_preview_response(
     fire_detection_mode = _normalize_fire_detection_mode(preview_options.get("fire_detection_mode"))
     ppe_detection_mode = _normalize_ppe_detection_mode(preview_options.get("ppe_detection_mode"))
     speed_detection_class = _normalize_speed_detection_class(preview_options.get("speed_detection_class"))
+    region_video_preview: dict[str, Any] | None = None
     try:
         if use_case_id == "ppe-detection":
+            if frame is None:
+                raise HTTPException(status_code=400, detail="PPE playground preview requires a readable image or preview frame.")
             annotated_image, detections = run_ppe_preview(frame, detection_mode=ppe_detection_mode)
             model_source = PPE_PREVIEW_MODEL_SOURCE
         elif use_case_id == "object-counting":
+            if frame is None:
+                raise HTTPException(status_code=400, detail="Object counting playground preview requires a readable image or preview frame.")
             annotated_image, detections = run_object_counting_preview(frame)
             model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "class-wise-object-counting":
+            if frame is None:
+                raise HTTPException(status_code=400, detail="Class-wise object counting playground preview requires a readable image or preview frame.")
             annotated_image, detections = run_classwise_counting_preview(frame)
             model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "region-alerts":
@@ -3264,10 +3548,13 @@ def build_playground_preview_response(
                 detections = region_video_preview["detections"]
                 model_source = "use_cases.zone_intrusion"
             else:
+                if frame is None:
+                    raise HTTPException(status_code=400, detail="Region alerts playground preview requires a readable image or video.")
                 annotated_image, detections = run_region_alerts_preview(frame, roi=roi)
-                region_video_preview = None
                 model_source = YOLO_MODEL_SOURCE
         elif use_case_id == "fire-detection":
+            if frame is None:
+                raise HTTPException(status_code=400, detail="Fire detection playground preview requires a readable image or preview frame.")
             annotated_image, detections = run_fire_detection_preview(frame, detection_mode=fire_detection_mode, roi=roi)
             model_source = FIRE_SMOKE_PREVIEW_MODEL_SOURCE or "fire-smoke-hsv-preview"
         elif use_case_id == "speed-estimation":
@@ -3284,6 +3571,8 @@ def build_playground_preview_response(
                     raise HTTPException(status_code=400, detail="Crack detection playground preview requires a valid uploaded video.")
                 annotated_image, detections, crack_metrics = run_crack_detection_preview(video_path=temp_path)
             else:
+                if frame is None:
+                    raise HTTPException(status_code=400, detail="Crack detection playground preview requires a readable image.")
                 annotated_image, detections, crack_metrics = run_crack_detection_preview(frame=frame)
             model_source = "use_cases.crack_detection"
         elif use_case_id == "unsafe-behavior-detection":
@@ -3292,9 +3581,13 @@ def build_playground_preview_response(
                     raise HTTPException(status_code=400, detail="Unsafe behavior playground preview requires a valid uploaded video.")
                 annotated_image, detections, unsafe_metrics = run_unsafe_behavior_preview(video_path=temp_path)
             else:
+                if frame is None:
+                    raise HTTPException(status_code=400, detail="Unsafe behavior playground preview requires a readable image.")
                 annotated_image, detections, unsafe_metrics = run_unsafe_behavior_preview(frame=frame)
             model_source = "use_cases.unsafe_behavior_detection"
         else:
+            if frame is None:
+                raise HTTPException(status_code=400, detail="Playground preview requires a readable image or preview frame.")
             annotated_image, detections = run_yolo_inference(frame)
             model_source = YOLO_MODEL_SOURCE
     except RuntimeError as error:
@@ -3317,13 +3610,33 @@ def build_playground_preview_response(
             "roi_applied": bool(roi),
         },
     }
+    if use_case_id == "region-alerts":
+        if file_kind == "video" and region_video_preview is not None:
+            response.update({
+                "input_frame_width": region_video_preview.get("input_frame_width"),
+                "input_frame_height": region_video_preview.get("input_frame_height"),
+                "roi_payload": region_video_preview.get("roi_payload"),
+                "roi_pixel_coordinates": region_video_preview.get("roi_pixel_coordinates"),
+                "roi_normalized_coordinates": region_video_preview.get("roi_normalized_coordinates"),
+                "roi_mode": region_video_preview.get("roi_mode"),
+            })
+        elif frame is not None:
+            frame_height, frame_width = frame.shape[:2]
+            response.update(_region_alert_roi_debug_payload(roi, frame_width=frame_width, frame_height=frame_height))
     if use_case_id == "crack-detection":
         response["metrics"] = crack_metrics
     if use_case_id == "unsafe-behavior-detection":
         response["metrics"] = unsafe_metrics
     if use_case_id == "region-alerts" and file_kind == "video" and temp_path is not None and region_video_preview is not None:
-        response["image_base64"] = region_video_preview["preview_image_base64"]
+        response["image_base64"] = region_video_preview.get("preview_image_base64") or ""
         response["output_video_url"] = region_video_preview["output_video_url"]
+        response["intrusion_count"] = region_video_preview.get("intrusion_count", 0)
+        response["input_duration_sec"] = region_video_preview.get("input_duration_sec")
+        response["output_duration_sec"] = region_video_preview.get("output_duration_sec")
+        response["input_fps"] = region_video_preview.get("input_fps")
+        response["output_fps"] = region_video_preview.get("output_fps")
+        response["frames_processed"] = region_video_preview.get("frames_processed")
+        response["metrics"] = region_video_preview.get("metrics", {})
     else:
         response["image_base64"] = image_to_base64(annotated_image)
     return response
@@ -4795,6 +5108,7 @@ async def playground_preview(
     contents = await file.read()
 
     temp_path: Path | None = None
+    frame: np.ndarray | None = None
 
     if file_kind == "image":
         np_buffer = np.frombuffer(contents, dtype=np.uint8)
@@ -4806,7 +5120,8 @@ async def playground_preview(
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
             temp_video.write(contents)
             temp_path = Path(temp_video.name)
-        frame = extract_preview_frame(temp_path)
+        if use_case_id != "region-alerts":
+            frame = extract_preview_frame(temp_path)
 
     return build_playground_preview_response(
         use_case_id=use_case_id,
@@ -4850,6 +5165,7 @@ async def playground_preview_sample(
 
     file_kind = detect_path_kind(sample_path)
     temp_path: Path | None = None
+    frame: np.ndarray | None = None
 
     if file_kind == "image":
         frame = cv2.imread(str(sample_path))
@@ -4859,7 +5175,8 @@ async def playground_preview_sample(
         with tempfile.NamedTemporaryFile(delete=False, suffix=sample_path.suffix or ".mp4") as temp_video:
             shutil.copyfile(sample_path, temp_video.name)
             temp_path = Path(temp_video.name)
-        frame = extract_preview_frame(temp_path)
+        if use_case_id != "region-alerts":
+            frame = extract_preview_frame(temp_path)
 
     return build_playground_preview_response(
         use_case_id=use_case_id,

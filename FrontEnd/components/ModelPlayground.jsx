@@ -524,8 +524,11 @@ export default function ModelPlayground({
             <div className="relative flex h-[28rem] items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4">
               {playgroundState.outputVideoUrl ? (
                 <video
+                  key={playgroundState.outputVideoUrl}
+                  autoPlay
                   className="max-h-full max-w-full rounded-xl object-contain"
                   controls
+                  muted
                   playsInline
                   preload="metadata"
                   poster={playgroundState.imageBase64 || undefined}
