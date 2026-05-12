@@ -72,3 +72,6 @@ BackEnd/runs/
 *.db
 *.cache
 BackEnd/static/processed/*.mp4
+
+
+*.db
