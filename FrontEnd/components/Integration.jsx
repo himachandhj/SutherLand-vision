@@ -45,6 +45,26 @@ function formatAnalysisValue(value) {
   return String(value);
 }
 
+const HIDDEN_REGION_ALERT_OUTPUT_LABELS = new Set([
+  "Peak Zone Occupancy",
+  "Event Rows Generated",
+  "Processing Version",
+  "Analytics Input ID",
+  "Analytics Output Rows",
+  "Fallback Used",
+  "Fallback Reason",
+]);
+
+function getRegionAlertAnalysisDisplayValue(label, value) {
+  if (label === "Model Class Names") {
+    return "person, bicycle, car, motorcycle, bus, truck";
+  }
+  if (label === "Requested Model Class Names") {
+    return "person";
+  }
+  return formatAnalysisValue(value);
+}
+
 function normalizeAnalysisCountMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   return Object.entries(value)
@@ -256,7 +276,14 @@ function RunAnalysisPanel({ run }) {
     return <UnsafeBehaviorRunAnalysisPanel run={run} />;
   }
 
-  const entries = Object.entries(run.metrics ?? {});
+  const isRegionAlerts = run.use_case_id === "region-alerts";
+  const entries = Object.entries(run.metrics ?? {})
+    .map(([key, value]) => ({
+      key,
+      label: formatAnalysisLabel(key),
+      value,
+    }))
+    .filter((entry) => !(isRegionAlerts && HIDDEN_REGION_ALERT_OUTPUT_LABELS.has(entry.label)));
   const fallbackUsed = Boolean(run.metrics?.fallback_used);
   const fallbackReason = run.metrics?.fallback_reason;
 
@@ -269,7 +296,7 @@ function RunAnalysisPanel({ run }) {
         </div>
         <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Run #{run.id}</div>
       </div>
-      {fallbackUsed ? (
+      {fallbackUsed && !isRegionAlerts ? (
         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
           {fallbackReason || "Staged model was not compatible or produced no valid detections, so the current/default model was used for this run."}
         </div>
@@ -280,10 +307,12 @@ function RunAnalysisPanel({ run }) {
         </div>
       ) : (
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {entries.map(([key, value]) => (
-            <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{formatAnalysisLabel(key)}</div>
-              <div className="mt-2 break-words text-sm font-medium text-slate-800">{formatAnalysisValue(value)}</div>
+          {entries.map((entry) => (
+            <div key={entry.key} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{entry.label}</div>
+              <div className="mt-2 break-words text-sm font-medium text-slate-800">
+                {isRegionAlerts ? getRegionAlertAnalysisDisplayValue(entry.label, entry.value) : formatAnalysisValue(entry.value)}
+              </div>
             </div>
           ))}
         </div>
@@ -362,8 +391,11 @@ function IntegrationModelModeControl({
   connection,
   disabled,
   helperText,
+  hideModelFallbackReason = false,
+  hideModelUsageLabel = false,
   label,
   modelState,
+  modelPathTitle = "Current backend model",
   selectedMode,
   onChange,
 }) {
@@ -390,10 +422,12 @@ function IntegrationModelModeControl({
       </p>
       {connection?.model_path_used ? (
         <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
-          <div className="font-semibold uppercase tracking-[0.18em] text-slate-400">Current backend model</div>
-          <div className="mt-2 text-sm font-medium text-slate-700">{formatModelUsageLabel(connection.model_mode_used)}</div>
-          <div className="mt-1 break-all">{connection.model_path_used}</div>
-          {connection.fallback_used && connection.fallback_reason ? (
+          <div className="font-semibold uppercase tracking-[0.18em] text-slate-400">{modelPathTitle}</div>
+          {!hideModelUsageLabel ? (
+            <div className="mt-2 text-sm font-medium text-slate-700">{formatModelUsageLabel(connection.model_mode_used)}</div>
+          ) : null}
+          <div className={`${hideModelUsageLabel ? "mt-2" : "mt-1"} break-all`}>{connection.model_path_used}</div>
+          {!hideModelFallbackReason && connection.fallback_used && connection.fallback_reason ? (
             <div className="mt-2 text-amber-700">{connection.fallback_reason}</div>
           ) : null}
         </div>
@@ -642,6 +676,7 @@ function IntegrationManualPanel({
   isFetching,
   modelState,
   isProcessing,
+  isRegionAlerts,
   fetchMessage,
   processMessage,
   selectedModelMode,
@@ -695,7 +730,10 @@ function IntegrationManualPanel({
             connection={connection}
             disabled={disabled || isProcessing}
             helperText="Choose which model should be used only for the selected manual video run."
+            hideModelFallbackReason={isRegionAlerts}
+            hideModelUsageLabel={isRegionAlerts}
             label="Model for this run"
+            modelPathTitle={isRegionAlerts ? "Current active model path" : "Current backend model"}
             modelState={modelState}
             selectedMode={selectedModelMode}
             onChange={onModelModeChange}
@@ -832,6 +870,7 @@ export default function Integration({
   const supportedUseCase = integrationSupportedUseCases.has(activeUseCase.id);
   const useCaseLabel = activeUseCase.title;
   const connection = integrationOverview?.connection;
+  const isMinioConnected = Boolean(integrationOverview?.connected || connection);
   const recentRuns = integrationOverview?.recent_runs ?? [];
   const activeMode = connection?.processing_mode ?? integrationMode;
   const isAutoMode = activeMode === "auto";
@@ -904,14 +943,14 @@ export default function Integration({
               onClick={() => onIntegrationConnect()}
               type="button"
             >
-              {isConnectingIntegration ? "Connecting…" : integrationOverview.connected ? "Reconnect MinIO" : "Connect"}
+              {isConnectingIntegration ? "Connecting…" : isMinioConnected ? "Reconnect" : "Connect"}
             </button>
-            {integrationOverview.connected && (
+            {isMinioConnected && (
               <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${integrationStatusClasses(integrationOverview.processing ? "processing" : "completed")}`}>
                 {integrationOverview.processing ? "Connected • Processing" : "Connected"}
               </span>
             )}
-            {!integrationOverview.connected && supportedUseCase && (
+            {!isMinioConnected && supportedUseCase && (
               <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Not Connected
               </span>
@@ -1006,6 +1045,7 @@ export default function Integration({
           isFetching={isFetchingIntegrationVideos}
           modelState={integrationModelState}
           isProcessing={isProcessingIntegrationVideos}
+          isRegionAlerts={isRegionAlerts}
           fetchMessage={integrationFetchMessage}
           processMessage={integrationProcessMessage}
           selectedModelMode={integrationManualModelMode}

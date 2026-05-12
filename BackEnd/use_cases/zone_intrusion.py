@@ -20,7 +20,7 @@ import numpy as np
 from use_cases.base import (
     FONT, C_RED, C_GREEN, C_YELLOW, C_WHITE, C_GRAY, C_BLUE, C_CYAN,
     auto_device, open_video, create_writer, build_output_path,
-    load_model, draw_hud_panel, draw_alert_bar, draw_label,
+    load_model, draw_hud_panel, draw_alert_bar, draw_label, read_video_profile,
 )
 
 
@@ -191,16 +191,18 @@ def process_video(
     )
 
     cap = open_video(input_p)
-    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    writer = create_writer(out_p, sfps, fw, fh)
+    source_profile = read_video_profile(input_p, cap=cap)
+    fw = int(source_profile.get("width") or cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    fh = int(source_profile.get("height") or cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    writer_fps = float(source_profile.get("normalized_fps") or source_profile.get("fps") or 25.0)
+    total_frames = int(source_profile.get("frame_count") or cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    source_duration_sec = source_profile.get("duration_sec")
+    writer = create_writer(out_p, writer_fps, fw, fh)
 
     # Define restricted zone
     zone = zone_from_normalized_points(kwargs.get("zone_points_normalized"), fw, fh)
     effective_conf = confidence_threshold
-    required_frames = max(0, int(round(alert_delay_sec * sfps)))
+    required_frames = max(0, int(round(alert_delay_sec * writer_fps)))
 
     seen_intruders = set()
     total_intrusions = 0
@@ -343,15 +345,15 @@ def process_video(
         raise RuntimeError(f"Output missing or empty: {out_p}")
 
     processing_time_sec = round(time.time() - t0, 2)
-    duration_sec = round(frame_num / sfps, 2) if sfps else None
+    output_duration_sec = round(frame_num / writer_fps, 4) if writer_fps else None
     intrusion_summaries = []
 
     for tid, event in sorted(intrusion_events.items(), key=lambda item: int(item[0])):
-        entry_time = round(int(event["first_seen_frame"]) / sfps, 2) if sfps else None
-        exit_time = round(int(event["last_seen_frame"]) / sfps, 2) if sfps else None
+        entry_time = round(int(event["first_seen_frame"]) / writer_fps, 2) if writer_fps else None
+        exit_time = round(int(event["last_seen_frame"]) / writer_fps, 2) if writer_fps else None
         duration = (
-            round(max(0, int(event["last_seen_frame"]) - int(event["first_seen_frame"])) / sfps, 2)
-            if sfps else None
+            round(max(0, int(event["last_seen_frame"]) - int(event["first_seen_frame"])) / writer_fps, 2)
+            if writer_fps else None
         )
         max_confidence = round(float(event["confidence_max"]), 4)
         if (duration or 0) >= 10 or max_confidence >= 0.85:
@@ -390,7 +392,21 @@ def process_video(
             "peak_zone_occupancy": peak_zone_occupancy,
             "frames_analyzed": frame_num,
             "processing_time_sec": processing_time_sec,
-            "video_duration_sec": duration_sec,
+            "video_duration_sec": output_duration_sec,
+            "input_fps": round(float(writer_fps), 4) if writer_fps else None,
+            "output_fps": round(float(writer_fps), 4) if writer_fps else None,
+            "input_duration_sec": round(float(source_duration_sec), 4) if source_duration_sec else output_duration_sec,
+            "output_duration_sec": output_duration_sec,
+            "input_frame_count": total_frames or frame_num,
+            "frame_width": fw,
+            "frame_height": fh,
+            "fps_source": str(source_profile.get("fps_source") or "fallback_default"),
+            "raw_input_fps": round(float(source_profile.get("raw_fps")), 4) if source_profile.get("raw_fps") else None,
+            "normalized_input_fps": round(float(writer_fps), 4) if writer_fps else None,
+            "decoded_input_frame_count": int(source_profile.get("decoded_frame_count") or 0) or None,
+            "reported_input_frame_count": int(source_profile.get("opencv_frame_count") or 0) or None,
+            "input_frame_count_source": str(source_profile.get("frame_count_source") or "unknown"),
+            "raw_duration_mismatch": bool(source_profile.get("raw_duration_mismatch")),
             "event_rows_generated": len(intrusion_summaries),
             "model_mode_used": requested_mode or "active",
             "model_path_used": selected_model_path,
@@ -404,8 +420,8 @@ def process_video(
         "analytics": {
             "video_summary": {
                 "frame_count": frame_num,
-                "fps": round(float(sfps), 2) if sfps else None,
-                "duration_sec": duration_sec,
+                "fps": round(float(writer_fps), 2) if writer_fps else None,
+                "duration_sec": round(float(source_duration_sec), 2) if source_duration_sec else output_duration_sec,
                 "processing_time_sec": processing_time_sec,
                 "simulated_timestamp": datetime.now(timezone.utc).isoformat(),
                 "zone_type": "restricted",

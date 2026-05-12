@@ -191,6 +191,8 @@ function annotationClassName(box) {
   return String(box?.class_name || "object").trim().toLowerCase();
 }
 
+const REGION_ALERTS_CLASSES = ["person", "car", "bus", "truck", "motorcycle", "bicycle", "forklift"];
+
 function defaultClassOptions(useCaseId) {
   const defaults = {
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -199,7 +201,7 @@ function defaultClassOptions(useCaseId) {
     "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "ppe-detection": ["person", "helmet", "vest"],
     "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
-    "region-alerts": ["person"],
+    "region-alerts": REGION_ALERTS_CLASSES,
   };
   return defaults[useCaseId] ?? ["object"];
 }
@@ -434,6 +436,7 @@ export default function AnnotationEditorPage() {
     if (lastSuggestionContext !== "test") return 0;
     return Number(autoLabelPreview?.returned_item_count ?? autoLabelPreview?.processed_item_count ?? 0);
   }, [autoLabelPreview, lastSuggestionContext]);
+  const isRegionAlerts = activeUseCase.id === "region-alerts";
   const hasPendingSuggestions = pendingSuggestionCount > 0;
   const requiresApprovedSave = hasApprovedSuggestions && !hasSavedApprovedSuggestions;
   const workflowStage = !assistMode
@@ -448,7 +451,9 @@ export default function AnnotationEditorPage() {
           ? { label: "Ready for test", tone: "normal" }
           : { label: "Build sample labels", tone: "normal" };
   const workflowHelperText = !assistMode
-    ? "Label a few sample images manually."
+    ? isRegionAlerts
+      ? "Label people and vehicles in representative images or extracted video frames from the target environment."
+      : "Label a few sample images manually."
     : hasPendingSuggestions
       ? "Review these suggestions carefully before applying to the dataset."
       : requiresApprovedSave
@@ -457,7 +462,9 @@ export default function AnnotationEditorPage() {
           ? "Apply auto-labeling to remaining images."
           : hasSavedSampleLabels
             ? "Now test auto-labeling on a few unseen images."
-            : "Label a few sample images manually.";
+            : isRegionAlerts
+              ? "Start with labeled images or extracted video frames from the target environment."
+              : "Label a few sample images manually.";
 
   const setLoadingFlag = (key, value) => {
     setLoading((current) => ({ ...current, [key]: value }));
@@ -1461,6 +1468,16 @@ export default function AnnotationEditorPage() {
               {message}
             </div>
           ) : null}
+          {isRegionAlerts ? (
+            <div className="mb-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-slate-700">
+              <p>
+                Fine-tuning improves the object detector used by Region Alerts Detection. ROI selection, restricted-zone rules, confidence thresholds, and trigger settings are configured separately in Integration.
+              </p>
+              <p className="mt-2">
+                For Region Alerts Detection, fine-tuning focuses on improving person/vehicle detection quality. Use labeled images or extracted video frames from the target environment. Video datasets should be converted into image frames before annotation.
+              </p>
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-slate-900">Current image</div>
@@ -2087,8 +2104,8 @@ export default function AnnotationEditorPage() {
                 </select>
               </label>
               {[
-                ["x_center", "X center"],
-                ["y_center", "Y center"],
+                ["x_center", "X"],
+                ["y_center", "Y"],
                 ["width", "Width"],
                 ["height", "Height"],
               ].map(([field, label]) => (

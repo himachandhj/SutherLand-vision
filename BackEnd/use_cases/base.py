@@ -2,6 +2,8 @@
 Shared utilities for all use case video processors.
 """
 
+import json
+import math
 import os
 import shutil
 import subprocess
@@ -14,6 +16,12 @@ warnings.filterwarnings("ignore")
 import cv2
 import numpy as np
 from ultralytics import YOLO
+
+DEFAULT_VIDEO_FPS = 25.0
+MIN_REASONABLE_VIDEO_FPS = 1.0
+MAX_REASONABLE_VIDEO_FPS = 120.0
+MAX_NORMALIZED_VIDEO_FPS = 60.0
+DURATION_MISMATCH_TOLERANCE_RATIO = 0.15
 
 
 def auto_device() -> str:
@@ -39,12 +47,270 @@ def open_video(path: str) -> cv2.VideoCapture:
     return cap
 
 
+def _coerce_positive_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _coerce_positive_int(value) -> int | None:
+    number = _coerce_positive_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _parse_ffprobe_rate(value: str | None) -> float | None:
+    if not value or value == "N/A":
+        return None
+    if "/" in value:
+        numerator_raw, denominator_raw = value.split("/", 1)
+        try:
+            numerator = float(numerator_raw)
+            denominator = float(denominator_raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numerator) or not math.isfinite(denominator) or denominator <= 0 or numerator <= 0:
+            return None
+        rate = numerator / denominator
+        return rate if math.isfinite(rate) and rate > 0 else None
+    return _coerce_positive_float(value)
+
+
+def _relative_delta(left: float | None, right: float | None) -> float | None:
+    if left is None or right is None:
+        return None
+    baseline = max(abs(left), abs(right), 1e-6)
+    return abs(left - right) / baseline
+
+
+def _clamp_fps(value: float | None, *, minimum: float = MIN_REASONABLE_VIDEO_FPS, maximum: float = MAX_NORMALIZED_VIDEO_FPS) -> float | None:
+    number = _coerce_positive_float(value)
+    if number is None:
+        return None
+    return max(minimum, min(maximum, number))
+
+
+def probe_video_stream_metadata(path: str, *, count_frames: bool = False) -> dict[str, float | int | None]:
+    """Read stream metadata via ffprobe when available."""
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is None:
+        return {
+            "avg_fps": None,
+            "stream_fps": None,
+            "frame_count": None,
+            "read_frame_count": None,
+            "duration_sec": None,
+            "width": None,
+            "height": None,
+        }
+
+    try:
+        command = [
+            ffprobe_path,
+            "-v",
+            "error",
+        ]
+        if count_frames:
+            command.append("-count_frames")
+        command.extend(
+            [
+                "-show_entries",
+                "stream=avg_frame_rate,r_frame_rate,nb_frames,nb_read_frames,width,height,duration:format=duration",
+                "-of",
+                "json",
+                path,
+            ]
+        )
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(result.stdout or "{}")
+    except Exception:
+        return {
+            "avg_fps": None,
+            "stream_fps": None,
+            "frame_count": None,
+            "read_frame_count": None,
+            "duration_sec": None,
+            "width": None,
+            "height": None,
+        }
+
+    stream = ((payload.get("streams") or [None])[0]) or {}
+    format_info = payload.get("format") or {}
+    return {
+        "avg_fps": _parse_ffprobe_rate(stream.get("avg_frame_rate")),
+        "stream_fps": _parse_ffprobe_rate(stream.get("r_frame_rate")),
+        "frame_count": _coerce_positive_int(stream.get("nb_frames")),
+        "read_frame_count": _coerce_positive_int(stream.get("nb_read_frames")),
+        "duration_sec": _coerce_positive_float(stream.get("duration")) or _coerce_positive_float(format_info.get("duration")),
+        "width": _coerce_positive_int(stream.get("width")),
+        "height": _coerce_positive_int(stream.get("height")),
+    }
+
+
+def read_video_profile(
+    path: str,
+    *,
+    cap: cv2.VideoCapture | None = None,
+    default_fps: float = DEFAULT_VIDEO_FPS,
+    max_reasonable_fps: float = MAX_REASONABLE_VIDEO_FPS,
+) -> dict[str, float | int | str | None]:
+    """
+    Normalize source video metadata.
+
+    OpenCV can report bogus values such as 1000 FPS for some browser- or mobile-
+    generated files. When that happens, prefer ffprobe metadata or a frame-count /
+    duration estimate before falling back to a safe default FPS.
+    """
+    owns_capture = cap is None
+    capture = cap or open_video(path)
+    try:
+        raw_fps = _coerce_positive_float(capture.get(cv2.CAP_PROP_FPS))
+        opencv_frame_count = _coerce_positive_int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = _coerce_positive_int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = _coerce_positive_int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        if owns_capture:
+            capture.release()
+
+    opencv_duration_sec = None
+    if raw_fps is not None and opencv_frame_count is not None and raw_fps > 0:
+        opencv_duration_sec = opencv_frame_count / raw_fps
+        if not math.isfinite(opencv_duration_sec) or opencv_duration_sec <= 0:
+            opencv_duration_sec = None
+
+    probed = probe_video_stream_metadata(path)
+    avg_fps = _coerce_positive_float(probed.get("avg_fps"))
+    stream_fps = _coerce_positive_float(probed.get("stream_fps"))
+    probed_frame_count = _coerce_positive_int(probed.get("frame_count"))
+    decoded_frame_count = _coerce_positive_int(probed.get("read_frame_count"))
+    duration_sec = _coerce_positive_float(probed.get("duration_sec")) or opencv_duration_sec
+
+    if width is None:
+        width = _coerce_positive_int(probed.get("width"))
+    if height is None:
+        height = _coerce_positive_int(probed.get("height"))
+
+    raw_fps_invalid = raw_fps is None or raw_fps < MIN_REASONABLE_VIDEO_FPS or raw_fps > max_reasonable_fps
+    metadata_frame_count = decoded_frame_count or probed_frame_count or opencv_frame_count
+    raw_duration_mismatch = False
+    if (
+        raw_fps is not None
+        and duration_sec is not None
+        and duration_sec > 0
+        and metadata_frame_count is not None
+        and metadata_frame_count > 0
+    ):
+        estimated_duration = metadata_frame_count / raw_fps
+        mismatch_ratio = _relative_delta(estimated_duration, duration_sec)
+        raw_duration_mismatch = bool(
+            mismatch_ratio is not None and mismatch_ratio > DURATION_MISMATCH_TOLERANCE_RATIO
+        )
+
+    suspicious_stream_timing = bool(
+        (stream_fps is not None and stream_fps > max_reasonable_fps)
+        or (avg_fps is None and stream_fps is not None and stream_fps > max_reasonable_fps)
+    )
+    needs_decoded_frame_count = bool(
+        duration_sec is not None
+        and (
+            raw_fps_invalid
+            or raw_duration_mismatch
+            or suspicious_stream_timing
+            or decoded_frame_count is None
+        )
+    )
+    if needs_decoded_frame_count:
+        counted = probe_video_stream_metadata(path, count_frames=True)
+        decoded_frame_count = _coerce_positive_int(counted.get("read_frame_count")) or decoded_frame_count
+        probed_frame_count = _coerce_positive_int(counted.get("frame_count")) or probed_frame_count
+        if duration_sec is None:
+            duration_sec = _coerce_positive_float(counted.get("duration_sec")) or duration_sec
+        if width is None:
+            width = _coerce_positive_int(counted.get("width"))
+        if height is None:
+            height = _coerce_positive_int(counted.get("height"))
+
+    normalized_frame_count = decoded_frame_count or probed_frame_count
+    frame_count_source = (
+        "ffprobe_count_frames"
+        if decoded_frame_count is not None
+        else "ffprobe_nb_frames"
+        if probed_frame_count is not None
+        else "opencv_frame_count"
+        if opencv_frame_count is not None
+        else "unknown"
+    )
+    if normalized_frame_count is None and not raw_fps_invalid and not raw_duration_mismatch:
+        normalized_frame_count = opencv_frame_count
+
+    derived_fps = None
+    if normalized_frame_count is not None and duration_sec is not None and duration_sec > 0:
+        derived_fps = normalized_frame_count / duration_sec
+        if not math.isfinite(derived_fps) or derived_fps <= 0:
+            derived_fps = None
+
+    normalized_derived_fps = _clamp_fps(derived_fps)
+    fps: float | None = None
+    fps_source = "fallback_default"
+
+    if raw_fps is not None and not raw_fps_invalid and not raw_duration_mismatch:
+        fps = _clamp_fps(raw_fps)
+        fps_source = "opencv"
+    elif normalized_derived_fps is not None:
+        fps = normalized_derived_fps
+        fps_source = f"{frame_count_source}/duration"
+    elif avg_fps is not None and MIN_REASONABLE_VIDEO_FPS <= avg_fps <= max_reasonable_fps:
+        fps = _clamp_fps(avg_fps)
+        fps_source = "ffprobe_avg_frame_rate"
+    elif stream_fps is not None and MIN_REASONABLE_VIDEO_FPS <= stream_fps <= max_reasonable_fps:
+        fps = _clamp_fps(stream_fps)
+        fps_source = "ffprobe_stream_frame_rate"
+    elif raw_fps is not None:
+        fps = _clamp_fps(raw_fps)
+        fps_source = "clamped_raw_fps"
+
+    if fps is None:
+        fps = _clamp_fps(default_fps) or DEFAULT_VIDEO_FPS
+
+    if duration_sec is None and normalized_frame_count is not None and fps > 0:
+        duration_sec = normalized_frame_count / fps
+
+    return {
+        "fps": fps,
+        "normalized_fps": fps,
+        "fps_source": fps_source,
+        "raw_fps": raw_fps,
+        "avg_fps": avg_fps,
+        "stream_fps": stream_fps,
+        "frame_count": normalized_frame_count or opencv_frame_count,
+        "frame_count_source": frame_count_source,
+        "opencv_frame_count": opencv_frame_count,
+        "probed_frame_count": probed_frame_count,
+        "decoded_frame_count": decoded_frame_count,
+        "duration_sec": duration_sec,
+        "opencv_duration_sec": opencv_duration_sec,
+        "raw_duration_mismatch": raw_duration_mismatch,
+        "width": width,
+        "height": height,
+    }
+
+
 def create_writer(path: str, fps: float, w: int, h: int) -> cv2.VideoWriter:
     """Create an MP4 video writer, preferring browser-friendly H.264 when available."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     width = int(w)
     height = int(h)
-    safe_fps = float(fps) if fps and fps > 0 else 30.0
+    safe_fps = _clamp_fps(fps) or DEFAULT_VIDEO_FPS
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Invalid video dimensions for output writer: width={width}, height={height}")
 

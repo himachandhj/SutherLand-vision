@@ -46,6 +46,10 @@ TASK_TYPE_BY_USE_CASE = {
 ANNOTATION_FORMATS = {"yolo", "coco", "classification", "unknown"}
 LABEL_REQUIRED_TASK_TYPES = {"object_detection"}
 OBJECT_TRACKING_HANDOFF_GUIDANCE = "Prepared dataset fine-tunes the detector used by Object Tracking. Tracking logic is configured separately."
+REGION_ALERTS_HANDOFF_GUIDANCE = (
+    "Prepared dataset fine-tunes only the detector used by Region Alerts Detection. "
+    "ROI selection, restricted-zone rules, confidence thresholds, and trigger settings are configured separately in Integration."
+)
 
 
 def _model_dump(model: FineTuningDatasetReadyPayload) -> dict[str, Any]:
@@ -214,6 +218,8 @@ def _task_type(usecase_slug: str) -> str:
 def _handoff_guidance(usecase_slug: str) -> str | None:
     if usecase_slug == "object-tracking":
         return OBJECT_TRACKING_HANDOFF_GUIDANCE
+    if usecase_slug == "region-alerts":
+        return REGION_ALERTS_HANDOFF_GUIDANCE
     return None
 
 
@@ -481,7 +487,7 @@ def build_finalized_dataset_ready_payload(session_id: int) -> dict[str, Any]:
     recommended_next_action = (
         "Dataset version is frozen and ready for training setup."
         if status == "ready_for_training"
-        else "Review the dataset handoff warnings or blockers before training setup."
+        else "Dataset can continue, but review these warnings before training setup."
     )
     if handoff_guidance:
         recommended_next_action = f"{handoff_guidance} {recommended_next_action}"
