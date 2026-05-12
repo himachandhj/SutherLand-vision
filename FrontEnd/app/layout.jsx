@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Sutherland Hub",
+  title: "Sutherland Vision Hub",
   description: "Enterprise AI Vision Website prototype",
 };
 

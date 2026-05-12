@@ -14,6 +14,19 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in cursor.fetchall()}
 
 
+def _ensure_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: dict[str, str],
+) -> None:
+    existing_columns = _table_columns(connection, table_name)
+    for column_name, column_sql in columns.items():
+        if column_name in existing_columns:
+            continue
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+    connection.commit()
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with get_connection() as connection:
@@ -317,6 +330,22 @@ def init_db() -> None:
             """
         )
         connection.commit()
+        _ensure_columns(
+            connection,
+            "crack_detection_inputs",
+            {
+                "camera_id": "TEXT NOT NULL DEFAULT ''",
+                "location": "TEXT NOT NULL DEFAULT ''",
+                "zone": "TEXT NOT NULL DEFAULT ''",
+                "filename": "TEXT NOT NULL DEFAULT ''",
+                "minio_input_link": "TEXT",
+                "output_media_link": "TEXT",
+                "output_video_link": "TEXT",
+                "processed_at": "TEXT",
+                "run_status": "TEXT NOT NULL DEFAULT 'processed'",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
 
         connection.execute(
             """
@@ -338,6 +367,22 @@ def init_db() -> None:
             """
         )
         connection.commit()
+        _ensure_columns(
+            connection,
+            "crack_detection_outputs",
+            {
+                "crack_detected": "INTEGER",
+                "crack_count": "INTEGER",
+                "frames_analyzed": "INTEGER",
+                "frames_with_cracks": "INTEGER",
+                "crack_rate_pct": "REAL",
+                "max_confidence": "REAL",
+                "avg_confidence": "REAL",
+                "severity": "TEXT",
+                "status": "TEXT NOT NULL DEFAULT 'clear'",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
 
         connection.execute(
             """
@@ -365,6 +410,22 @@ def init_db() -> None:
             """
         )
         connection.commit()
+        _ensure_columns(
+            connection,
+            "unsafe_behavior_inputs",
+            {
+                "camera_id": "TEXT NOT NULL DEFAULT ''",
+                "location": "TEXT NOT NULL DEFAULT ''",
+                "zone": "TEXT NOT NULL DEFAULT ''",
+                "filename": "TEXT NOT NULL DEFAULT ''",
+                "minio_input_link": "TEXT",
+                "output_media_link": "TEXT",
+                "output_video_link": "TEXT",
+                "processed_at": "TEXT",
+                "run_status": "TEXT NOT NULL DEFAULT 'processed'",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
 
         connection.execute(
             """
@@ -386,6 +447,22 @@ def init_db() -> None:
             """
         )
         connection.commit()
+        _ensure_columns(
+            connection,
+            "unsafe_behavior_outputs",
+            {
+                "event_type": "TEXT",
+                "confidence": "REAL",
+                "bbox_json": "TEXT NOT NULL DEFAULT '[]'",
+                "source": "TEXT",
+                "associated_person_box_json": "TEXT NOT NULL DEFAULT '[]'",
+                "severity": "TEXT",
+                "status": "TEXT NOT NULL DEFAULT 'clear'",
+                "frame_number": "INTEGER",
+                "timestamp_sec": "REAL",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
 
         connection.execute(
             """
@@ -1368,6 +1445,7 @@ def upsert_crack_detection_input(
     zone: str,
     filename: str,
     minio_input_link: str | None,
+    output_media_link: str | None,
     output_video_link: str | None,
     input_bucket: str | None,
     input_object_key: str | None,
@@ -1375,6 +1453,7 @@ def upsert_crack_detection_input(
     load_time_sec: float | None,
     processing_time_sec: float | None,
     simulated_timestamp: str,
+    processed_at: str | None,
     run_status: str,
     metadata_json: dict | None = None,
 ) -> dict:
@@ -1392,6 +1471,7 @@ def upsert_crack_detection_input(
             zone,
             filename,
             minio_input_link,
+            output_media_link,
             output_video_link,
             input_bucket,
             input_object_key,
@@ -1399,6 +1479,7 @@ def upsert_crack_detection_input(
             load_time_sec,
             processing_time_sec,
             simulated_timestamp,
+            processed_at,
             run_status,
             json.dumps(metadata_json or {}),
         )
@@ -1408,11 +1489,11 @@ def upsert_crack_detection_input(
                 """
                 INSERT INTO crack_detection_inputs (
                     source_ref, integration_run_id, job_id, camera_id, location, zone,
-                    filename, minio_input_link, output_video_link, input_bucket, input_object_key,
-                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
-                    run_status, metadata_json
+                    filename, minio_input_link, output_media_link, output_video_link, input_bucket,
+                    input_object_key, output_object_key, load_time_sec, processing_time_sec,
+                    simulated_timestamp, processed_at, run_status, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (source_ref, *payload),
             )
@@ -1423,9 +1504,10 @@ def upsert_crack_detection_input(
                 """
                 UPDATE crack_detection_inputs
                 SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?,
-                    filename = ?, minio_input_link = ?, output_video_link = ?, input_bucket = ?,
-                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
-                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                    filename = ?, minio_input_link = ?, output_media_link = ?, output_video_link = ?,
+                    input_bucket = ?, input_object_key = ?, output_object_key = ?, load_time_sec = ?,
+                    processing_time_sec = ?, simulated_timestamp = ?, processed_at = ?, run_status = ?,
+                    metadata_json = ?
                 WHERE input_id = ?
                 """,
                 (*payload, input_id),
@@ -1492,6 +1574,7 @@ def upsert_unsafe_behavior_input(
     zone: str,
     filename: str,
     minio_input_link: str | None,
+    output_media_link: str | None,
     output_video_link: str | None,
     input_bucket: str | None,
     input_object_key: str | None,
@@ -1499,6 +1582,7 @@ def upsert_unsafe_behavior_input(
     load_time_sec: float | None,
     processing_time_sec: float | None,
     simulated_timestamp: str,
+    processed_at: str | None,
     run_status: str,
     metadata_json: dict | None = None,
 ) -> dict:
@@ -1516,6 +1600,7 @@ def upsert_unsafe_behavior_input(
             zone,
             filename,
             minio_input_link,
+            output_media_link,
             output_video_link,
             input_bucket,
             input_object_key,
@@ -1523,6 +1608,7 @@ def upsert_unsafe_behavior_input(
             load_time_sec,
             processing_time_sec,
             simulated_timestamp,
+            processed_at,
             run_status,
             json.dumps(metadata_json or {}),
         )
@@ -1532,11 +1618,11 @@ def upsert_unsafe_behavior_input(
                 """
                 INSERT INTO unsafe_behavior_inputs (
                     source_ref, integration_run_id, job_id, camera_id, location, zone,
-                    filename, minio_input_link, output_video_link, input_bucket, input_object_key,
-                    output_object_key, load_time_sec, processing_time_sec, simulated_timestamp,
-                    run_status, metadata_json
+                    filename, minio_input_link, output_media_link, output_video_link, input_bucket,
+                    input_object_key, output_object_key, load_time_sec, processing_time_sec,
+                    simulated_timestamp, processed_at, run_status, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (source_ref, *payload),
             )
@@ -1547,9 +1633,10 @@ def upsert_unsafe_behavior_input(
                 """
                 UPDATE unsafe_behavior_inputs
                 SET integration_run_id = ?, job_id = ?, camera_id = ?, location = ?, zone = ?,
-                    filename = ?, minio_input_link = ?, output_video_link = ?, input_bucket = ?,
-                    input_object_key = ?, output_object_key = ?, load_time_sec = ?, processing_time_sec = ?,
-                    simulated_timestamp = ?, processed_at = CURRENT_TIMESTAMP, run_status = ?, metadata_json = ?
+                    filename = ?, minio_input_link = ?, output_media_link = ?, output_video_link = ?,
+                    input_bucket = ?, input_object_key = ?, output_object_key = ?, load_time_sec = ?,
+                    processing_time_sec = ?, simulated_timestamp = ?, processed_at = ?, run_status = ?,
+                    metadata_json = ?
                 WHERE input_id = ?
                 """,
                 (*payload, input_id),

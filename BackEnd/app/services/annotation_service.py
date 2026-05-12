@@ -44,7 +44,7 @@ DEFAULT_CLASSES_BY_USE_CASE = {
     "fire-detection": ["fire", "smoke"],
     "crack-detection": ["crack"],
     "unsafe-behavior-detection": ["smoking", "phone_usage"],
-    "region-alerts": ["person"],
+    "region-alerts": ["person", "car", "bus", "truck", "motorcycle", "bicycle", "forklift"],
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "class-wise-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -431,13 +431,13 @@ def _priority_details(
 
     if is_unlabeled:
         score += 100
-        reasons.append("No labels yet")
+        reasons.append("No labels found yet")
     elif label_source == "auto" or saved_annotation_count <= 1:
         score += 60
-        reasons.append("Partially labeled")
+        reasons.append("Add labels for better training quality")
     else:
         score += 15
-        reasons.append("Already labeled")
+        reasons.append("Saved labels available")
 
     if has_low_confidence_predictions:
         score += 45
@@ -687,11 +687,23 @@ def _refresh_after_annotation(
     issues = list(warnings or [])
     recs = list(recommendations or [])
     if label_status == "partial":
-        issues.append({"code": "partial_label_coverage", "message": f"Labels cover {round(coverage * 100)}% of dataset media.", "severity": "medium"})
-        recs.append({"code": "finish_labeling", "message": "Annotate the remaining examples before training for best results."})
+        issues.append(
+            {
+                "code": "partial_label_coverage",
+                "message": f"Dataset can continue, but review these warnings before training. Labels currently cover {round(coverage * 100)}% of dataset media.",
+                "severity": "medium",
+            }
+        )
+        recs.append({"code": "finish_labeling", "message": "Add labels for better training quality."})
     if label_status == "missing":
-        issues.append({"code": "labels_missing", "message": "No label files were found after annotation.", "severity": "high"})
-        recs.append({"code": "add_labels", "message": "Add annotations before starting training."})
+        issues.append(
+            {
+                "code": "labels_missing",
+                "message": "No labels found yet. Add manual labels or run assisted labeling.",
+                "severity": "high",
+            }
+        )
+        recs.append({"code": "add_labels", "message": "Add labels for better training quality."})
 
     summary = {
         "bucket_accessible": True,
@@ -728,7 +740,7 @@ def _refresh_after_annotation(
         recommended_next_action=(
             "Annotations saved. Label readiness has been refreshed."
             if label_status == "ready"
-            else "Annotations saved with partial coverage. Continue labeling until coverage is acceptable."
+            else "Annotations saved. Dataset can continue, but add more labels for better training quality."
         ),
     )
     return {
