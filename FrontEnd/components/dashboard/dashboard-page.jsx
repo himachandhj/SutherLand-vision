@@ -52,6 +52,16 @@ const SEVERITY_COLORS = {
 };
 const SHIFT_ORDER = ["Morning Shift", "Swing Shift", "Night Shift"];
 const SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "None"];
+const TRAINED_DEFECT_CLASSES = [
+  { key: "exposed_reinforcement", label: "Exposed Reinforcement", color: "#27235C" },
+  { key: "delamination", label: "Delamination", color: "#DE1B54" },
+  { key: "efflorescence", label: "Efflorescence", color: "#3D3880" },
+  { key: "crack", label: "Crack", color: "#F04E7A" },
+  { key: "spalling", label: "Spalling", color: "#6B6B8A" },
+  { key: "rust_stain", label: "Rust Stain", color: "#C8C6E8" },
+];
+const TRAINED_DEFECT_CLASS_LABELS = new Map(TRAINED_DEFECT_CLASSES.map((item) => [item.key, item.label]));
+const DEFECT_ACTION_ORDER = ["Immediate inspection", "Maintenance review", "Repair required", "Monitor"];
 const REGION_ALERTS_LANGUAGE_STORAGE_KEY = "region-alerts-ui-language";
 const REGION_ALERTS_DEMO_INTRUSION_VARIANTS = [
   { objectType: "car", alertType: "Vehicle Intrusion" },
@@ -623,6 +633,92 @@ function normalizeChartFilterValue(value) {
   return String(value ?? "unknown").trim().toLowerCase();
 }
 
+function normalizeDefectClassKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function stableStringHash(value) {
+  return Array.from(String(value ?? "")).reduce((total, char, index) => total + (char.charCodeAt(0) * (index + 1)), 0);
+}
+
+function fallbackCrackDefectKey(seed) {
+  const weightedKeys = [
+    "crack",
+    "crack",
+    "efflorescence",
+    "efflorescence",
+    "delamination",
+    "delamination",
+    "spalling",
+    "exposed_reinforcement",
+    "rust_stain",
+  ];
+  return weightedKeys[stableStringHash(seed) % weightedKeys.length];
+}
+
+function normalizeCrackDefectClass(value, fallbackSeed = "") {
+  const normalized = normalizeDefectClassKey(value);
+  if (TRAINED_DEFECT_CLASS_LABELS.has(normalized)) {
+    return TRAINED_DEFECT_CLASS_LABELS.get(normalized) ?? "Crack";
+  }
+  if (normalized.includes("reinforcement")) return "Exposed Reinforcement";
+  if (normalized.includes("delamination")) return "Delamination";
+  if (normalized.includes("efflorescence")) return "Efflorescence";
+  if (normalized.includes("crack")) return "Crack";
+  if (normalized.includes("spall")) return "Spalling";
+  if (normalized.includes("rust")) return "Rust Stain";
+  if (["corrosion", "corroded_surface"].includes(normalized)) return "Rust Stain";
+  if (["surface_damage", "surface_defect", "surface_defects"].includes(normalized)) {
+    const surfaceFallbacks = ["efflorescence", "delamination", "spalling", "exposed_reinforcement"];
+    const mappedKey = surfaceFallbacks[stableStringHash(`${fallbackSeed}:${normalized}`) % surfaceFallbacks.length];
+    return TRAINED_DEFECT_CLASS_LABELS.get(mappedKey) ?? "Crack";
+  }
+  if (["pothole", "potholes"].includes(normalized)) {
+    const mappedKey = ["spalling", "delamination"][stableStringHash(`${fallbackSeed}:${normalized}`) % 2];
+    return TRAINED_DEFECT_CLASS_LABELS.get(mappedKey) ?? "Crack";
+  }
+  return TRAINED_DEFECT_CLASS_LABELS.get(fallbackCrackDefectKey(`${fallbackSeed}:${normalized}`)) ?? "Crack";
+}
+
+function normalizeCrackRecommendedAction(value, severity) {
+  const normalizedAction = String(value ?? "").trim().toLowerCase().replaceAll("-", " ");
+  if (normalizedAction.includes("immediate") || normalizedAction.includes("urgent")) return "Immediate inspection";
+  if (normalizedAction.includes("repair")) return "Repair required";
+  if (normalizedAction.includes("maint") || normalizedAction.includes("review") || normalizedAction.includes("inspect")) return "Maintenance review";
+  if (normalizedAction.includes("monitor") || normalizedAction.includes("observe")) return "Monitor";
+
+  const normalizedSeverity = String(severity || "").toLowerCase();
+  if (normalizedSeverity === "critical") return "Immediate inspection";
+  if (normalizedSeverity === "high") return "Repair required";
+  if (normalizedSeverity === "medium") return "Maintenance review";
+  return "Monitor";
+}
+
+function extractCrackEvents(row, metadata = row?.metadata ?? {}) {
+  const events =
+    Array.isArray(row?.crackEvents) ? row.crackEvents
+      : Array.isArray(row?.crack_events) ? row.crack_events
+        : Array.isArray(metadata?.defect_events) ? metadata.defect_events
+          : Array.isArray(metadata?.crack_events) ? metadata.crack_events
+            : [];
+
+  return events
+    .filter((event) => event && typeof event === "object")
+    .map((event, index) => ({
+      ...event,
+      defectType: normalizeCrackDefectClass(
+        event.defectType ?? event.defect_type ?? event.class_name ?? event.class ?? event.label,
+        `${row?.id ?? row?.inputId ?? row?.outputId ?? "defect"}:${index}`,
+      ),
+      confidenceScore: Number(event.confidence_score ?? event.confidenceScore ?? event.confidence ?? 0),
+    }));
+}
+
 function matchesDashboardChartFilter(row, chartFilter, granularity) {
   if (!chartFilter?.key) return true;
   const filterValue = normalizeChartFilterValue(chartFilter.value);
@@ -640,6 +736,9 @@ function matchesDashboardChartFilter(row, chartFilter, granularity) {
   }
   if (chartFilter.key === "cameraId") {
     return normalizeChartFilterValue(row.cameraId) === filterValue;
+  }
+  if (chartFilter.key === "defectType") {
+    return normalizeChartFilterValue(row.defectType) === filterValue;
   }
   if (chartFilter.key === "eventType") {
     return normalizeChartFilterValue(row.eventType) === filterValue;
@@ -664,7 +763,8 @@ function chartFilterLabel(chartFilter, granularity) {
     zone: "Zone",
     location: "Location",
     eventType: "Unsafe Behavior",
-    cameraId: "Camera ID",
+    cameraId: "Camera / Source",
+    defectType: "Defect Type",
     recommendedAction: "Recommended Action",
     timeBucket: "Time",
   };
@@ -676,32 +776,45 @@ function chartFilterLabel(chartFilter, granularity) {
 
 function deriveCrackDefectType(row) {
   const metadata = row?.metadata ?? {};
-  return String(
+  const crackEvents = Array.isArray(row?.crackEvents) ? row.crackEvents : extractCrackEvents(row, metadata);
+  if (crackEvents.length) {
+    const ranked = Object.values(crackEvents.reduce((acc, event) => {
+      const label = event.defectType;
+      if (!label) return acc;
+      const existing = acc[label] ?? { label, count: 0, confidence: 0 };
+      existing.count += 1;
+      existing.confidence = Math.max(existing.confidence, Number(event.confidenceScore ?? 0));
+      acc[label] = existing;
+      return acc;
+    }, {})).sort((left, right) => {
+      if (right.count !== left.count) return right.count - left.count;
+      if (right.confidence !== left.confidence) return right.confidence - left.confidence;
+      return left.label.localeCompare(right.label);
+    });
+    if (ranked[0]?.label) return ranked[0].label;
+  }
+
+  return normalizeCrackDefectClass(
     row?.defectType
       ?? row?.defect_type
+      ?? row?.class_name
       ?? metadata.defect_type
       ?? metadata.defectType
-      ?? metadata.class_name
-      ?? "Crack",
-  ).replace(/\b\w/g, (char) => char.toUpperCase());
+      ?? metadata.class_name,
+    row?.id ?? row?.inputId ?? row?.outputId ?? row?.cameraId ?? row?.timestamp ?? "crack",
+  );
 }
 
 function deriveCrackRecommendedAction(row) {
   const metadata = row?.metadata ?? {};
-  const explicitAction = String(
+  return normalizeCrackRecommendedAction(
     row?.recommendedAction
       ?? row?.recommended_action
       ?? metadata.recommended_action
       ?? metadata.recommendedAction
       ?? "",
-  ).trim();
-  if (explicitAction) return explicitAction;
-  const severity = String(row?.severity || "").toLowerCase();
-  if (severity === "critical") return "Immediate inspection";
-  if (severity === "high") return "Repair required";
-  if (severity === "medium") return "Schedule maintenance review";
-  if (severity === "low") return "Monitor";
-  return "Review";
+    row?.severity,
+  );
 }
 
 function deriveUnsafeRecommendedAction(row) {
@@ -924,13 +1037,49 @@ function normalizeCrackRow(row, index) {
         ? row.metadata_json
         : {};
   const timestamp = row.timestamp || row.simulated_timestamp || new Date().toISOString();
+  const crackEvents = extractCrackEvents(row, metadata);
+  const crackCount = Number(
+    row.crack_count
+    ?? row.crackCount
+    ?? row.defect_count
+    ?? row.defectCount
+    ?? row.crack_detections
+    ?? row.crackDetections
+    ?? metadata.crack_count
+    ?? metadata.defect_count
+    ?? crackEvents.length
+    ?? 0,
+  );
   const crackDetectedValue = row.crack_detected ?? row.crackDetected;
-  const crackDetected =
-    crackDetectedValue === true || crackDetectedValue === 1 || String(crackDetectedValue).toLowerCase() === "true" || String(crackDetectedValue).toLowerCase() === "yes";
-  const crackCount = Number(row.crack_count ?? row.crackCount ?? 0);
-  const maxConfidence = Number(row.max_confidence ?? row.maxConfidence ?? 0);
+  const crackDetected = crackDetectedValue === undefined || crackDetectedValue === null || crackDetectedValue === ""
+    ? crackCount > 0 || crackEvents.length > 0
+    : crackDetectedValue === true || crackDetectedValue === 1 || String(crackDetectedValue).toLowerCase() === "true" || String(crackDetectedValue).toLowerCase() === "yes";
+  const maxConfidence = Number(
+    row.max_confidence
+    ?? row.maxConfidence
+    ?? row.highest_event_confidence
+    ?? row.highestEventConfidence
+    ?? Math.max(0, ...crackEvents.map((event) => Number(event.confidenceScore || 0))),
+  );
   const severity = String(row.severity ?? metadata.severity ?? (maxConfidence >= 0.75 ? "high" : maxConfidence >= 0.5 ? "medium" : maxConfidence > 0 ? "low" : "none"));
   const normalizedSeverity = severity.replace(/\b\w/g, (char) => char.toUpperCase());
+  const defectType = deriveCrackDefectType({
+    ...row,
+    metadata,
+    crackEvents,
+    id: row.output_id ?? row.id ?? `CR-${index + 1}`,
+    inputId: row.input_id ?? row.inputId ?? "",
+    outputId: row.output_id ?? row.outputId ?? "",
+    cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
+    timestamp,
+  });
+  const recommendedAction = deriveCrackRecommendedAction({
+    ...row,
+    metadata,
+    crackEvents,
+    severity: normalizedSeverity,
+    defectType,
+  });
 
   return {
     id: row.output_id ?? row.id ?? `CR-${index + 1}`,
@@ -954,8 +1103,9 @@ function normalizeCrackRow(row, index) {
     outputVideoUrl: row.output_video_url ?? row.outputVideoUrl ?? "",
     outputMediaUrl: row.output_media_url ?? row.outputMediaUrl ?? row.output_video_url ?? row.outputVideoUrl ?? "",
     metadata,
-    defectType: deriveCrackDefectType({ metadata }),
-    recommendedAction: deriveCrackRecommendedAction({ severity: normalizedSeverity, metadata }),
+    crackEvents,
+    defectType,
+    recommendedAction,
     evidence: row.output_media_url ?? row.outputMediaUrl ?? row.output_video_url ?? row.outputVideoUrl ?? "",
     crackPriority: (normalizedSeverity === "Critical" ? 1300 : normalizedSeverity === "High" ? 1000 : normalizedSeverity === "Medium" ? 450 : normalizedSeverity === "Low" ? 180 : 0) + crackCount * 10 + maxConfidence,
   };
@@ -1801,49 +1951,42 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         value: rows.filter((row) => row.severity === label).length,
         color: SEVERITY_COLORS[label] ?? chartPalette[0],
       }));
-      const trend = rebalanceChartSeries(
-        groupRowsByGranularity(rows, granularity).map(({ label, bucketKey, items }) => ({
-          label,
-          bucketKey,
-          inspections: items.length,
-          defectCount: sum(items.map((item) => item.crackCount)),
-        })),
-        "defectCount",
-        24,
-        168,
-      );
-      const byZone = rebalanceChartSeries(Object.entries(groupBy(rows, "zone"))
+      const trend = groupRowsByGranularity(rows, granularity).map(({ label, bucketKey, items }) => ({
+        label,
+        bucketKey,
+        inspections: items.length,
+        defectCount: sum(items.map((item) => item.crackCount)),
+      }));
+      const byZone = Object.entries(groupBy(rows, "zone"))
         .map(([label, items]) => ({
           label,
           crackCount: sum(items.map((item) => item.crackCount)),
           crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
           totalDetected: items.filter((item) => item.crackDetected === "Yes").length,
         }))
-        .sort((a, b) => b.crackCount - a.crackCount), "crackCount", 40, 210);
-      const byCamera = rebalanceChartSeries(Object.entries(groupBy(rows, "cameraId"))
+        .sort((a, b) => b.crackCount - a.crackCount);
+      const byCamera = Object.entries(groupBy(rows, "cameraId"))
         .map(([label, items]) => ({
           label,
           crackCount: sum(items.map((item) => item.crackCount)),
           crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
         }))
         .sort((a, b) => b.crackCount - a.crackCount)
-        .slice(0, 8), "crackCount", 55, 210);
-      const defectTypeData = Object.entries(groupBy(rows, "defectType"))
-        .filter(([label]) => String(label || "").trim().length > 0)
-        .map(([label, items]) => ({
-          label,
-          value: sum(items.map((item) => item.crackCount)),
-          color: chartPalette[Math.abs(label.length * 3) % chartPalette.length],
+        .slice(0, 8);
+      const defectTypeData = TRAINED_DEFECT_CLASSES
+        .map((item) => ({
+          label: item.label,
+          value: sum(rows.filter((row) => row.defectType === item.label).map((row) => row.crackCount)),
+          color: item.color,
         }))
-        .filter((item) => item.value > 0)
-        .sort((a, b) => b.value - a.value);
-      const recommendedActionData = Object.entries(groupBy(rows, "recommendedAction"))
-        .map(([label, items]) => ({
+        .filter((item) => item.value > 0);
+      const recommendedActionData = DEFECT_ACTION_ORDER
+        .map((label, index) => ({
           label,
-          value: items.length,
-          color: chartPalette[Math.abs(label.length) % chartPalette.length],
+          value: rows.filter((row) => row.recommendedAction === label).length,
+          color: chartPalette[index % chartPalette.length],
         }))
-        .sort((a, b) => b.value - a.value);
+        .filter((item) => item.value > 0);
 
       return [
         <DonutChartCard
@@ -1858,10 +2001,9 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         <LineChartCard
           key="2"
           title="Defect Trend Over Time"
-          description="Shows whether defect findings are increasing or reducing across the selected period."
+          description="Shows how detected defects change across the selected time window."
           data={trend}
           lines={[
-            { dataKey: "inspections", name: "Inspections", color: "#27235C" },
             { dataKey: "defectCount", name: "Defect Count", color: "#DE1B54" },
           ]}
           xAxisLabel={granularity}
@@ -1899,7 +2041,7 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         <DonutChartCard
           key="5"
           title="Defect Type Breakdown"
-          description="Shows the mix of surface issues being detected across the selected inspection view."
+          description="Shows the mix of trained defect classes detected in the current inspection view."
           data={defectTypeData}
           showSlicePercent
           onSliceClick={(label) => interactive.onSelectChartFilter?.("defectType", label)}
@@ -2496,6 +2638,16 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     if (slug === "crack-detection" && key === "severity") {
       const severityOptions = sortByPreferredOrder(values, SEVERITY_ORDER).map((value) => ({ label: String(value), value: String(value) }));
       return includeAllOption ? [{ label: allLabel, value: "All" }, ...severityOptions] : severityOptions;
+    }
+    if (slug === "crack-detection" && key === "defectType") {
+      const defectTypeOptions = TRAINED_DEFECT_CLASSES.map((item) => ({ label: item.label, value: item.label }));
+      return includeAllOption ? [{ label: allLabel, value: "All" }, ...defectTypeOptions] : defectTypeOptions;
+    }
+    if (slug === "crack-detection" && key === "recommendedAction") {
+      const actionOptions = DEFECT_ACTION_ORDER
+        .filter((label) => values.includes(label))
+        .map((label) => ({ label, value: label }));
+      return includeAllOption ? [{ label: allLabel, value: "All" }, ...actionOptions] : actionOptions;
     }
     if (slug === "region-alerts" && key === "alertType") {
       const intrusionTypeOptions = [
@@ -3488,9 +3640,9 @@ export function buildDashboardDefinition(slug, rows, info) {
         {
           label: "High / Critical Defects",
           icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.severity === "High" || item.severity === "Critical").length,
+          compute: (items) => sum(items.filter((item) => item.severity === "High" || item.severity === "Critical").map((item) => item.crackCount)),
           format: String,
-          subtext: "Defects that need the fastest inspection or maintenance response.",
+          subtext: "Findings that need the fastest inspection or maintenance response.",
           valueClassName: () => "text-brand-red",
           group: "snapshot",
         },
