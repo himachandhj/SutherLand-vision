@@ -132,7 +132,7 @@ from app.services.fine_tuning import (
 )
 import ppe_detection as ppe_engine
 from ppe_detection import auto_device, process_video as ppe_process_video
-from use_cases.base import ensure_browser_playable_mp4, read_video_profile, validate_output_video
+from use_cases.base import ensure_browser_playable_mp4, extract_video_preview_frame, read_video_profile, validate_output_video
 from use_cases.crack_detection import process_image as crack_process_image
 from use_cases.fire_smoke import detect_fire_smoke_hsv
 from use_cases.registry import USE_CASE_REGISTRY, get_processor, get_metadata, list_use_cases
@@ -2577,21 +2577,12 @@ def image_to_base64(image: np.ndarray) -> str:
 
 
 def extract_preview_frame(video_path: Path) -> np.ndarray:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise HTTPException(status_code=400, detail="Uploaded file is not a readable video.")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames > 10:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 3)
-
-    ok, frame = cap.read()
-    cap.release()
-
-    if not ok or frame is None:
-        raise HTTPException(status_code=400, detail="Unable to extract a preview frame from the uploaded video.")
-
-    return frame
+    try:
+        return extract_video_preview_frame(str(video_path))
+    except RuntimeError as error:
+        detail = str(error) or "Unable to extract a preview frame from the uploaded video."
+        status_code = 503 if detail == "FFmpeg is required for video preview extraction." else 400
+        raise HTTPException(status_code=status_code, detail=detail) from error
 
 
 def try_extract_preview_frame(video_path: Path) -> np.ndarray | None:
@@ -3414,11 +3405,43 @@ def run_speed_estimation_preview(
         output_path.unlink(missing_ok=True)
 
 
+def _derive_crack_highest_severity(detections: list[dict[str, Any]]) -> str | None:
+    severity_rank = {"low": 1, "medium": 2, "high": 3}
+    best_label = ""
+
+    for detection in detections:
+        candidate = str(detection.get("severity") or "").strip().lower()
+        if severity_rank.get(candidate, 0) > severity_rank.get(best_label, 0):
+            best_label = candidate
+
+    return best_label or None
+
+
+def _normalize_crack_preview_metrics(metrics: Any, detections: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_metrics = dict(metrics) if isinstance(metrics, dict) else {}
+    defect_count = int(
+        normalized_metrics.get("defect_count")
+        or normalized_metrics.get("crack_count")
+        or normalized_metrics.get("crack_detections")
+        or len(detections)
+        or 0
+    )
+    normalized_metrics.setdefault("defect_count", defect_count)
+    normalized_metrics.setdefault("crack_count", defect_count)
+
+    highest_severity = _derive_crack_highest_severity(detections)
+    if highest_severity:
+        normalized_metrics.setdefault("highest_severity", highest_severity)
+
+    return normalized_metrics
+
+
 def run_crack_detection_preview(
     *,
     frame: np.ndarray | None = None,
     video_path: Path | None = None,
-) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
+    source_name: str | None = None,
+) -> dict[str, Any]:
     if frame is not None:
         result = crack_process_image(
             frame=frame,
@@ -3426,11 +3449,14 @@ def run_crack_detection_preview(
             device=auto_device(),
             conf=0.35,
         )
-        return (
-            result["annotated_image"],
-            result.get("detections", []),
-            result.get("metrics", {}),
-        )
+        detections = result.get("detections", []) if isinstance(result.get("detections"), list) else []
+        metrics = _normalize_crack_preview_metrics(result.get("metrics", {}), detections)
+        return {
+            "annotated_image": result["annotated_image"],
+            "detections": detections,
+            "metrics": metrics,
+            "media_type": "image",
+        }
 
     if video_path is None:
         raise HTTPException(status_code=400, detail="Crack detection preview requires an image or video input.")
@@ -3439,8 +3465,10 @@ def run_crack_detection_preview(
     if processor is None:
         raise HTTPException(status_code=500, detail="Crack detection processor is not available.")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output:
-        output_path = Path(temp_output.name)
+    source_stem = Path(source_name or video_path.name).stem or f"crack_preview_{uuid4().hex[:8]}"
+    safe_stem = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in source_stem).strip("_") or "crack_preview"
+    preview_cache_key = _build_region_alert_preview_cache_key(video_path)
+    output_path = PROCESSED_DIR / f"{safe_stem}_{preview_cache_key}_crack_preview.mp4"
 
     try:
         result = processor(
@@ -3451,7 +3479,8 @@ def run_crack_detection_preview(
             show=False,
             conf=0.35,
         )
-        preview_frame = extract_preview_frame(output_path)
+        actual_output = _resolve_completed_output_path(output_path, result)
+        preview_frame = extract_preview_frame(actual_output)
         analytics = result.get("analytics", {}) if isinstance(result, dict) else {}
         crack_events = analytics.get("crack_events", []) if isinstance(analytics.get("crack_events"), list) else []
         detections = [
@@ -3462,9 +3491,20 @@ def run_crack_detection_preview(
             }
             for event in crack_events[:20]
         ]
-        return preview_frame, detections, result.get("metrics", {})
-    finally:
+        metrics = _normalize_crack_preview_metrics(result.get("metrics", {}), detections)
+        return {
+            "annotated_image": preview_frame,
+            "detections": detections,
+            "metrics": metrics,
+            "media_type": "video",
+            "output_video_url": f"/static/processed/{actual_output.name}?v={actual_output.stat().st_mtime_ns}",
+        }
+    except HTTPException:
         output_path.unlink(missing_ok=True)
+        raise
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
 
 
 def run_unsafe_behavior_preview(
@@ -3621,6 +3661,7 @@ def build_playground_preview_response(
     ppe_detection_mode = _normalize_ppe_detection_mode(preview_options.get("ppe_detection_mode"))
     speed_detection_class = _normalize_speed_detection_class(preview_options.get("speed_detection_class"))
     region_video_preview: dict[str, Any] | None = None
+    crack_preview: dict[str, Any] | None = None
     try:
         if use_case_id == "ppe-detection":
             if frame is None:
@@ -3665,11 +3706,14 @@ def build_playground_preview_response(
             if file_kind == "video":
                 if temp_path is None:
                     raise HTTPException(status_code=400, detail="Crack detection playground preview requires a valid uploaded video.")
-                annotated_image, detections, crack_metrics = run_crack_detection_preview(video_path=temp_path)
+                crack_preview = run_crack_detection_preview(video_path=temp_path, source_name=source_name)
             else:
                 if frame is None:
                     raise HTTPException(status_code=400, detail="Crack detection playground preview requires a readable image.")
-                annotated_image, detections, crack_metrics = run_crack_detection_preview(frame=frame)
+                crack_preview = run_crack_detection_preview(frame=frame, source_name=source_name)
+            annotated_image = crack_preview["annotated_image"]
+            detections = crack_preview["detections"]
+            crack_metrics = crack_preview["metrics"]
             model_source = "use_cases.crack_detection"
         elif use_case_id == "unsafe-behavior-detection":
             if file_kind == "video":
@@ -3697,6 +3741,8 @@ def build_playground_preview_response(
         "use_case_id": use_case_id,
         "use_case_title": meta["title"],
         "file_kind": file_kind,
+        "media_type": crack_preview.get("media_type", file_kind) if use_case_id == "crack-detection" and crack_preview is not None else file_kind,
+        "input_filename": source_name or "",
         "detections": detections,
         "model_source": model_source,
         "preview_options": {
@@ -3721,6 +3767,11 @@ def build_playground_preview_response(
             response.update(_region_alert_roi_debug_payload(roi, frame_width=frame_width, frame_height=frame_height))
     if use_case_id == "crack-detection":
         response["metrics"] = crack_metrics
+        response["defect_count"] = int(crack_metrics.get("defect_count") or crack_metrics.get("crack_count") or crack_metrics.get("crack_detections") or len(detections) or 0)
+        if crack_metrics.get("highest_severity"):
+            response["highest_severity"] = crack_metrics["highest_severity"]
+        if crack_preview is not None and crack_preview.get("output_video_url"):
+            response["output_video_url"] = crack_preview["output_video_url"]
     if use_case_id == "unsafe-behavior-detection":
         response["metrics"] = unsafe_metrics
     if use_case_id == "region-alerts" and file_kind == "video" and temp_path is not None and region_video_preview is not None:
@@ -5224,7 +5275,7 @@ async def playground_preview(
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
             temp_video.write(contents)
             temp_path = Path(temp_video.name)
-        if use_case_id != "region-alerts":
+        if use_case_id not in {"region-alerts", "crack-detection"}:
             frame = extract_preview_frame(temp_path)
 
     return build_playground_preview_response(
@@ -5279,7 +5330,7 @@ async def playground_preview_sample(
         with tempfile.NamedTemporaryFile(delete=False, suffix=sample_path.suffix or ".mp4") as temp_video:
             shutil.copyfile(sample_path, temp_video.name)
             temp_path = Path(temp_video.name)
-        if use_case_id != "region-alerts":
+        if use_case_id not in {"region-alerts", "crack-detection"}:
             frame = extract_preview_frame(temp_path)
 
     return build_playground_preview_response(
