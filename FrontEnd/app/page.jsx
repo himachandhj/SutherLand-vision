@@ -1268,11 +1268,45 @@ function resolvePlaygroundPreviewMedia(payload) {
     "image_url",
     "imageUrl",
   ]);
+  const selectedImageBase64 = firstNonEmptyField(payload, [
+    "image_base64",
+    "imageBase64",
+    "preview_image_base64",
+    "previewImageBase64",
+    "output_image_base64",
+    "outputImageBase64",
+  ]);
 
   return {
     outputVideoUrl: selectedVideoUrl ? resolvePreviewAssetUrl(selectedVideoUrl) : "",
-    imageBase64: payload?.image_base64 || resolvePreviewAssetUrl(selectedImageUrl),
+    imageBase64: selectedImageBase64 || resolvePreviewAssetUrl(selectedImageUrl),
   };
+}
+
+function normalizePlaygroundMetrics(useCaseId, payload) {
+  const baseMetrics = payload?.metrics && typeof payload.metrics === "object" ? payload.metrics : null;
+
+  if (useCaseId !== "crack-detection") {
+    return baseMetrics;
+  }
+
+  const normalizedMetrics = baseMetrics ? { ...baseMetrics } : {};
+
+  [
+    "defect_count",
+    "crack_count",
+    "detections_count",
+    "crack_detections",
+    "severity",
+    "highest_severity",
+    "max_severity_label",
+  ].forEach((fieldName) => {
+    if (payload?.[fieldName] !== undefined && normalizedMetrics[fieldName] === undefined) {
+      normalizedMetrics[fieldName] = payload[fieldName];
+    }
+  });
+
+  return Object.keys(normalizedMetrics).length > 0 ? normalizedMetrics : null;
 }
 
 function buildPlaygroundSuccessState(useCaseId, payload, sourceLabel, language = "en") {
@@ -1280,7 +1314,7 @@ function buildPlaygroundSuccessState(useCaseId, payload, sourceLabel, language =
   const detections = useCaseId === "region-alerts"
     ? buildRegionAlertDetectionSummary(payload, language)
     : getPresentationDetections(useCaseId, payload?.detections);
-  const metrics = payload?.metrics && typeof payload.metrics === "object" ? payload.metrics : null;
+  const metrics = normalizePlaygroundMetrics(useCaseId, payload);
   const hasRenderableMedia = Boolean(media.outputVideoUrl || media.imageBase64);
 
   if (useCaseId === "region-alerts" && !hasRenderableMedia) {

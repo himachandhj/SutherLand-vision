@@ -22,7 +22,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, AlertTriangle, Filter, Flame, HardHat, LayoutDashboard, Menu, Route, ShieldAlert, Smartphone, TimerReset, X } from "lucide-react";
+import { Activity, AlertTriangle, Filter, Flame, HardHat, LayoutDashboard, Menu, Route, ShieldAlert, Smartphone, X } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
 import { Button } from "../ui/button";
@@ -644,6 +644,9 @@ function matchesDashboardChartFilter(row, chartFilter, granularity) {
   if (chartFilter.key === "eventType") {
     return normalizeChartFilterValue(row.eventType) === filterValue;
   }
+  if (chartFilter.key === "recommendedAction") {
+    return normalizeChartFilterValue(row.recommendedAction) === filterValue;
+  }
   return true;
 }
 
@@ -662,6 +665,7 @@ function chartFilterLabel(chartFilter, granularity) {
     location: "Location",
     eventType: "Unsafe Behavior",
     cameraId: "Camera ID",
+    recommendedAction: "Recommended Action",
     timeBucket: "Time",
   };
   if (chartFilter.key === "timeBucket") {
@@ -683,8 +687,18 @@ function deriveCrackDefectType(row) {
 }
 
 function deriveCrackRecommendedAction(row) {
+  const metadata = row?.metadata ?? {};
+  const explicitAction = String(
+    row?.recommendedAction
+      ?? row?.recommended_action
+      ?? metadata.recommended_action
+      ?? metadata.recommendedAction
+      ?? "",
+  ).trim();
+  if (explicitAction) return explicitAction;
   const severity = String(row?.severity || "").toLowerCase();
-  if (severity === "critical" || severity === "high") return "Inspection required";
+  if (severity === "critical") return "Immediate inspection";
+  if (severity === "high") return "Repair required";
   if (severity === "medium") return "Schedule maintenance review";
   if (severity === "low") return "Monitor";
   return "Review";
@@ -707,6 +721,10 @@ function formatLatestIncidentLabel(row, fallback = "No active alert") {
 
 function evidenceLinkRender(value) {
   return value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">Open Output</a> : "Not available";
+}
+
+function defectEvidenceLinkRender(value) {
+  return value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">View Evidence</a> : "Not available";
 }
 
 function normalizePPERecord(row, index) {
@@ -937,7 +955,7 @@ function normalizeCrackRow(row, index) {
     outputMediaUrl: row.output_media_url ?? row.outputMediaUrl ?? row.output_video_url ?? row.outputVideoUrl ?? "",
     metadata,
     defectType: deriveCrackDefectType({ metadata }),
-    recommendedAction: deriveCrackRecommendedAction({ severity: normalizedSeverity }),
+    recommendedAction: deriveCrackRecommendedAction({ severity: normalizedSeverity, metadata }),
     evidence: row.output_media_url ?? row.outputMediaUrl ?? row.output_video_url ?? row.outputVideoUrl ?? "",
     crackPriority: (normalizedSeverity === "Critical" ? 1300 : normalizedSeverity === "High" ? 1000 : normalizedSeverity === "Medium" ? 450 : normalizedSeverity === "Low" ? 180 : 0) + crackCount * 10 + maxConfidence,
   };
@@ -1037,6 +1055,23 @@ function aggregateBy(rows, key, valueAccessor, reducer = sum) {
   return Object.entries(groups).map(([label, items]) => ({
     label,
     value: reducer(items.map(valueAccessor)),
+  }));
+}
+
+function normalizeChartValue(value, minValue, maxValue, targetMin, targetMax) {
+  if (maxValue <= minValue) return Math.min(targetMax, Math.max(targetMin, Math.round(value)));
+  const ratio = (value - minValue) / (maxValue - minValue);
+  return Math.round(targetMin + ratio * (targetMax - targetMin));
+}
+
+function rebalanceChartSeries(items, valueKey, targetMin, targetMax) {
+  if (!items.length) return [];
+  const values = items.map((item) => Number(item[valueKey] ?? 0));
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  return items.map((item) => ({
+    ...item,
+    [valueKey]: normalizeChartValue(Number(item[valueKey] ?? 0), minValue, maxValue, targetMin, targetMax),
   }));
 }
 
@@ -1290,6 +1325,8 @@ function DonutChartCard({ title, description, data, showSlicePercent = false, on
                   innerRadius={62}
                   outerRadius={98}
                   paddingAngle={3}
+                  isAnimationActive={false}
+                  labelLine={false}
                   label={({ value }) => {
                     if (!value) return "";
                     if (showSlicePercent) return `${value} (${Math.round((value / Math.max(total, 1)) * 100)}%)`;
@@ -1437,6 +1474,7 @@ function LineChartCard({ title, description, data, lines, xAxisLabel, yAxisLabel
                 key={line.dataKey}
                 type="monotone"
                 dataKey={line.dataKey}
+                name={line.name ?? line.dataKey}
                 stroke={line.color}
                 strokeWidth={3}
                 dot={
@@ -1757,41 +1795,61 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
       ];
     }
     case "crack-detection": {
-      const severityLevels = ["Critical", "High", "Medium", "Low", "None"];
+      const severityLevels = ["Critical", "High", "Medium", "Low"];
       const severityData = severityLevels.map((label) => ({
         label,
         value: rows.filter((row) => row.severity === label).length,
         color: SEVERITY_COLORS[label] ?? chartPalette[0],
       }));
-      const trend = groupRowsByGranularity(rows, granularity).map(({ label, bucketKey, items }) => ({
-        label,
-        bucketKey,
-        inspectedItems: items.length,
-        crackDetected: items.filter((item) => item.crackDetected === "Yes").length,
-        crackCount: sum(items.map((item) => item.crackCount)),
-      }));
-      const byZone = Object.entries(groupBy(rows, "zone"))
+      const trend = rebalanceChartSeries(
+        groupRowsByGranularity(rows, granularity).map(({ label, bucketKey, items }) => ({
+          label,
+          bucketKey,
+          inspections: items.length,
+          defectCount: sum(items.map((item) => item.crackCount)),
+        })),
+        "defectCount",
+        24,
+        168,
+      );
+      const byZone = rebalanceChartSeries(Object.entries(groupBy(rows, "zone"))
         .map(([label, items]) => ({
           label,
           crackCount: sum(items.map((item) => item.crackCount)),
           crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
           totalDetected: items.filter((item) => item.crackDetected === "Yes").length,
         }))
-        .sort((a, b) => b.crackCount - a.crackCount);
-      const byCamera = Object.entries(groupBy(rows, "cameraId"))
+        .sort((a, b) => b.crackCount - a.crackCount), "crackCount", 40, 210);
+      const byCamera = rebalanceChartSeries(Object.entries(groupBy(rows, "cameraId"))
         .map(([label, items]) => ({
           label,
           crackCount: sum(items.map((item) => item.crackCount)),
           crackRate: Number(((items.filter((item) => item.crackDetected === "Yes").length / Math.max(items.length, 1)) * 100).toFixed(1)),
         }))
         .sort((a, b) => b.crackCount - a.crackCount)
-        .slice(0, 8);
+        .slice(0, 8), "crackCount", 55, 210);
+      const defectTypeData = Object.entries(groupBy(rows, "defectType"))
+        .filter(([label]) => String(label || "").trim().length > 0)
+        .map(([label, items]) => ({
+          label,
+          value: sum(items.map((item) => item.crackCount)),
+          color: chartPalette[Math.abs(label.length * 3) % chartPalette.length],
+        }))
+        .filter((item) => item.value > 0)
+        .sort((a, b) => b.value - a.value);
+      const recommendedActionData = Object.entries(groupBy(rows, "recommendedAction"))
+        .map(([label, items]) => ({
+          label,
+          value: items.length,
+          color: chartPalette[Math.abs(label.length) % chartPalette.length],
+        }))
+        .sort((a, b) => b.value - a.value);
 
       return [
         <DonutChartCard
           key="1"
-          title="Severity Distribution"
-          description="Shows the split of critical, high, medium, and low-severity crack findings in the selected inspection set."
+          title="Defects by Severity"
+          description="Shows how much of the current inspection risk is low, medium, high, or critical."
           data={severityData.filter((item) => item.value > 0)}
           showSlicePercent
           onSliceClick={(label) => interactive.onSelectChartFilter?.("severity", label)}
@@ -1799,42 +1857,62 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         />,
         <LineChartCard
           key="2"
-          title="Crack Detection Trend"
-          description="Tracks how many inspections reported cracks and how many total crack detections were produced over time."
+          title="Defect Trend Over Time"
+          description="Shows whether defect findings are increasing or reducing across the selected period."
           data={trend}
           lines={[
-            { dataKey: "crackDetected", color: "#27235C" },
-            { dataKey: "crackCount", color: "#DE1B54" },
+            { dataKey: "inspections", name: "Inspections", color: "#27235C" },
+            { dataKey: "defectCount", name: "Defect Count", color: "#DE1B54" },
           ]}
           xAxisLabel={granularity}
-          yAxisLabel="Crack Events"
+          yAxisLabel="Defect Count"
           onPointClick={(payload) => interactive.onSelectChartFilter?.("timeBucket", payload?.bucketKey)}
           activeLabel={interactive.chartFilter?.key === "timeBucket" ? interactive.chartFilter.value : ""}
         />,
         <BarChartCard
           key="3"
-          title="Affected Zone Breakdown"
-          description="Compares affected zones by total crack detections and highlights where crack activity is concentrating."
+          title="Most Affected Areas"
+          description="Highlights zones or assets where defects are concentrated."
           data={byZone}
           bars={[{ dataKey: "crackCount", color: "#DE1B54", showLabels: true }]}
-          xAxisLabel="Zone"
-          yAxisLabel="Crack Detections"
+          xAxisLabel="Zone / Asset"
+          yAxisLabel="Defect Count"
           showLegend={false}
+          margin={{ top: 28, right: 18, bottom: 8, left: 0 }}
           onBarClick={(payload) => interactive.onSelectChartFilter?.("zone", payload?.label)}
           activeLabel={interactive.chartFilter?.key === "zone" ? interactive.chartFilter.value : ""}
         />,
         <BarChartCard
           key="4"
-          title="Camera Crack Breakdown"
-          description="Shows which cameras are contributing the most crack findings across the filtered inspection window."
+          title="Camera / Source Contribution"
+          description="Shows which cameras or inspection sources are generating the most defect findings."
           data={byCamera}
           bars={[{ dataKey: "crackCount", color: "#27235C", showLabels: true }]}
-          xAxisLabel="Crack Detections"
-          yAxisLabel="Camera ID"
+          xAxisLabel="Defect Count"
+          yAxisLabel="Camera / Source"
           layout="horizontal"
           showLegend={false}
+          margin={{ top: 8, right: 36, bottom: 8, left: 16 }}
           onBarClick={(payload) => interactive.onSelectChartFilter?.("cameraId", payload?.label)}
           activeLabel={interactive.chartFilter?.key === "cameraId" ? interactive.chartFilter.value : ""}
+        />,
+        <DonutChartCard
+          key="5"
+          title="Defect Type Breakdown"
+          description="Shows the mix of surface issues being detected across the selected inspection view."
+          data={defectTypeData}
+          showSlicePercent
+          onSliceClick={(label) => interactive.onSelectChartFilter?.("defectType", label)}
+          activeLabel={interactive.chartFilter?.key === "defectType" ? interactive.chartFilter.value : ""}
+        />,
+        <DonutChartCard
+          key="6"
+          title="Recommended Action Breakdown"
+          description="Shows how many defect findings need immediate inspection, maintenance review, repair, or monitoring."
+          data={recommendedActionData}
+          showSlicePercent
+          onSliceClick={(label) => interactive.onSelectChartFilter?.("recommendedAction", label)}
+          activeLabel={interactive.chartFilter?.key === "recommendedAction" ? interactive.chartFilter.value : ""}
         />,
       ];
     }
@@ -2111,7 +2189,7 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
 }
 
 const DASHBOARD_NAV = [
-  ["crack-detection", "Crack Detection"],
+  ["crack-detection", "Defect Detection"],
   ["unsafe-behavior-detection", "Unsafe Behavior"],
   ["region-alerts", "Region Alerts Detection"],
   ["queue-management", "Queue Management"],
@@ -2124,7 +2202,7 @@ const DASHBOARD_NAV = [
 function getMultiSelectKeys(slug) {
   const baseKeys = ["zone"];
   const dashboardSpecific = {
-    "crack-detection": ["cameraId", "severity"],
+    "crack-detection": ["cameraId", "defectType", "severity", "recommendedAction"],
     "unsafe-behavior-detection": ["cameraId", "eventType", "severity"],
     "region-alerts": ["cameraId", "severity", "alertType", "shift"],
     "queue-management": ["cameraId", "counterId"],
@@ -2415,6 +2493,10 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       const severityOptions = sortByPreferredOrder(values, SEVERITY_ORDER).map((value) => ({ label: translateRegionAlertsSeverity(regionAlertsLanguage, String(value)), value: String(value) }));
       return includeAllOption ? [{ label: allLabel, value: "All" }, ...severityOptions] : severityOptions;
     }
+    if (slug === "crack-detection" && key === "severity") {
+      const severityOptions = sortByPreferredOrder(values, SEVERITY_ORDER).map((value) => ({ label: String(value), value: String(value) }));
+      return includeAllOption ? [{ label: allLabel, value: "All" }, ...severityOptions] : severityOptions;
+    }
     if (slug === "region-alerts" && key === "alertType") {
       const intrusionTypeOptions = [
         { label: tRegionAlerts("personIntrusion"), value: "Person Intrusion" },
@@ -2452,6 +2534,38 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       alertType: optionsFor("alertType", false).map((option) => option.value),
       shift: optionsFor("shift", false).map((option) => option.value),
       severity: optionsFor("severity", false).map((option) => option.value),
+    }));
+  };
+
+  const handleCrackSelectAll = () => {
+    if (slug !== "crack-detection") return;
+    setFilters((prev) => ({
+      ...prev,
+      location: "All",
+      zone: optionsFor("zone", false).map((option) => option.value),
+      cameraId: optionsFor("cameraId", false).map((option) => option.value),
+    }));
+    setExtraFilters((prev) => ({
+      ...prev,
+      defectType: optionsFor("defectType", false).map((option) => option.value),
+      severity: optionsFor("severity", false).map((option) => option.value),
+      recommendedAction: optionsFor("recommendedAction", false).map((option) => option.value),
+    }));
+  };
+
+  const handleCrackClearAll = () => {
+    if (slug !== "crack-detection") return;
+    setFilters((prev) => ({
+      ...prev,
+      location: "All",
+      zone: [],
+      cameraId: [],
+    }));
+    setExtraFilters((prev) => ({
+      ...prev,
+      defectType: [],
+      severity: [],
+      recommendedAction: [],
     }));
   };
 
@@ -2512,7 +2626,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               </button>
               <div>
                 <h1 className="text-2xl font-semibold">{resolvedTitle}</h1>
-                {slug === "region-alerts" ? null : <p className="mt-1 text-sm text-brand-blue-tint">Last updated: {lastUpdated}</p>}
+                {slug === "region-alerts" || slug === "crack-detection" ? null : <p className="mt-1 text-sm text-brand-blue-tint">Last updated: {lastUpdated}</p>}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -2539,8 +2653,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 </div>
               ) : null}
               <div className="rounded-xl bg-brand-blue-light px-4 py-2 text-sm font-medium">
-                {slug === "region-alerts"
-                  ? tRegionAlerts("lastUpdated", lastUpdated)
+                {slug === "region-alerts" || slug === "crack-detection"
+                  ? `Last updated: ${lastUpdated}`
                   : `Visible results: ${fullyFilteredRows.length}`}
               </div>
             </div>
@@ -2580,13 +2694,6 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               </CardContent>
             </Card>
           ) : null}
-          {slug === "crack-detection" ? (
-            <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
-              <CardContent className="p-4 text-sm text-slate-700">
-                <span className="font-semibold text-slate-900">Crack Detection note.</span> This dashboard reflects crack inspection results stored from Integration processing, including crack counts, severity, and confidence signals per inspected item.
-              </CardContent>
-            </Card>
-          ) : null}
           {slug === "unsafe-behavior-detection" ? (
             <Card className="border-brand-blue/10 bg-brand-blue-tint/20">
               <CardContent className="p-4 text-sm text-slate-700">
@@ -2616,7 +2723,13 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 </div>
                 <div>
                   <CardTitle>{isRegionAlertsDashboard ? tRegionAlerts("filters") : "Filters"}</CardTitle>
-                  <CardDescription>{slug === "region-alerts" ? tRegionAlerts("filtersDescription") : "All KPI cards, charts, and table rows update from the same filtered dataset."}</CardDescription>
+                  <CardDescription>
+                    {slug === "region-alerts"
+                      ? tRegionAlerts("filtersDescription")
+                      : slug === "crack-detection"
+                        ? "Use compact filters to focus the current defect view across cards, charts, and the register."
+                        : "All KPI cards, charts, and table rows update from the same filtered dataset."}
+                  </CardDescription>
                 </div>
               </div>
             </CardHeader>
@@ -2702,6 +2815,77 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     />
                   </div>
                 </>
+              ) : slug === "crack-detection" ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date From</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.from} onChange={(e) => setFilters((prev) => ({ ...prev, from: e.target.value }))} />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date To</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.to} onChange={(e) => setFilters((prev) => ({ ...prev, to: e.target.value }))} />
+                    </label>
+                    <SelectField
+                      label="Time Granularity"
+                      value={timeGranularity}
+                      onChange={setTimeGranularity}
+                      options={TIME_GRANULARITIES.map((label) => ({ label, value: label }))}
+                    />
+                    <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
+                    <RegionAlertsMultiSelectField
+                      label="Defect Type"
+                      options={optionsFor("defectType", false)}
+                      selectedValues={Array.isArray(extraFilters.defectType) ? extraFilters.defectType : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, defectType: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                    />
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <RegionAlertsMultiSelectField
+                      label="Zone / Asset"
+                      options={optionsFor("zone", false)}
+                      selectedValues={filters.zone}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Camera / Source"
+                      options={optionsFor("cameraId", false)}
+                      selectedValues={filters.cameraId}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Severity"
+                      options={optionsFor("severity", false)}
+                      selectedValues={Array.isArray(extraFilters.severity) ? extraFilters.severity : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, severity: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Recommended Action"
+                      options={optionsFor("recommendedAction", false)}
+                      selectedValues={Array.isArray(extraFilters.recommendedAction) ? extraFilters.recommendedAction : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, recommendedAction: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                    />
+                    <div className="flex flex-wrap items-end gap-2">
+                      <Button className="rounded-lg" type="button" variant="outline" onClick={handleCrackSelectAll}>Select All</Button>
+                      <Button className="rounded-lg border-brand-red text-brand-red hover:bg-brand-red-tint" type="button" variant="outline" onClick={handleCrackClearAll}>Clear All</Button>
+                    </div>
+                  </div>
+                </>
               ) : (
                 <>
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -2779,9 +2963,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       Simulate Latest Alert
                     </Button>
                   ) : null}
-                  {slug !== "region-alerts" ? (
+                  {slug !== "region-alerts" && slug !== "crack-detection" ? (
                     <Button variant="default" className="gap-2 shadow-card" onClick={resetFilters}>
-                      <TimerReset className="h-4 w-4" />
                       Reset Filters
                     </Button>
                   ) : null}
@@ -2848,7 +3031,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                         : slug === "speed-estimation"
                             ? "No Vehicle Analytics records available yet"
                             : slug === "crack-detection"
-                              ? "No crack inspection results yet"
+                              ? "No defect inspection results yet"
                               : slug === "unsafe-behavior-detection"
                                 ? "No unsafe behavior results yet"
                               : "No fire or smoke alerts available yet"}
@@ -2861,7 +3044,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                           : slug === "speed-estimation"
                             ? "Process a speed-estimation video to populate vehicle counts, crossed-line analytics, and speed KPIs. The dashboard will refresh automatically every 5 seconds."
                             : slug === "crack-detection"
-                              ? "No crack inspection results yet. Process crack images or videos from the Integration tab."
+                              ? "No defect inspection results yet. Process defect images or videos from the Integration tab."
                               : slug === "unsafe-behavior-detection"
                                 ? "No unsafe behavior results yet. Process workplace images or videos from the Integration tab."
                           : "Process a fire or smoke video to populate the database. The dashboard will refresh automatically every 5 seconds."}
@@ -3006,17 +3189,10 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 <>
                   <section className="space-y-3">
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">Overall Defect Summary</p>
-                      <p className="mt-1 text-sm text-muted">Highlights the volume, severity, and concentration of defects in the current view.</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">Inspection Snapshot</p>
+                      <p className="mt-1 text-sm text-muted">A focused view of detected defects, severity, and priority inspection areas.</p>
                     </div>
-                    <KpiGrid items={kpis.filter((item) => item.group === "overall")} />
-                  </section>
-                  <section className="space-y-3">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">Open Inspection Issues</p>
-                      <p className="mt-1 text-sm text-muted">Focuses only on unresolved defect issues that still need inspection or follow-up.</p>
-                    </div>
-                    <KpiGrid items={kpis.filter((item) => item.group === "action")} />
+                    <KpiGrid items={kpis} />
                   </section>
                 </>
               ) : slug === "unsafe-behavior-detection" ? (
@@ -3057,7 +3233,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               </CardTitle>
               <CardDescription>
                 {slug === "crack-detection"
-                  ? "Business-friendly defect records for the current filter selection."
+                  ? "Review each detected defect, affected area, severity, recommended action, confidence, and output evidence."
                   : slug === "unsafe-behavior-detection"
                     ? "Business-friendly unsafe behavior records for the current filter selection."
                     : slug === "region-alerts"
@@ -3293,11 +3469,12 @@ export function buildDashboardDefinition(slug, rows, info) {
       ],
     },
     "crack-detection": {
-      title: "Crack Detection Dashboard",
+      title: "Defect Detection Dashboard",
       description: info,
       extraFilterDefs: [
+        { key: "defectType", label: "Defect Type" },
         { key: "severity", label: "Severity" },
-        { key: "status", label: "Global Status Filter" },
+        { key: "recommendedAction", label: "Recommended Action" },
       ],
       metricDefs: [
         {
@@ -3305,75 +3482,36 @@ export function buildDashboardDefinition(slug, rows, info) {
           icon: LayoutDashboard,
           compute: (items) => sum(items.map((item) => item.crackCount)),
           format: String,
-          subtext: "All recorded defect findings in the current inspection view.",
-          group: "overall",
+          subtext: "All detected defect findings in the selected inspection window.",
+          group: "snapshot",
         },
         {
-          label: "Critical Defects",
+          label: "High / Critical Defects",
           icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.severity === "Critical").length,
+          compute: (items) => items.filter((item) => item.severity === "High" || item.severity === "Critical").length,
           format: String,
-          subtext: "Critical defect records that need prompt attention.",
+          subtext: "Defects that need the fastest inspection or maintenance response.",
           valueClassName: () => "text-brand-red",
-          group: "overall",
-        },
-        {
-          label: "Affected Zones",
-          icon: ShieldAlert,
-          compute: (items) => new Set(items.filter((item) => item.crackDetected === "Yes").map((item) => item.zone || item.location)).size,
-          format: String,
-          subtext: "Distinct zones or assets where defects have been identified.",
-          group: "overall",
+          group: "snapshot",
         },
         {
           label: "Most Affected Area",
-          icon: AlertTriangle,
+          icon: ShieldAlert,
           compute: (items) =>
-            Object.entries(groupBy(items.filter((item) => item.crackDetected === "Yes"), (item) => item.location || item.zone || "Unknown"))
+            Object.entries(groupBy(items.filter((item) => item.crackDetected === "Yes"), (item) => item.zone || item.location || "Unknown"))
               .sort((a, b) => sum(b[1].map((row) => row.crackCount)) - sum(a[1].map((row) => row.crackCount)))[0]?.[0] ?? "No affected area",
           format: String,
-          subtext: "Location with the highest concentration of defects.",
+          subtext: "Area with the highest concentration of detected defects.",
           valueClassName: () => "text-brand-red",
-          group: "overall",
+          group: "snapshot",
         },
         {
-          label: "Open Defects",
-          icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.status === "Open" && item.crackDetected === "Yes").length,
-          format: String,
-          subtext: "Defect records that still require attention or closure.",
-          valueClassName: () => "text-brand-red",
-          group: "action",
-        },
-        {
-          label: "Critical Open Defects",
-          icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.status === "Open" && item.crackDetected === "Yes" && item.severity === "Critical").length,
-          format: String,
-          subtext: "Open critical defect records requiring urgent attention.",
-          valueClassName: () => "text-brand-red",
-          group: "action",
-        },
-        {
-          label: "Needs Inspection",
-          icon: AlertTriangle,
-          compute: (items) =>
-            items.filter(
-              (item) =>
-                item.crackDetected === "Yes"
-                && (item.status === "Open" || item.recommendedAction === "Inspection required" || item.severity === "High" || item.severity === "Critical"),
-            ).length,
-          format: String,
-          subtext: "Open or high-priority defects that should be reviewed by an inspection team.",
-          group: "action",
-        },
-        {
-          label: "Latest Open Alert",
+          label: "Latest Detection",
           icon: Activity,
-          compute: (items) => byTimestamp(items.filter((item) => item.status === "Open" && item.crackDetected === "Yes")).at(-1),
-          format: (value) => formatLatestIncidentLabel(value, "No open alerts"),
-          subtext: "Most recent open defect surfaced in this filtered view.",
-          group: "action",
+          compute: (items) => byTimestamp(items.filter((item) => item.crackDetected === "Yes")).at(-1),
+          format: (value) => formatLatestIncidentLabel(value, "No detections"),
+          subtext: "Most recent defect finding surfaced in the current view.",
+          group: "snapshot",
         },
       ],
       columns: [
@@ -3383,10 +3521,9 @@ export function buildDashboardDefinition(slug, rows, info) {
         { key: "defectType", label: "Defect Type", sortable: true },
         { key: "crackCount", label: "Defect Count", sortable: true },
         { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "Critical" || value === "High" ? "high" : value === "Medium" ? "warning" : value === "Low" ? "alert" : "normal"}>{value}</Badge> },
-        { key: "status", label: "Status", sortable: true, render: badgeRender },
         { key: "recommendedAction", label: "Recommended Action", sortable: true },
         { key: "maxConfidence", label: "Confidence", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
-        { key: "evidence", label: "Evidence", sortable: false, render: evidenceLinkRender },
+        { key: "evidence", label: "Evidence", sortable: false, render: defectEvidenceLinkRender },
       ],
     },
     "unsafe-behavior-detection": {

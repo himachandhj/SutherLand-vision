@@ -71,6 +71,65 @@ function formatMetricValue(value, suffix = "") {
   return value ?? "—";
 }
 
+function normalizeSeverityLabel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized || normalized === "none" || normalized === "n/a") return "";
+  if (normalized === "critical" || normalized === "high") return "High";
+  if (normalized === "medium") return "Medium";
+  if (normalized === "low") return "Low";
+  return "";
+}
+
+function getHighestSeverityLabel(metrics, detections) {
+  const severityRank = { Low: 1, Medium: 2, High: 3 };
+  let bestLabel = "";
+
+  const candidates = [
+    metrics?.severity,
+    metrics?.highest_severity,
+    metrics?.max_severity_label,
+    ...(Array.isArray(detections)
+      ? detections.flatMap((detection) => [
+          detection?.severity,
+          detection?.alert_severity,
+          detection?.risk_level,
+        ])
+      : []),
+  ];
+
+  candidates.forEach((candidate) => {
+    const label = normalizeSeverityLabel(candidate);
+    if (severityRank[label] > (severityRank[bestLabel] ?? 0)) {
+      bestLabel = label;
+    }
+  });
+
+  return bestLabel;
+}
+
+function getCrackDetectionCount(metrics, detections) {
+  const countCandidates = [
+    metrics?.defect_count,
+    metrics?.crack_count,
+    metrics?.detections_count,
+    metrics?.crack_detections,
+    metrics?.total_defects,
+    metrics?.total_cracks,
+  ];
+
+  for (const candidate of countCandidates) {
+    const count = Number(candidate);
+    if (Number.isFinite(count) && count >= 0) return count;
+  }
+
+  return Array.isArray(detections) ? detections.length : 0;
+}
+
+const CRACK_PREVIEW_FRAME_CLASS =
+  "relative flex min-h-[16rem] w-full items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4";
+
+const CRACK_PREVIEW_MEDIA_CLASS = "block max-h-[20rem] max-w-full rounded-xl object-contain";
+
 export default function ModelPlayground({
   activeUseCase,
   onProcessInput,
@@ -98,8 +157,9 @@ export default function ModelPlayground({
   const isCrackDetection = activeUseCase.id === "crack-detection";
   const isUnsafeBehaviorDetection = activeUseCase.id === "unsafe-behavior-detection";
   const isLegacyClasswiseCounting = activeUseCase.id === "class-wise-object-counting";
-  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation || isCrackDetection || isUnsafeBehaviorDetection;
+  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation || isUnsafeBehaviorDetection;
   const activeSampleId = currentInput?.kind === "sample" ? currentInput.sampleId : selectedSample;
+  const showsCrackUploadedFilePreview = isCrackDetection && currentInput?.kind === "file";
 
   useEffect(() => {
     return () => {
@@ -143,6 +203,9 @@ export default function ModelPlayground({
       return nextInput;
     });
   };
+
+  const crackDetectionCount = getCrackDetectionCount(playgroundState.metrics, playgroundState.detections);
+  const crackHighestSeverity = getHighestSeverityLabel(playgroundState.metrics, playgroundState.detections);
 
   const runCurrentInput = async (inputOverride = currentInput) => {
     if (!inputOverride) return;
@@ -218,26 +281,45 @@ export default function ModelPlayground({
         </div>
 
         <input ref={fileInputRef} accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.webm" className="hidden" type="file" onChange={handleFileChange} />
-        <button
-          className={`flex h-72 w-full flex-col items-center justify-center rounded-2xl border border-dashed text-center transition ${dragging ? "border-brandBlue bg-brandBlue/5" : "border-slate-300 bg-slate-50 hover:border-brandBlue hover:bg-white"}`}
-          onDragEnter={() => setDragging(true)}
-          onDragLeave={() => setDragging(false)}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={async (event) => {
-            event.preventDefault();
-            setDragging(false);
-            const file = event.dataTransfer.files?.[0];
-            await processDroppedFile(file);
-          }}
-          onClick={() => fileInputRef.current?.click()}
-          type="button"
-        >
-          <div className="mb-3 rounded-full bg-white p-4 shadow-sm">
-            <div className="h-8 w-8 rounded-lg border border-brandBlue/20 bg-brandBlue/5" />
+        {showsCrackUploadedFilePreview ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
+            <div className={CRACK_PREVIEW_FRAME_CLASS}>
+              {currentInput.previewType === "video" ? (
+                <video
+                  className={CRACK_PREVIEW_MEDIA_CLASS}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={currentInput.previewSrc}
+                />
+              ) : (
+                <img alt={currentInput.label} className={CRACK_PREVIEW_MEDIA_CLASS} src={currentInput.previewSrc} />
+              )}
+            </div>
+            <div className="mt-3 text-sm font-medium text-slate-700">{currentInput.label}</div>
           </div>
-          <div className="text-lg font-semibold text-slate-900">Upload image or video</div>
-          <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">Drop files here or click to preview a sample inference for {activeUseCase.title}.</p>
-        </button>
+        ) : (
+          <button
+            className={`flex h-72 w-full flex-col items-center justify-center rounded-2xl border border-dashed text-center transition ${dragging ? "border-brandBlue bg-brandBlue/5" : "border-slate-300 bg-slate-50 hover:border-brandBlue hover:bg-white"}`}
+            onDragEnter={() => setDragging(true)}
+            onDragLeave={() => setDragging(false)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={async (event) => {
+              event.preventDefault();
+              setDragging(false);
+              const file = event.dataTransfer.files?.[0];
+              await processDroppedFile(file);
+            }}
+            onClick={() => fileInputRef.current?.click()}
+            type="button"
+          >
+            <div className="mb-3 rounded-full bg-white p-4 shadow-sm">
+              <div className="h-8 w-8 rounded-lg border border-brandBlue/20 bg-brandBlue/5" />
+            </div>
+            <div className="text-lg font-semibold text-slate-900">Upload image or video</div>
+            <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">Drop files here or click to preview a sample inference for {activeUseCase.title}.</p>
+          </button>
+        )}
         {sampleMedia.length > 0 && (
           <div className="mt-8">
             <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Try a Sample</h3>
@@ -291,9 +373,32 @@ export default function ModelPlayground({
             </div>
           </div>
         )}
+        {isCrackDetection ? (
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button
+              className="rounded-xl bg-brandBlue px-4 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!currentInput || playgroundState.status === "loading"}
+              onClick={() => void runCurrentInput()}
+              type="button"
+            >
+              {playgroundState.status === "loading" ? "Running defect preview..." : "Run Defect Preview"}
+            </button>
+            {currentInput?.kind === "file" ? (
+              <button
+                className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brandBlue/30"
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
+                Upload Another File
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {showsPreviewGuidance ? (
           <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-semibold text-slate-900">{isSpeedEstimation ? "Preview guidance" : "Custom preview options"}</div>
+            <div className="text-sm font-semibold text-slate-900">
+              {isSpeedEstimation ? "Preview guidance" : "Custom preview options"}
+            </div>
             <p className="mt-1 text-sm leading-6 text-slate-500">
               {isSpeedEstimation
                 ? "Upload your own input or pick a sample, then re-run the preview with motion-aware expectations in mind."
@@ -310,13 +415,6 @@ export default function ModelPlayground({
               <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
                 <p>Vehicle Analytics tracks moving objects across frames, estimates speed from motion, and summarizes class-wise vehicle counts. Use video input for the most meaningful results.</p>
                 <p className="mt-2">Image previews may only show object detection; speed requires motion across video frames.</p>
-              </div>
-            ) : null}
-
-            {isCrackDetection ? (
-              <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
-                <p>Crack Detection uses a fine-tuned YOLO crack detector when the model is available under <span className="font-semibold">BackEnd/models/crack_detection/best.pt</span>.</p>
-                <p className="mt-2">Upload crack images or videos from walls, roads, bridges, pavements, or construction surfaces to preview annotated detections.</p>
               </div>
             ) : null}
 
@@ -492,7 +590,9 @@ export default function ModelPlayground({
                 onClick={() => void runCurrentInput()}
                 type="button"
               >
-                {playgroundState.status === "loading" ? "Running preview..." : "Run Preview with Current Settings"}
+                {playgroundState.status === "loading"
+                  ? "Running preview..."
+                  : "Run Preview with Current Settings"}
               </button>
               {activeUseCase.id === "fire-detection" && currentInput?.previewType === "video" ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
@@ -521,12 +621,12 @@ export default function ModelPlayground({
           <div className="flex h-[28rem] items-center justify-center rounded-2xl border border-brandRed/20 bg-brandRed/5 px-8 text-center text-lg font-medium text-slate-700">{playgroundState.error}</div>
         ) : (
           <div>
-            <div className="relative flex h-[28rem] items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4">
+            <div className={isCrackDetection ? CRACK_PREVIEW_FRAME_CLASS : "relative flex h-[28rem] items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4"}>
               {playgroundState.outputVideoUrl ? (
                 <video
                   key={playgroundState.outputVideoUrl}
                   autoPlay
-                  className="max-h-full max-w-full rounded-xl object-contain"
+                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : "max-h-full max-w-full rounded-xl object-contain"}
                   controls
                   muted
                   playsInline
@@ -535,43 +635,56 @@ export default function ModelPlayground({
                   src={playgroundState.outputVideoUrl}
                 />
               ) : (
-                <img alt="Processed output" className="max-h-full max-w-full rounded-xl object-contain" src={playgroundState.imageBase64} />
+                <img
+                  alt="Processed output"
+                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : "max-h-full max-w-full rounded-xl object-contain"}
+                  src={playgroundState.imageBase64}
+                />
               )}
             </div>
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-2 text-xs text-slate-400">Source: {playgroundState.sourceLabel}</div>
-              <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Detections</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {playgroundState.detections.length > 0 ? playgroundState.detections.map((detection) => (
-                  <div key={`${detection.class}-${detection.confidence}`} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                    {formatPlaygroundDetection(detection)}
+            {isCrackDetection ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Inspection Summary</div>
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                    <span className="text-sm text-slate-500">Defects detected</span>
+                    <span className="text-base font-semibold text-slate-900">{crackDetectionCount}</span>
                   </div>
-                )) : (
-                  <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">No detections returned</div>
-                )}
+                  {crackHighestSeverity ? (
+                    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                      <span className="text-sm text-slate-500">Highest severity</span>
+                      <span className="text-base font-semibold text-slate-900">{crackHighestSeverity}</span>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-            {(isCrackDetection || isUnsafeBehaviorDetection) && playgroundState.metrics ? (
+            ) : (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-2 text-xs text-slate-400">Source: {playgroundState.sourceLabel}</div>
+                <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Detections</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {playgroundState.detections.length > 0 ? playgroundState.detections.map((detection) => (
+                    <div key={`${detection.class}-${detection.confidence}`} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                      {formatPlaygroundDetection(detection)}
+                    </div>
+                  )) : (
+                    <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">No detections returned</div>
+                  )}
+                </div>
+              </div>
+            )}
+            {isUnsafeBehaviorDetection && playgroundState.metrics ? (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {(isUnsafeBehaviorDetection
-                  ? [
-                      ["Total unsafe events", formatMetricValue(playgroundState.metrics.total_unsafe_events)],
-                      ["Smoking events", formatMetricValue(playgroundState.metrics.smoking_events)],
-                      ["Phone usage events", formatMetricValue(playgroundState.metrics.phone_usage_events)],
-                      ["Frames analyzed", formatMetricValue(playgroundState.metrics.frames_analyzed)],
-                      ["Frames with unsafe behavior", formatMetricValue(playgroundState.metrics.frames_with_unsafe_behavior)],
-                      ["Unsafe rate", formatMetricValue(playgroundState.metrics.unsafe_rate_pct, "%")],
-                      ["Max confidence", formatMetricValue(playgroundState.metrics.max_confidence)],
-                      ["Average confidence", formatMetricValue(playgroundState.metrics.avg_confidence)],
-                    ]
-                  : [
-                      ["Crack detections", formatMetricValue(playgroundState.metrics.crack_detections)],
-                      ["Frames analyzed", formatMetricValue(playgroundState.metrics.frames_analyzed)],
-                      ["Frames with cracks", formatMetricValue(playgroundState.metrics.frames_with_cracks)],
-                      ["Crack rate", formatMetricValue(playgroundState.metrics.crack_rate_pct, "%")],
-                      ["Max confidence", formatMetricValue(playgroundState.metrics.max_confidence)],
-                      ["Average confidence", formatMetricValue(playgroundState.metrics.avg_confidence)],
-                    ]).map(([label, value]) => (
+                {[
+                  ["Total unsafe events", formatMetricValue(playgroundState.metrics.total_unsafe_events)],
+                  ["Smoking events", formatMetricValue(playgroundState.metrics.smoking_events)],
+                  ["Phone usage events", formatMetricValue(playgroundState.metrics.phone_usage_events)],
+                  ["Frames analyzed", formatMetricValue(playgroundState.metrics.frames_analyzed)],
+                  ["Frames with unsafe behavior", formatMetricValue(playgroundState.metrics.frames_with_unsafe_behavior)],
+                  ["Unsafe rate", formatMetricValue(playgroundState.metrics.unsafe_rate_pct, "%")],
+                  ["Max confidence", formatMetricValue(playgroundState.metrics.max_confidence)],
+                  ["Average confidence", formatMetricValue(playgroundState.metrics.avg_confidence)],
+                ].map(([label, value]) => (
                   <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
                     <div className="mt-2 text-xl font-semibold text-slate-900">{value}</div>

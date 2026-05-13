@@ -5,9 +5,11 @@ Shared utilities for all use case video processors.
 import json
 import math
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
 
@@ -411,6 +413,141 @@ def ensure_browser_playable_mp4(path: str) -> str:
             os.unlink(temp_path)
 
     return output_path
+
+
+def _candidate_preview_frame_indices(frame_count: int | None) -> list[int]:
+    if not frame_count or frame_count <= 0:
+        return [0]
+
+    candidates: list[int] = []
+    for raw_index in (frame_count // 2, frame_count // 3, frame_count // 4, 0, frame_count - 1):
+        index = max(0, min(frame_count - 1, int(raw_index)))
+        if index not in candidates:
+            candidates.append(index)
+    return candidates
+
+
+def _candidate_preview_timestamps(duration_sec: float | None) -> list[float]:
+    if duration_sec is None or duration_sec <= 0:
+        return [0.0]
+
+    candidates: list[float] = []
+    for raw_value in (duration_sec / 2.0, duration_sec / 3.0, min(1.0, duration_sec / 10.0), 0.0):
+        timestamp = max(0.0, min(float(duration_sec), float(raw_value)))
+        rounded = round(timestamp, 3)
+        if rounded not in candidates:
+            candidates.append(rounded)
+    return candidates
+
+
+def _extract_preview_frame_with_opencv(path: str, *, frame_count: int | None = None):
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        cap.release()
+        return None
+
+    try:
+        for frame_index in _candidate_preview_frame_indices(frame_count):
+            if frame_index > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+            if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                return frame
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        for _ in range(5):
+            ok, frame = cap.read()
+            if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                return frame
+    finally:
+        cap.release()
+
+    return None
+
+
+def _extract_preview_frame_with_ffmpeg(path: str, *, duration_sec: float | None = None):
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise RuntimeError("FFmpeg is required for video preview extraction.")
+
+    with tempfile.TemporaryDirectory(prefix="video_preview_") as temp_dir:
+        output_path = Path(temp_dir) / "preview.jpg"
+
+        for timestamp in _candidate_preview_timestamps(duration_sec):
+            command_variants = [
+                [
+                    ffmpeg_path,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    *([] if timestamp <= 0 else ["-ss", f"{timestamp:.3f}"]),
+                    "-i",
+                    path,
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(output_path),
+                ],
+                [
+                    ffmpeg_path,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    path,
+                    *([] if timestamp <= 0 else ["-ss", f"{timestamp:.3f}"]),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(output_path),
+                ],
+            ]
+
+            for command in command_variants:
+                try:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                except Exception:
+                    continue
+
+                frame = cv2.imread(str(output_path))
+                if frame is not None and getattr(frame, "size", 0) > 0:
+                    return frame
+                output_path.unlink(missing_ok=True)
+
+    return None
+
+
+def extract_video_preview_frame(path: str) -> np.ndarray:
+    """Extract a representative video frame using OpenCV first, then FFmpeg fallback."""
+    video_path = os.path.abspath(path)
+    if not os.path.isfile(video_path):
+        raise RuntimeError(f"Input not found: {video_path}")
+
+    profile = read_video_profile(video_path)
+    frame = _extract_preview_frame_with_opencv(
+        video_path,
+        frame_count=_coerce_positive_int(profile.get("frame_count")),
+    )
+    if frame is not None:
+        return frame
+
+    frame = _extract_preview_frame_with_ffmpeg(
+        video_path,
+        duration_sec=_coerce_positive_float(profile.get("duration_sec")),
+    )
+    if frame is not None:
+        return frame
+
+    raise RuntimeError("Unable to extract a preview frame from the uploaded video.")
 
 
 def build_output_path(input_path: str, output_path: str | None, suffix: str = "_processed") -> str:

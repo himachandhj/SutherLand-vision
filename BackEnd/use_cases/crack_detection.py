@@ -28,6 +28,7 @@ from use_cases.base import (
     draw_label,
     load_model,
     open_video,
+    read_video_profile,
     validate_output_video,
 )
 
@@ -258,10 +259,12 @@ def process_video(
     class_names = _normalize_names(getattr(model, "names", {}))
 
     cap = open_video(input_p)
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    source_profile = read_video_profile(input_p, cap=cap)
+    frame_width = int(source_profile.get("width") or cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    frame_height = int(source_profile.get("height") or cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    source_fps = float(source_profile.get("normalized_fps") or source_profile.get("fps") or 25.0)
+    total_frames = int(source_profile.get("frame_count") or cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    source_duration_sec = float(source_profile.get("duration_sec") or 0.0)
     writer = create_writer(out_p, source_fps, frame_width, frame_height)
 
     frame_num = 0
@@ -331,7 +334,10 @@ def process_video(
     validate_output_video(out_p)
 
     processing_time_sec = round(time.time() - t0, 3)
-    video_duration_sec = round((total_frames / source_fps) if total_frames > 0 and source_fps > 0 else (frame_num / source_fps if source_fps > 0 else 0.0), 3)
+    if source_duration_sec > 0:
+        video_duration_sec = round(source_duration_sec, 3)
+    else:
+        video_duration_sec = round((total_frames / source_fps) if total_frames > 0 and source_fps > 0 else (frame_num / source_fps if source_fps > 0 else 0.0), 3)
     avg_confidence = round(confidence_sum / crack_detections, 4) if crack_detections else 0.0
     crack_rate_pct = round((frames_with_cracks / frame_num * 100.0), 2) if frame_num else 0.0
 
@@ -346,6 +352,9 @@ def process_video(
             "avg_confidence": avg_confidence,
             "processing_time_sec": processing_time_sec,
             "video_duration_sec": video_duration_sec,
+            "input_fps": round(float(source_fps), 4) if source_fps > 0 else None,
+            "raw_input_fps": source_profile.get("raw_fps"),
+            "fps_source": source_profile.get("fps_source"),
         },
         "analytics": {
             "video_summary": {

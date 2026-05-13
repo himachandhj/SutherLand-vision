@@ -14,7 +14,7 @@ from app.core.database import DB_PATH, init_db  # noqa: E402
 
 
 RNG = random.Random(42)
-CRACK_INPUT_COUNT = 30
+CRACK_INPUT_COUNT = 108
 UNSAFE_INPUT_COUNT = 35
 NOW = datetime(2026, 5, 7, 12, 0, 0)
 
@@ -125,16 +125,23 @@ def random_timestamp(index: int) -> datetime:
     return NOW - timedelta(days=days_back, hours=hours_back, minutes=minutes_back, seconds=seconds_back)
 
 
+def expand_weighted_values(distribution: list[tuple[str, int]]) -> list[str]:
+    values: list[str] = []
+    for label, count in distribution:
+        values.extend([label] * count)
+    return values
+
+
 def crack_recommended_action(severity: str, crack_detected: bool) -> str:
     if not crack_detected:
-        return "No action required"
+        return "Monitor"
     if severity == "critical":
-        return "Immediate maintenance inspection required"
+        return "Immediate inspection"
     if severity == "high":
-        return "Inspection required"
+        return "Repair required"
     if severity == "medium":
         return "Schedule maintenance review"
-    return "Monitor during next inspection"
+    return "Monitor"
 
 
 def unsafe_recommended_action(event_type: str, severity: str) -> str:
@@ -175,40 +182,100 @@ def make_person_bbox(bbox: list[int]) -> list[int]:
 
 
 def generate_crack_plan() -> list[dict]:
-    severities = (
-        ["critical"] * 5
-        + ["high"] * 7
-        + ["medium"] * 7
-        + ["low"] * 4
-        + ["low"] * 7
+    zone_pool = expand_weighted_values(
+        [
+            ("Loading Bay", 24),
+            ("Warehouse Floor", 19),
+            ("Dock Lane", 17),
+            ("Machine Lane", 15),
+            ("Inspection Area", 13),
+            ("Forklift Bay", 11),
+            ("Maintenance Yard", 9),
+        ]
     )
-    statuses = (
-        ["open"] * 12
-        + ["needs_review"] * 8
-        + ["resolved"] * 6
-        + ["normal"] * 4
+    severity_pool = expand_weighted_values(
+        [
+            ("critical", 11),
+            ("high", 24),
+            ("medium", 39),
+            ("low", 22),
+            ("none", 12),
+        ]
     )
-    detected_flags = [True] * 23 + [False] * 7
+    defect_type_pool = expand_weighted_values(
+        [
+            ("Crack", 38),
+            ("Surface Damage", 24),
+            ("Spalling", 14),
+            ("Corrosion", 12),
+            ("Pothole", 8),
+        ]
+    )
+    camera_pool = (
+        ["CAM-DEF-01"] * 20
+        + ["CAM-DEF-02"] * 19
+        + ["CAM-DEF-03"] * 18
+        + ["CAM-DEF-04"] * 18
+        + ["CAM-DEF-05"] * 17
+        + ["CAM-DEF-06"] * 16
+    )
 
-    plan = []
+    if not (len(zone_pool) == len(severity_pool) == len(camera_pool) == CRACK_INPUT_COUNT):
+        raise ValueError("Crack demo distributions must match CRACK_INPUT_COUNT")
+
+    RNG.shuffle(zone_pool)
+    RNG.shuffle(severity_pool)
+    RNG.shuffle(camera_pool)
+    RNG.shuffle(defect_type_pool)
+
+    location_by_zone = {
+        "Loading Bay": "Logistics Hub",
+        "Warehouse Floor": "Central Warehouse",
+        "Dock Lane": "Loading Terminal",
+        "Machine Lane": "North Plant",
+        "Inspection Area": "Quality Center",
+        "Forklift Bay": "Distribution Wing",
+        "Maintenance Yard": "Service Yard",
+    }
+
+    plan: list[dict] = []
+    defect_index = 0
     for index in range(CRACK_INPUT_COUNT):
+        severity = severity_pool[index]
+        crack_detected = severity != "none"
+        if not crack_detected:
+            status = "normal"
+            defect_type = ""
+        elif severity == "critical":
+            status = RNG.choice(["open", "open", "needs_review"])
+            defect_type = defect_type_pool[defect_index]
+            defect_index += 1
+        elif severity == "high":
+            status = RNG.choice(["open", "needs_review", "needs_review", "resolved"])
+            defect_type = defect_type_pool[defect_index]
+            defect_index += 1
+        elif severity == "medium":
+            status = RNG.choice(["needs_review", "needs_review", "resolved", "open"])
+            defect_type = defect_type_pool[defect_index]
+            defect_index += 1
+        else:
+            status = RNG.choice(["monitoring", "resolved", "needs_review"])
+            defect_type = defect_type_pool[defect_index]
+            defect_index += 1
+
+        zone = zone_pool[index]
         plan.append(
             {
-                "severity": severities[index],
-                "status": statuses[index],
-                "crack_detected": detected_flags[index],
+                "camera_id": camera_pool[index],
+                "location": location_by_zone[zone],
+                "zone": zone,
+                "severity": severity,
+                "status": status,
+                "crack_detected": crack_detected,
+                "defect_type": defect_type,
             }
         )
 
-    plan[23]["status"] = "normal"
-    plan[24]["status"] = "normal"
-    plan[25]["status"] = "normal"
-    plan[26]["status"] = "normal"
-    plan[27]["status"] = "resolved"
-    plan[28]["status"] = "resolved"
-    plan[29]["status"] = "needs_review"
-
-    RNG.shuffle(plan)
     return plan
 
 
@@ -237,16 +304,6 @@ def generate_unsafe_plan() -> list[dict]:
 
 
 def generate_crack_rows(columns: set[str], output_columns: set[str]) -> tuple[list[dict], list[dict], dict]:
-    cameras = ["CAM-CRACK-01", "CAM-CRACK-02", "CAM-CRACK-03", "CAM-CRACK-04"]
-    locations = ["Plant A", "Warehouse 2", "Maintenance Yard", "Loading Terminal"]
-    zones = [
-        "Forklift Bay",
-        "Loading Dock",
-        "Machine Lane",
-        "Warehouse Floor",
-        "Inspection Area",
-        "Parking Ramp",
-    ]
     link_column = choose_link_column(columns)
     plan = generate_crack_plan()
 
@@ -278,9 +335,9 @@ def generate_crack_rows(columns: set[str], output_columns: set[str]) -> tuple[li
             "source_ref": source_ref,
             "integration_run_id": None,
             "job_id": None,
-            "camera_id": cameras[(index - 1) % len(cameras)],
-            "location": locations[(index - 1) % len(locations)],
-            "zone": zones[(index - 1) % len(zones)],
+            "camera_id": planned["camera_id"],
+            "location": planned["location"],
+            "zone": planned["zone"],
             "filename": filename,
             "minio_input_link": f"http://localhost:9000/vision-demo/crack/input/{filename}",
             "input_bucket": "vision-demo" if "input_bucket" in columns else None,
@@ -306,13 +363,22 @@ def generate_crack_rows(columns: set[str], output_columns: set[str]) -> tuple[li
         inputs.append(filtered_input)
 
         crack_detected = planned["crack_detected"]
-        severity = planned["severity"] if crack_detected else "low"
+        severity = planned["severity"]
         status = planned["status"]
-        crack_count = RNG.randint(1, 8) if crack_detected else 0
-        frames_analyzed = RNG.randint(540, 1200)
-        frames_with_cracks = RNG.randint(18, 180) if crack_detected else 0
+        defect_type = planned["defect_type"]
+        if crack_detected:
+            crack_count = {
+                "critical": RNG.randint(28, 40),
+                "high": RNG.randint(18, 30),
+                "medium": RNG.randint(9, 18),
+                "low": RNG.randint(2, 8),
+            }[planned["severity"]]
+        else:
+            crack_count = 0
+        frames_analyzed = RNG.randint(720, 1800)
+        frames_with_cracks = RNG.randint(42, 260) if crack_detected else 0
         crack_rate_pct = round((frames_with_cracks / frames_analyzed) * 100, 2) if frames_analyzed else 0.0
-        max_confidence = round(RNG.uniform(0.7, 0.96), 2) if crack_detected else round(RNG.uniform(0.0, 0.35), 2)
+        max_confidence = round(RNG.uniform(0.72, 0.97), 2) if crack_detected else round(RNG.uniform(0.0, 0.35), 2)
         avg_confidence = round(max(0.0, max_confidence - RNG.uniform(0.03, 0.18)), 2)
         recommended_action = crack_recommended_action(severity, crack_detected)
 
@@ -324,11 +390,11 @@ def generate_crack_rows(columns: set[str], output_columns: set[str]) -> tuple[li
                     {
                         "frame_number": RNG.randint(20, max(20, frames_analyzed)),
                         "timestamp_sec": round(RNG.uniform(1.0, 42.0), 1),
-                        "defect_type": "crack",
+                        "defect_type": defect_type,
                         "confidence": event_confidence,
                         "bbox": make_bbox(),
                         "severity": severity,
-                        "recommended_action": "Inspection required",
+                        "recommended_action": recommended_action,
                     }
                 )
 
@@ -347,6 +413,7 @@ def generate_crack_rows(columns: set[str], output_columns: set[str]) -> tuple[li
                     {
                         "source": "demo_seed",
                         "is_demo": True,
+                        "defect_type": defect_type,
                         "recommended_action": recommended_action,
                         "defect_events": defect_events,
                     }
