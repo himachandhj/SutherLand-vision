@@ -581,20 +581,20 @@ export function GetStartedStep({
         <div className="mt-5 rounded-3xl border border-brandBlue/15 bg-brandBlue/[0.04] p-5">
           <div className="text-lg font-semibold text-slate-900">What this fine-tuning improves</div>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-            Fine-tuning improves the crack detector used for construction and infrastructure inspection. Use bounding-box labels around visible cracks, and include both cracked and non-cracked surfaces so the model learns what should not trigger detections.
+            Fine-tuning improves the defect detector used for construction, infrastructure, manufacturing, and facility inspection. Use bounding-box labels around visible surface and structural defects, and include clean surfaces so the model learns what should not trigger detections.
           </p>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div className="rounded-2xl border border-white bg-white p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Current model</div>
-              <div className="mt-2 text-sm font-semibold text-slate-900">Crack detector</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">Defect detector</div>
               <div className="mt-2 text-sm text-slate-700">Task: object detection</div>
             </div>
             <div className="rounded-2xl border border-white bg-white p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Dataset needed</div>
               <div className="mt-2 space-y-2 text-sm text-slate-700">
-                <div>images of cracked surfaces</div>
-                <div>images of non-cracked surfaces</div>
-                <div>YOLO bounding-box labels for crack regions</div>
+                <div>images of cracks, spalling, rust stains, delamination, efflorescence, and exposed reinforcement</div>
+                <div>images of clean or non-defective surfaces</div>
+                <div>YOLO bounding-box labels for the selected defect classes</div>
               </div>
             </div>
           </div>
@@ -1052,6 +1052,12 @@ export function LabelsStep({
   const handoffSummary = buildHandoffSummary(datasetReadyPayload);
   const statusTone = workflowState.trainingStatus === "ready" ? "accent" : workflowState.trainingStatus === "warning" ? "warn" : "warn";
   const statusBadgeTone = workflowState.trainingStatus === "ready" ? "compliant" : workflowState.trainingStatus === "warning" ? "warning" : "alert";
+  const isDefectDetection = String(
+    datasetReadyPayload?.use_case_id ??
+      selectedDatasetDetail?.dataset?.usecase_slug ??
+      selectedDataset?.raw?.usecase_slug ??
+      "",
+  ).toLowerCase() === "crack-detection";
 
   const renderEditorButton = (variant = "default") => {
     const className =
@@ -1161,7 +1167,9 @@ export function LabelsStep({
           <div>
             <div className="text-lg font-semibold text-slate-900">Guided labeling flow</div>
             <p className="mt-2 text-sm leading-6 text-slate-500">
-              Start in the dedicated annotation editor, label a few sample images manually, then test auto-labeling before you apply it to the rest of the dataset.
+              {isDefectDetection
+                ? "Start in the dedicated annotation editor and label visible surface and structural defects such as cracks, spalling, rust stains, delamination, efflorescence, and exposed reinforcement before testing auto-labeling."
+                : "Start in the dedicated annotation editor, label a few sample images manually, then test auto-labeling before you apply it to the rest of the dataset."}
             </p>
             <div className="mt-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
