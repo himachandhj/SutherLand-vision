@@ -42,6 +42,15 @@ function makeBoxId(prefix = "box") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const DEFECT_CLASS_COLORS = {
+  crack: "#dc2626",
+  spalling: "#2563eb",
+  rust_stain: "#c2410c",
+  delamination: "#16a34a",
+  efflorescence: "#7c3aed",
+  exposed_reinforcement: "#0f766e",
+};
+
 const CLASS_COLOR_PALETTE = [
   "#e11d48",
   "#2563eb",
@@ -55,6 +64,7 @@ const CLASS_COLOR_PALETTE = [
 
 function getClassColor(className) {
   const normalized = String(className || "unknown").toLowerCase().trim();
+  if (DEFECT_CLASS_COLORS[normalized]) return DEFECT_CLASS_COLORS[normalized];
   let hash = 0;
   for (let index = 0; index < normalized.length; index += 1) {
     hash = normalized.charCodeAt(index) + ((hash << 5) - hash);
@@ -191,13 +201,22 @@ function annotationClassName(box) {
   return String(box?.class_name || "object").trim().toLowerCase();
 }
 
+function formatClassLabel(className) {
+  return String(className || "object")
+    .trim()
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 const REGION_ALERTS_CLASSES = ["person", "car", "bus", "truck", "motorcycle", "bicycle", "forklift"];
 
 function defaultClassOptions(useCaseId) {
   const defaults = {
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "fire-detection": ["fire", "smoke"],
-    "crack-detection": ["crack"],
+    "crack-detection": ["crack", "spalling", "rust_stain", "delamination", "efflorescence", "exposed_reinforcement"],
     "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "ppe-detection": ["person", "helmet", "vest"],
     "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -437,6 +456,7 @@ export default function AnnotationEditorPage() {
     return Number(autoLabelPreview?.returned_item_count ?? autoLabelPreview?.processed_item_count ?? 0);
   }, [autoLabelPreview, lastSuggestionContext]);
   const isRegionAlerts = activeUseCase.id === "region-alerts";
+  const isDefectDetection = activeUseCase.id === "crack-detection";
   const hasPendingSuggestions = pendingSuggestionCount > 0;
   const requiresApprovedSave = hasApprovedSuggestions && !hasSavedApprovedSuggestions;
   const workflowStage = !assistMode
@@ -453,6 +473,8 @@ export default function AnnotationEditorPage() {
   const workflowHelperText = !assistMode
     ? isRegionAlerts
       ? "Label people and vehicles in representative images or extracted video frames from the target environment."
+      : isDefectDetection
+        ? "Use the annotation editor to label visible surface and structural defects such as cracks, spalling, rust stains, delamination, efflorescence, and exposed reinforcement."
       : "Label a few sample images manually."
     : hasPendingSuggestions
       ? "Review these suggestions carefully before applying to the dataset."
@@ -464,6 +486,8 @@ export default function AnnotationEditorPage() {
             ? "Now test auto-labeling on a few unseen images."
             : isRegionAlerts
               ? "Start with labeled images or extracted video frames from the target environment."
+              : isDefectDetection
+                ? "Start by labeling a few images across the supported defect classes before testing auto-labeling."
               : "Label a few sample images manually.";
 
   const setLoadingFlag = (key, value) => {
@@ -648,7 +672,7 @@ export default function AnnotationEditorPage() {
     if (announce) {
       setMessage(
         addedTerms.length
-          ? `Added ${addedTerms.join(", ")} to the class list.`
+          ? `Added ${addedTerms.map(formatClassLabel).join(", ")} to the class list.`
           : "Those prompts are already available in the class list.",
       );
     }
@@ -1478,6 +1502,16 @@ export default function AnnotationEditorPage() {
               </p>
             </div>
           ) : null}
+          {isDefectDetection ? (
+            <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm text-slate-700">
+              <p>
+                Use the annotation editor to label visible surface and structural defects such as cracks, spalling, rust stains, delamination, efflorescence, and exposed reinforcement.
+              </p>
+              <p className="mt-2">
+                This dataset will be prepared for object detection fine-tuning using the selected defect labels.
+              </p>
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-slate-900">Current image</div>
@@ -1543,7 +1577,7 @@ export default function AnnotationEditorPage() {
                     style={{ borderColor: color, backgroundColor: hexToRgba(color, 0.12) }}
                   >
                     <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
-                    {className}
+                    {formatClassLabel(className)}
                   </span>
                 );
               })}
@@ -1622,7 +1656,7 @@ export default function AnnotationEditorPage() {
                                 color: getReadableTextColor(classColor),
                               }}
                             >
-                              {box.class_name}{box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
+                              {formatClassLabel(box.class_name)}{box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
                             </span>
                           </div>
                         );
@@ -1633,7 +1667,7 @@ export default function AnnotationEditorPage() {
                           style={annotationStyle(samPreview.annotation)}
                         >
                           <span className="absolute left-0 top-0 max-w-full truncate bg-emerald-500 px-2 py-0.5 text-[11px] font-semibold text-white">
-                            {samPreview.annotation.class_name} SAM
+                            {formatClassLabel(samPreview.annotation.class_name)} SAM
                           </span>
                         </div>
                       ) : null}
@@ -1664,7 +1698,7 @@ export default function AnnotationEditorPage() {
                                 color: getReadableTextColor(classColor),
                               }}
                             >
-                              {box.class_name}
+                              {formatClassLabel(box.class_name)}
                             </span>
                           </button>
                         );
@@ -1685,7 +1719,7 @@ export default function AnnotationEditorPage() {
                               color: getReadableTextColor(getClassColor(selectedClass)),
                             }}
                           >
-                            {selectedClass}
+                            {formatClassLabel(selectedClass)}
                           </span>
                         </div>
                       ) : null}
@@ -1742,7 +1776,7 @@ export default function AnnotationEditorPage() {
                             color: getReadableTextColor(classColor),
                           }}
                         >
-                          <span className="truncate">{box.class_name}</span>
+                          <span className="truncate">{formatClassLabel(box.class_name)}</span>
                         </span>
                         {box.confidence ? <span className="text-xs font-semibold text-slate-500">{Math.round(box.confidence * 100)}%</span> : null}
                       </div>
@@ -1820,7 +1854,7 @@ export default function AnnotationEditorPage() {
                       <button className="min-w-0 flex-1 text-left" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button">
                         <div className="flex items-center gap-2">
                           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: classColor }} />
-                          <span className="truncate text-sm font-semibold text-slate-800">{group.className}</span>
+                          <span className="truncate text-sm font-semibold text-slate-800">{formatClassLabel(group.className)}</span>
                           <span className="text-xs font-semibold text-slate-500">({formatCount(group.count, "0")})</span>
                         </div>
                       </button>
@@ -1829,7 +1863,7 @@ export default function AnnotationEditorPage() {
                           className={`rounded-full p-1.5 transition ${group.isHidden ? "text-slate-400 hover:bg-slate-100" : "text-slate-600 hover:bg-slate-100"}`}
                           onClick={() => toggleAnnotationClassVisibility(group.className)}
                           type="button"
-                          title={group.isHidden ? `Show ${group.className}` : `Hide ${group.className}`}
+                          title={group.isHidden ? `Show ${formatClassLabel(group.className)}` : `Hide ${formatClassLabel(group.className)}`}
                         >
                           {group.isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                         </button>
@@ -1852,7 +1886,7 @@ export default function AnnotationEditorPage() {
                           {group.visibleBoxes.map((box) => (
                             <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
                               <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
-                                {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
+                                {formatClassLabel(box.class_name)} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
                               </button>
                               <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
                                 <Trash2 className="h-4 w-4" />
@@ -1951,7 +1985,7 @@ export default function AnnotationEditorPage() {
                       onClick={() => setSelectedClass(className)}
                       type="button"
                     >
-                      {className}
+                      {formatClassLabel(className)}
                     </button>
                   );
                 })}
@@ -1963,7 +1997,7 @@ export default function AnnotationEditorPage() {
             Prompt objects
             <input
               className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
-              placeholder="fire, smoke"
+              placeholder={isDefectDetection ? "crack, spalling, rust_stain" : "fire, smoke"}
               value={autoLabelPrompt}
               onChange={(event) => setAutoLabelPrompt(event.target.value)}
             />
@@ -2030,7 +2064,7 @@ export default function AnnotationEditorPage() {
                 }}
                 type="button"
               >
-                {suggestion}
+                {formatClassLabel(suggestion)}
               </button>
             ))}
           </div>
@@ -2066,7 +2100,7 @@ export default function AnnotationEditorPage() {
                         <p className="mt-1">{samPreview.message}</p>
                         <div className="mt-2 flex flex-wrap gap-2">
                           <Badge tone="normal">{samPreview.input_type === "box" ? "Box refine" : "Click prompt"}</Badge>
-                          <Badge tone="normal">{samPreview.annotation?.class_name ?? selectedClass}</Badge>
+                          <Badge tone="normal">{formatClassLabel(samPreview.annotation?.class_name ?? selectedClass)}</Badge>
                         </div>
                       </div>
                       <Button disabled={loading.sam || loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate} onClick={acceptSamPreview} type="button" variant="outline">
@@ -2099,7 +2133,7 @@ export default function AnnotationEditorPage() {
                   onChange={(event) => updateSelectedAnnotationBox("class_name", event.target.value)}
                 >
                   {classOptions.map((className) => (
-                    <option key={className} value={className}>{className}</option>
+                    <option key={className} value={className}>{formatClassLabel(className)}</option>
                   ))}
                 </select>
               </label>

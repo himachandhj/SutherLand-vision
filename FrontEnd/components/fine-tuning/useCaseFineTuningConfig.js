@@ -163,13 +163,13 @@ const useCaseConfigs = {
     },
   },
   "crack-detection": {
-    heroTitle: "Fine-tune crack detection for your inspection surfaces",
+    heroTitle: "Fine-tune defect detection for your inspection surfaces",
     heroSummary:
-      "Prepare a crack detector for roads, concrete walls, bridges, pavements, and construction surfaces. Use representative cracked and non-cracked images, confirm labels, and keep manual labeling available if the current model is not installed yet.",
+      "Prepare defect detection for roads, concrete walls, bridges, pavements, and industrial inspection surfaces. Use representative examples that include multiple visible defect types and clean surfaces, confirm labels, and keep manual labeling available if the current model is not installed yet.",
     supportedFormats: sharedFormats,
     datasetChecklist: [
       ...sharedChecklist,
-      "Include both cracked and non-cracked surfaces so the detector learns what should be ignored.",
+      "Include multiple defect types plus clean surfaces so the detector learns both what to detect and what to ignore.",
     ],
     baseModels: [
       { value: "crack-current", label: "Crack Current", tradeoff: "Recommended", helper: "Continue from the installed crack detector." },
