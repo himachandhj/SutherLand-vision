@@ -49,13 +49,17 @@ function buildEmptyIntegrationModelState() {
 }
 
 function friendlyPlaygroundErrorMessage(message) {
-  if (String(message || "").includes("Crack detection model not found at models/crack_detection/best.pt")) {
-    return "Crack detection model is not installed yet. Place best.pt under BackEnd/models/crack_detection/best.pt.";
+  const normalizedMessage = String(message || "");
+  if (
+    normalizedMessage.includes("models/crack_detection/best.pt")
+    && (normalizedMessage.includes("Crack detection model not found") || normalizedMessage.includes("Defect detection model not found"))
+  ) {
+    return "Defect Detection model is not installed yet. Place best.pt under BackEnd/models/crack_detection/best.pt.";
   }
-  if (String(message || "").includes("Smoking model not found at models/unsafe_behavior/smoking_best.pt")) {
+  if (normalizedMessage.includes("Smoking model not found at models/unsafe_behavior/smoking_best.pt")) {
     return "Smoking model is not installed yet. Place smoking_best.pt under BackEnd/models/unsafe_behavior/.";
   }
-  if (String(message || "").includes("COCO model not found or could not be loaded")) {
+  if (normalizedMessage.includes("COCO model not found or could not be loaded")) {
     return "COCO YOLO model could not be loaded. Place yolov8n.pt under BackEnd/models/common/ or allow Ultralytics to load yolov8n.pt.";
   }
   return message;
@@ -1291,12 +1295,35 @@ function normalizePlaygroundMetrics(useCaseId, payload) {
   }
 
   const normalizedMetrics = baseMetrics ? { ...baseMetrics } : {};
+  const detectionCount = Number(
+    normalizedMetrics.total_defects
+    ?? normalizedMetrics.defect_count
+    ?? normalizedMetrics.crack_count
+    ?? normalizedMetrics.detections_count
+    ?? normalizedMetrics.crack_detections
+    ?? payload?.total_defects
+    ?? payload?.defect_count
+    ?? payload?.crack_count
+    ?? payload?.crack_detections
+    ?? 0
+  );
+  const hasDetections = Number.isFinite(detectionCount) ? detectionCount > 0 : false;
 
   [
+    "total_defects",
+    "defect_detected",
     "defect_count",
+    "defect_type_counts",
     "crack_count",
     "detections_count",
+    "frames_analyzed",
+    "frames_with_defects",
     "crack_detections",
+    "defect_rate_pct",
+    "frames_with_cracks",
+    "crack_rate_pct",
+    "max_confidence",
+    "avg_confidence",
     "severity",
     "highest_severity",
     "max_severity_label",
@@ -1305,6 +1332,30 @@ function normalizePlaygroundMetrics(useCaseId, payload) {
       normalizedMetrics[fieldName] = payload[fieldName];
     }
   });
+
+  if (normalizedMetrics.total_defects === undefined && Number.isFinite(detectionCount)) {
+    normalizedMetrics.total_defects = detectionCount;
+  }
+  if (normalizedMetrics.defect_count === undefined && Number.isFinite(detectionCount)) {
+    normalizedMetrics.defect_count = detectionCount;
+  }
+  if (normalizedMetrics.defect_detected === undefined) {
+    if (typeof payload?.defect_detected === "boolean") {
+      normalizedMetrics.defect_detected = payload.defect_detected;
+    } else if (typeof normalizedMetrics.crack_detected === "boolean") {
+      normalizedMetrics.defect_detected = normalizedMetrics.crack_detected;
+    } else if (typeof payload?.crack_detected === "boolean") {
+      normalizedMetrics.defect_detected = payload.crack_detected;
+    } else if (Number.isFinite(detectionCount)) {
+      normalizedMetrics.defect_detected = hasDetections;
+    }
+  }
+  if (normalizedMetrics.frames_with_defects === undefined && normalizedMetrics.frames_with_cracks !== undefined) {
+    normalizedMetrics.frames_with_defects = normalizedMetrics.frames_with_cracks;
+  }
+  if (normalizedMetrics.defect_rate_pct === undefined && normalizedMetrics.crack_rate_pct !== undefined) {
+    normalizedMetrics.defect_rate_pct = normalizedMetrics.crack_rate_pct;
+  }
 
   return Object.keys(normalizedMetrics).length > 0 ? normalizedMetrics : null;
 }

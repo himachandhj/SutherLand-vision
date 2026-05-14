@@ -107,22 +107,199 @@ function getHighestSeverityLabel(metrics, detections) {
   return bestLabel;
 }
 
-function getCrackDetectionCount(metrics, detections) {
-  const countCandidates = [
-    metrics?.defect_count,
-    metrics?.crack_count,
-    metrics?.detections_count,
-    metrics?.crack_detections,
-    metrics?.total_defects,
-    metrics?.total_cracks,
-  ];
+function parseMetricCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : null;
+}
 
-  for (const candidate of countCandidates) {
-    const count = Number(candidate);
-    if (Number.isFinite(count) && count >= 0) return count;
+function normalizePpeStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (["present", "ok", "compliant", "yes", "true", "helmet", "vest"].includes(normalized)) return "present";
+  if (["missing", "no", "false", "non_compliant", "violation", "no_helmet", "no_vest"].includes(normalized)) return "missing";
+  return "";
+}
+
+function buildPpeSummary(metrics, detections) {
+  const summary = [];
+  const normalizedMetrics = metrics && typeof metrics === "object" ? metrics : {};
+  const normalizedDetections = Array.isArray(detections) ? detections : [];
+
+  const metricPersons = [
+    normalizedMetrics.persons_detected,
+    normalizedMetrics.person_count,
+    normalizedMetrics.detected_persons,
+    normalizedMetrics.total_persons,
+    normalizedMetrics.worker_count,
+    normalizedMetrics.total_workers,
+  ].map(parseMetricCount).find((value) => value !== null);
+
+  const metricHelmetViolations = [
+    normalizedMetrics.helmet_violations,
+    normalizedMetrics.helmet_violation_count,
+    normalizedMetrics.no_helmet_count,
+    normalizedMetrics.missing_helmet_count,
+  ].map(parseMetricCount).find((value) => value !== null);
+
+  const metricVestViolations = [
+    normalizedMetrics.vest_violations,
+    normalizedMetrics.vest_violation_count,
+    normalizedMetrics.no_vest_count,
+    normalizedMetrics.missing_vest_count,
+  ].map(parseMetricCount).find((value) => value !== null);
+
+  const metricCompliantWorkers = [
+    normalizedMetrics.compliant_workers,
+    normalizedMetrics.compliant_worker_count,
+    normalizedMetrics.fully_compliant_workers,
+  ].map(parseMetricCount).find((value) => value !== null);
+
+  const metricComplianceRate = [
+    normalizedMetrics.compliance_rate,
+    normalizedMetrics.compliance_rate_pct,
+    normalizedMetrics.compliance_percent,
+  ].map((value) => {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate >= 0 ? rate : null;
+  }).find((value) => value !== null);
+
+  const detectedPersons = normalizedDetections.filter((detection) => String(detection?.class || "").toLowerCase().includes("person"));
+  const derivedPersons = detectedPersons.length || (normalizedDetections.length > 0 ? normalizedDetections.length : null);
+  const derivedHelmetViolations = detectedPersons.reduce((count, detection) => count + (normalizePpeStatus(detection?.helmet) === "missing" ? 1 : 0), 0);
+  const derivedVestViolations = detectedPersons.reduce((count, detection) => count + (normalizePpeStatus(detection?.vest) === "missing" ? 1 : 0), 0);
+  const derivedCompliantWorkers = detectedPersons.reduce(
+    (count, detection) => count + (normalizePpeStatus(detection?.helmet) === "present" && normalizePpeStatus(detection?.vest) === "present" ? 1 : 0),
+    0,
+  );
+
+  const personsDetected = metricPersons ?? derivedPersons;
+  const helmetViolations = metricHelmetViolations ?? (derivedPersons !== null ? derivedHelmetViolations : null);
+  const vestViolations = metricVestViolations ?? (derivedPersons !== null ? derivedVestViolations : null);
+  const compliantWorkers = metricCompliantWorkers ?? (derivedPersons !== null ? derivedCompliantWorkers : null);
+
+  [
+    ["Persons detected", personsDetected],
+    ["Helmet violations", helmetViolations],
+    ["Vest violations", vestViolations],
+    ["Compliant workers", compliantWorkers],
+  ].forEach(([label, value]) => {
+    if (value !== null) {
+      summary.push({ label, value: formatMetricValue(value) });
+    }
+  });
+
+  const hasRateFromMetrics = metricComplianceRate !== null;
+  const derivedComplianceRate = !hasRateFromMetrics && personsDetected ? (Number(compliantWorkers ?? 0) / Number(personsDetected)) * 100 : null;
+  const complianceRate = metricComplianceRate ?? derivedComplianceRate;
+
+  if (complianceRate !== null && Number.isFinite(complianceRate)) {
+    summary.push({ label: "Compliance rate", value: formatMetricValue(complianceRate, "%") });
   }
 
-  return Array.isArray(detections) ? detections.length : 0;
+  return summary;
+}
+
+function getMetricNumber(metrics, keys) {
+  for (const key of keys) {
+    const value = Number(metrics?.[key]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+function getMetricBoolean(metrics, keys) {
+  for (const key of keys) {
+    const value = metrics?.[key];
+    if (typeof value === "boolean") return value;
+    if (value === 1 || value === "1") return true;
+    if (value === 0 || value === "0") return false;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "true" || normalized === "yes") return true;
+      if (normalized === "false" || normalized === "no") return false;
+    }
+  }
+  return null;
+}
+
+function formatDefectTypeLabel(value) {
+  const normalized = String(value || "").trim().replace(/[_-]+/g, " ");
+  if (!normalized) return "Unknown";
+  return normalized.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+}
+
+function getDefectTypeCounts(metrics, detections) {
+  const rawCounts = metrics?.defect_type_counts;
+  const counts = new Map();
+
+  const addCount = (label, rawValue) => {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) return;
+    const formattedLabel = formatDefectTypeLabel(label);
+    counts.set(formattedLabel, (counts.get(formattedLabel) ?? 0) + value);
+  };
+
+  if (Array.isArray(rawCounts)) {
+    rawCounts.forEach((entry) => {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        addCount(entry[0], entry[1]);
+        return;
+      }
+      if (entry && typeof entry === "object") {
+        addCount(entry.label ?? entry.name ?? entry.class ?? entry.type, entry.count ?? entry.value);
+      }
+    });
+  } else if (rawCounts && typeof rawCounts === "object") {
+    Object.entries(rawCounts).forEach(([label, value]) => addCount(label, value));
+  }
+
+  if (counts.size === 0 && Array.isArray(detections)) {
+    detections.forEach((detection) => {
+      const label = detection?.class ?? detection?.class_name ?? detection?.label ?? detection?.name;
+      if (label) addCount(label, 1);
+    });
+  }
+
+  return Array.from(counts.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+}
+
+function buildDefectSummary(metrics, detections) {
+  const summary = [];
+  const defectDetections = getMetricNumber(metrics, [
+    "total_defects",
+    "defect_count",
+    "crack_count",
+    "detections_count",
+    "crack_detections",
+    "total_cracks",
+  ]) ?? (Array.isArray(detections) ? detections.length : 0);
+  const defectDetected = getMetricBoolean(metrics, ["defect_detected", "crack_detected"]) ?? defectDetections > 0;
+  const framesAnalyzed = getMetricNumber(metrics, ["frames_analyzed"]);
+  const framesWithDefects = getMetricNumber(metrics, ["frames_with_defects", "frames_with_cracks"]);
+  const defectRate = getMetricNumber(metrics, ["defect_rate_pct", "crack_rate_pct"]);
+  const maxConfidence = getMetricNumber(metrics, ["max_confidence"]);
+  const avgConfidence = getMetricNumber(metrics, ["avg_confidence"]);
+  const highestSeverity = getHighestSeverityLabel(metrics, detections);
+
+  summary.push({ label: "Defect detections", value: formatMetricValue(defectDetections) });
+  summary.push({ label: "Defect detected", value: defectDetected ? "Yes" : "No" });
+
+  [
+    ["Frames analyzed", framesAnalyzed],
+    ["Frames with defects", framesWithDefects],
+    ["Defect rate", defectRate !== null ? formatMetricValue(defectRate, "%") : null],
+    ["Max confidence", maxConfidence !== null ? formatMetricValue(maxConfidence) : null],
+    ["Average confidence", avgConfidence !== null ? formatMetricValue(avgConfidence) : null],
+    ["Highest severity", highestSeverity || null],
+  ].forEach(([label, value]) => {
+    if (value !== null && value !== "") {
+      summary.push({ label, value });
+    }
+  });
+
+  return summary;
 }
 
 const CRACK_PREVIEW_FRAME_CLASS =
@@ -134,14 +311,11 @@ export default function ModelPlayground({
   activeUseCase,
   onProcessInput,
   playgroundState,
-  selectedSample,
-  sampleMedia,
   persistedRegionAlertsRoi,
   onRegionAlertsRoiChange,
 }) {
   const fileInputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
-  const [loadedSampleVideos, setLoadedSampleVideos] = useState({});
   const [currentInput, setCurrentInput] = useState(null);
   const [fireDetectionMode, setFireDetectionMode] = useState("both");
   const [ppeDetectionMode, setPpeDetectionMode] = useState("helmet_vest");
@@ -157,9 +331,13 @@ export default function ModelPlayground({
   const isCrackDetection = activeUseCase.id === "crack-detection";
   const isUnsafeBehaviorDetection = activeUseCase.id === "unsafe-behavior-detection";
   const isLegacyClasswiseCounting = activeUseCase.id === "class-wise-object-counting";
+  const isPpeDetection = activeUseCase.id === "ppe-detection";
   const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation || isUnsafeBehaviorDetection;
-  const activeSampleId = currentInput?.kind === "sample" ? currentInput.sampleId : selectedSample;
   const showsCrackUploadedFilePreview = isCrackDetection && currentInput?.kind === "file";
+  const showsPpeUploadedFilePreview = isPpeDetection && currentInput?.kind === "file";
+  const ppeSummary = isPpeDetection ? buildPpeSummary(playgroundState.metrics, playgroundState.detections) : [];
+  const defectSummary = isCrackDetection ? buildDefectSummary(playgroundState.metrics, playgroundState.detections) : [];
+  const defectTypeCounts = isCrackDetection ? getDefectTypeCounts(playgroundState.metrics, playgroundState.detections) : [];
 
   useEffect(() => {
     return () => {
@@ -177,7 +355,6 @@ export default function ModelPlayground({
     setRoiRect(activeUseCase.id === "region-alerts" ? persistedRegionAlertsRoi ?? null : null);
     setRoiStart(null);
     setRoiDraft(null);
-    setLoadedSampleVideos({});
   }, [activeUseCase.id]);
 
   useEffect(() => {
@@ -204,9 +381,6 @@ export default function ModelPlayground({
     });
   };
 
-  const crackDetectionCount = getCrackDetectionCount(playgroundState.metrics, playgroundState.detections);
-  const crackHighestSeverity = getHighestSeverityLabel(playgroundState.metrics, playgroundState.detections);
-
   const runCurrentInput = async (inputOverride = currentInput) => {
     if (!inputOverride) return;
     if (inputOverride.kind === "file") {
@@ -226,7 +400,9 @@ export default function ModelPlayground({
       previewType: previewKindFromFile(file),
     };
     replaceCurrentInput(nextInput);
-    await runCurrentInput(nextInput);
+    if (!isPpeDetection) {
+      await runCurrentInput(nextInput);
+    }
   };
 
   const handleFileChange = async (event) => {
@@ -281,7 +457,7 @@ export default function ModelPlayground({
         </div>
 
         <input ref={fileInputRef} accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.webm" className="hidden" type="file" onChange={handleFileChange} />
-        {showsCrackUploadedFilePreview ? (
+        {showsCrackUploadedFilePreview || showsPpeUploadedFilePreview ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
             <div className={CRACK_PREVIEW_FRAME_CLASS}>
               {currentInput.previewType === "video" ? (
@@ -317,61 +493,12 @@ export default function ModelPlayground({
               <div className="h-8 w-8 rounded-lg border border-brandBlue/20 bg-brandBlue/5" />
             </div>
             <div className="text-lg font-semibold text-slate-900">Upload image or video</div>
-            <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">Drop files here or click to preview a sample inference for {activeUseCase.title}.</p>
+            <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
+              {isPpeDetection
+                ? "Upload a workplace image or video to check whether workers are wearing helmets and safety vests."
+                : `Drop files here or click to preview a sample inference for ${activeUseCase.title}.`}
+            </p>
           </button>
-        )}
-        {sampleMedia.length > 0 && (
-          <div className="mt-8">
-            <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Try a Sample</h3>
-            <div className="mt-4 space-y-3">
-              {sampleMedia.map((sample) => (
-                <button
-                  key={sample.id}
-                  className={`w-full rounded-2xl border p-3 text-left transition ${activeSampleId === sample.id ? "border-brandRed shadow-panel" : "border-slate-200 hover:border-brandBlue/40"}`}
-                  onClick={async () => {
-                    const nextInput = {
-                      kind: "sample",
-                      sampleId: sample.id,
-                      label: sample.label,
-                      previewSrc: sample.src,
-                      previewType: sample.type,
-                    };
-                    replaceCurrentInput(nextInput);
-                    await runCurrentInput(nextInput);
-                  }}
-                  type="button"
-                >
-                  <div className="relative h-40 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
-                    {sample.type === "video" ? (
-                      <div className="relative h-full w-full bg-slate-900">
-                        {!loadedSampleVideos[sample.id] && (
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <div className="flex items-center gap-3 rounded-xl bg-black/40 px-4 py-2 text-xs font-semibold text-white">
-                              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                              Loading sample…
-                            </div>
-                          </div>
-                        )}
-                        <video
-                          className={`h-full w-full object-cover ${loadedSampleVideos[sample.id] ? "opacity-100" : "opacity-0"}`}
-                          controls
-                          muted
-                          playsInline
-                          preload="metadata"
-                          src={sample.src}
-                          onCanPlay={() => setLoadedSampleVideos((current) => ({ ...current, [sample.id]: true }))}
-                          onError={() => setLoadedSampleVideos((current) => ({ ...current, [sample.id]: true }))}
-                        />
-                      </div>
-                    ) : (
-                      <img alt={sample.label} className="h-full w-full object-contain bg-white" src={sample.src} />
-                    )}
-                  </div>
-                  <div className="px-1 pb-1 pt-3 text-sm font-medium text-slate-700">{sample.label}</div>
-                </button>
-              ))}
-            </div>
-          </div>
         )}
         {isCrackDetection ? (
           <div className="mt-6 flex flex-wrap gap-3">
@@ -394,7 +521,17 @@ export default function ModelPlayground({
             ) : null}
           </div>
         ) : null}
-        {showsPreviewGuidance ? (
+        {isCrackDetection ? (
+          <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="text-sm font-semibold text-slate-900">Preview guidance</div>
+            <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
+              <p><span className="font-semibold text-slate-900">Defect Detection model</span> uses a fine-tuned YOLO defect model.</p>
+              <p className="mt-2">Expected model path: <span className="font-semibold">BackEnd/models/crack_detection/best.pt</span></p>
+              <p className="mt-2">The preview can detect multiple defect classes based on the trained model labels.</p>
+            </div>
+          </div>
+        ) : null}
+        {showsPreviewGuidance && !isPpeDetection ? (
           <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-sm font-semibold text-slate-900">
               {isSpeedEstimation ? "Preview guidance" : "Custom preview options"}
@@ -422,30 +559,6 @@ export default function ModelPlayground({
               <div className="mt-4 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
                 <p>Unsafe Behavior Detection uses a smoking YOLO model at <span className="font-semibold">BackEnd/models/unsafe_behavior/smoking_best.pt</span> and a COCO model for person + cell phone association.</p>
                 <p className="mt-2">Upload images or videos containing smoking or mobile phone usage to preview combined unsafe behavior detections.</p>
-              </div>
-            ) : null}
-
-            {supportsPpeMode ? (
-              <div className="mt-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">PPE detection mode</div>
-                <div className="mt-2 inline-flex flex-wrap rounded-xl border border-slate-200 bg-white p-1">
-                  {[
-                    { value: "helmet", label: "Detect helmet only" },
-                    { value: "vest", label: "Detect vest only" },
-                    { value: "helmet_vest", label: "Detect helmet + vest" },
-                  ].map((option) => (
-                    <button
-                      key={option.value}
-                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
-                        ppeDetectionMode === option.value ? "bg-slate-50 text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
-                      }`}
-                      onClick={() => setPpeDetectionMode(option.value)}
-                      type="button"
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
               </div>
             ) : null}
 
@@ -591,13 +704,48 @@ export default function ModelPlayground({
                 type="button"
               >
                 {playgroundState.status === "loading"
-                  ? "Running preview..."
-                  : "Run Preview with Current Settings"}
+                  ? isPpeDetection ? "Running PPE preview..." : "Running preview..."
+                  : isPpeDetection ? "Run PPE Preview" : "Run Preview with Current Settings"}
               </button>
+              {isPpeDetection && currentInput?.kind === "file" ? (
+                <button
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brandBlue/30"
+                  onClick={() => fileInputRef.current?.click()}
+                  type="button"
+                >
+                  Upload Another File
+                </button>
+              ) : null}
               {activeUseCase.id === "fire-detection" && currentInput?.previewType === "video" ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
                   Fire Detection playground previews use a representative frame from the video.
                 </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {isPpeDetection ? (
+          <div className="mt-6">
+            <p className="text-sm leading-6 text-slate-500">
+              Upload a workplace image or video to check whether workers are wearing helmets and safety vests.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-xl bg-brandBlue px-4 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!currentInput || playgroundState.status === "loading"}
+                onClick={() => void runCurrentInput()}
+                type="button"
+              >
+                {playgroundState.status === "loading" ? "Running PPE preview..." : "Run PPE Preview"}
+              </button>
+              {currentInput?.kind === "file" ? (
+                <button
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brandBlue/30"
+                  onClick={() => fileInputRef.current?.click()}
+                  type="button"
+                >
+                  Upload Another File
+                </button>
               ) : null}
             </div>
           </div>
@@ -644,33 +792,63 @@ export default function ModelPlayground({
             </div>
             {isCrackDetection ? (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-2 text-xs text-slate-400">Source: {playgroundState.sourceLabel}</div>
                 <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Inspection Summary</div>
-                <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                    <span className="text-sm text-slate-500">Defects detected</span>
-                    <span className="text-base font-semibold text-slate-900">{crackDetectionCount}</span>
-                  </div>
-                  {crackHighestSeverity ? (
-                    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <span className="text-sm text-slate-500">Highest severity</span>
-                      <span className="text-base font-semibold text-slate-900">{crackHighestSeverity}</span>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {defectSummary.map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{item.label}</div>
+                      <div className="mt-2 text-xl font-semibold text-slate-900">{item.value}</div>
                     </div>
-                  ) : null}
+                  ))}
                 </div>
+                {defectTypeCounts.length > 0 ? (
+                  <div className="mt-4">
+                    <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Defect type counts</div>
+                    <div className="mt-3 space-y-3">
+                      {defectTypeCounts.map((item) => (
+                        <div key={item.label} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                          <span className="text-sm text-slate-500">{item.label}</span>
+                          <span className="text-base font-semibold text-slate-900">{formatMetricValue(item.count)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <div className="mb-2 text-xs text-slate-400">Source: {playgroundState.sourceLabel}</div>
-                <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Detections</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {playgroundState.detections.length > 0 ? playgroundState.detections.map((detection) => (
-                    <div key={`${detection.class}-${detection.confidence}`} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                      {formatPlaygroundDetection(detection)}
+                {isPpeDetection ? (
+                  <>
+                    <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">PPE Compliance Summary</div>
+                    <div className="mt-3 space-y-3">
+                      {ppeSummary.length > 0 ? ppeSummary.map((item) => (
+                        <div key={item.label} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                          <span className="text-sm text-slate-500">{item.label}</span>
+                          <span className="text-base font-semibold text-slate-900">{item.value}</span>
+                        </div>
+                      )) : (
+                        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+                          No helmet or vest summary data was returned for this preview.
+                        </div>
+                      )}
                     </div>
-                  )) : (
-                    <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">No detections returned</div>
-                  )}
-                </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Detections</div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {playgroundState.detections.length > 0 ? playgroundState.detections.map((detection) => (
+                        <div key={`${detection.class}-${detection.confidence}`} className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                          {formatPlaygroundDetection(detection)}
+                        </div>
+                      )) : (
+                        <div className="rounded-full border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">No detections returned</div>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {isUnsafeBehaviorDetection && playgroundState.metrics ? (
