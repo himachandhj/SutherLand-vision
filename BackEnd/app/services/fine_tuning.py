@@ -60,13 +60,13 @@ USECASE_DATASET_PREFIXES = {
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 USECASE_STEP_ONE_METADATA = {
     "crack-detection": {
-        "display_name": "Crack Detection",
+        "display_name": "Defect Detection",
         "task_type": "object_detection",
         "annotation_format": "yolo",
-        "classes": ["crack"],
+        "classes": ["crack", "spalling", "rust_stain", "delamination", "efflorescence", "exposed_reinforcement"],
         "current_model_path": "models/crack_detection/best.pt",
-        "title": "Tune Crack Detection",
-        "subtitle": "Check whether your crack dataset, labels, and current crack detector are ready before training setup.",
+        "title": "Tune Defect Detection",
+        "subtitle": "Defect Detection helps improve detection of surface and structural defects across construction, infrastructure, manufacturing, and facility inspection areas.",
     },
     "unsafe-behavior-detection": {
         "display_name": "Unsafe Behavior Detection",
@@ -229,7 +229,7 @@ def build_step_one_response(usecase_slug: str) -> dict[str, Any]:
         model_warnings.append(f"Current model is not installed at {current_model_path}. Manual labeling still works.")
     starting_model_name = model.get("version_name", "YOLOv8n baseline")
     if usecase_slug == "crack-detection":
-        starting_model_name = "Crack detector" if model_available else "Crack detector unavailable"
+        starting_model_name = "Defect detector" if model_available else "Defect detector unavailable"
     elif usecase_slug == "unsafe-behavior-detection":
         starting_model_name = "Unsafe smoking detector" if model_available else "Unsafe smoking detector unavailable"
 
