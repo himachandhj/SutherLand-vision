@@ -1601,14 +1601,26 @@ function BarChartCard({
   );
 }
 
-function LineChartCard({ title, description, data, lines, xAxisLabel, yAxisLabel, referenceLines = [], onPointClick, activeLabel }) {
+function LineChartCard({
+  title,
+  description,
+  data,
+  lines,
+  xAxisLabel,
+  yAxisLabel,
+  referenceLines = [],
+  onPointClick,
+  activeLabel,
+  className = "",
+  contentClassName = "h-80",
+}) {
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
-      <CardContent className="h-80">
+      <CardContent className={contentClassName}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ bottom: 8 }}>
             <CartesianGrid stroke="#E2E2EC" strokeDasharray="4 4" />
@@ -1980,13 +1992,6 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           color: item.color,
         }))
         .filter((item) => item.value > 0);
-      const recommendedActionData = DEFECT_ACTION_ORDER
-        .map((label, index) => ({
-          label,
-          value: rows.filter((row) => row.recommendedAction === label).length,
-          color: chartPalette[index % chartPalette.length],
-        }))
-        .filter((item) => item.value > 0);
 
       return [
         <DonutChartCard
@@ -1998,21 +2003,8 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           onSliceClick={(label) => interactive.onSelectChartFilter?.("severity", label)}
           activeLabel={interactive.chartFilter?.key === "severity" ? interactive.chartFilter.value : ""}
         />,
-        <LineChartCard
-          key="2"
-          title="Defect Trend Over Time"
-          description="Shows how detected defects change across the selected time window."
-          data={trend}
-          lines={[
-            { dataKey: "defectCount", name: "Defect Count", color: "#DE1B54" },
-          ]}
-          xAxisLabel={granularity}
-          yAxisLabel="Defect Count"
-          onPointClick={(payload) => interactive.onSelectChartFilter?.("timeBucket", payload?.bucketKey)}
-          activeLabel={interactive.chartFilter?.key === "timeBucket" ? interactive.chartFilter.value : ""}
-        />,
         <BarChartCard
-          key="3"
+          key="2"
           title="Most Affected Areas"
           description="Highlights zones or assets where defects are concentrated."
           data={byZone}
@@ -2025,7 +2017,7 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           activeLabel={interactive.chartFilter?.key === "zone" ? interactive.chartFilter.value : ""}
         />,
         <BarChartCard
-          key="4"
+          key="3"
           title="Camera / Source Contribution"
           description="Shows which cameras or inspection sources are generating the most defect findings."
           data={byCamera}
@@ -2039,7 +2031,7 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           activeLabel={interactive.chartFilter?.key === "cameraId" ? interactive.chartFilter.value : ""}
         />,
         <DonutChartCard
-          key="5"
+          key="4"
           title="Defect Type Breakdown"
           description="Shows the mix of trained defect classes detected in the current inspection view."
           data={defectTypeData}
@@ -2047,14 +2039,20 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
           onSliceClick={(label) => interactive.onSelectChartFilter?.("defectType", label)}
           activeLabel={interactive.chartFilter?.key === "defectType" ? interactive.chartFilter.value : ""}
         />,
-        <DonutChartCard
-          key="6"
-          title="Recommended Action Breakdown"
-          description="Shows how many defect findings need immediate inspection, maintenance review, repair, or monitoring."
-          data={recommendedActionData}
-          showSlicePercent
-          onSliceClick={(label) => interactive.onSelectChartFilter?.("recommendedAction", label)}
-          activeLabel={interactive.chartFilter?.key === "recommendedAction" ? interactive.chartFilter.value : ""}
+        <LineChartCard
+          key="5"
+          className="xl:col-span-2"
+          contentClassName="h-[24rem]"
+          title="Defect Trend Over Time"
+          description="Shows how detected defects change across the selected time window."
+          data={trend}
+          lines={[
+            { dataKey: "defectCount", name: "Defect Count", color: "#DE1B54" },
+          ]}
+          xAxisLabel={granularity}
+          yAxisLabel="Defect Count"
+          onPointClick={(payload) => interactive.onSelectChartFilter?.("timeBucket", payload?.bucketKey)}
+          activeLabel={interactive.chartFilter?.key === "timeBucket" ? interactive.chartFilter.value : ""}
         />,
       ];
     }
