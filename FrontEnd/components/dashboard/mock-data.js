@@ -240,97 +240,174 @@ export const dashboardData = {
     };
   }),
   "fire-detection": (() => {
-    const alertPatterns = [
-      { alert_type: "smoke_only", zone: "Forklift Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "smoke_only", zone: "Forklift Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "fire_and_smoke", zone: "Forklift Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "fire_only", zone: "Loading Dock", facility: "Plant 1", location: "Warehouse A" },
-      { alert_type: "smoke_only", zone: "Forklift Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "fire_and_smoke", zone: "Loading Dock", facility: "Plant 1", location: "Warehouse A" },
-      { alert_type: "smoke_only", zone: "Storage Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "no_alert", zone: "Packaging Zone", facility: "Warehouse Annex", location: "Warehouse C" },
-      { alert_type: "smoke_only", zone: "Receiving Bay", facility: "Plant 1", location: "Warehouse A" },
-      { alert_type: "fire_and_smoke", zone: "Dispatch Area", facility: "Warehouse Annex", location: "Warehouse C" },
-      { alert_type: "fire_only", zone: "Storage Bay", facility: "Plant 2", location: "Warehouse B" },
-      { alert_type: "smoke_only", zone: "Forklift Bay", facility: "Plant 2", location: "Warehouse B" },
+    const dayPlans = [
+      { date: "2025-04-15", counts: { smoke_only: 7, fire_only: 3, fire_and_smoke: 4 } },
+      { date: "2025-04-16", counts: { smoke_only: 8, fire_only: 3, fire_and_smoke: 5 } },
+      { date: "2025-04-17", counts: { smoke_only: 9, fire_only: 4, fire_and_smoke: 6 } },
+      { date: "2025-04-18", counts: { smoke_only: 11, fire_only: 4, fire_and_smoke: 8 } },
+      { date: "2025-04-19", counts: { smoke_only: 13, fire_only: 5, fire_and_smoke: 10 } },
+      { date: "2025-04-20", counts: { smoke_only: 10, fire_only: 4, fire_and_smoke: 7 } },
+      { date: "2025-04-21", counts: { smoke_only: 9, fire_only: 3, fire_and_smoke: 6 } },
     ];
-    const cameraPool = ["CAM_003", "CAM_006", "CAM_009", "CAM_012", "CAM_015"];
+    const zonePlans = [
+      {
+        zone: "Packaging Deck",
+        location: "Assembly South",
+        facility: "Plant 2",
+        camera_id: "CAM_032",
+        counts: { smoke_only: 16, fire_only: 6, fire_and_smoke: 10 },
+      },
+      {
+        zone: "Boiler Corridor",
+        location: "Plant North",
+        facility: "Plant 1",
+        camera_id: "CAM_022",
+        counts: { smoke_only: 11, fire_only: 4, fire_and_smoke: 10 },
+      },
+      {
+        zone: "Paint Line",
+        location: "Fabrication Hall",
+        facility: "Plant 1",
+        camera_id: "CAM_025",
+        counts: { smoke_only: 11, fire_only: 4, fire_and_smoke: 6 },
+      },
+      {
+        zone: "Generator Bay",
+        location: "Power House",
+        facility: "Plant 4",
+        camera_id: "CAM_051",
+        counts: { smoke_only: 8, fire_only: 3, fire_and_smoke: 7 },
+      },
+      {
+        zone: "Drying Tunnel",
+        location: "Production East",
+        facility: "Plant 3",
+        camera_id: "CAM_044",
+        counts: { smoke_only: 7, fire_only: 2, fire_and_smoke: 5 },
+      },
+      {
+        zone: "Chemical Storage",
+        location: "Utility Block",
+        facility: "Plant 2",
+        camera_id: "CAM_034",
+        counts: { smoke_only: 5, fire_only: 3, fire_and_smoke: 3 },
+      },
+      {
+        zone: "Loading Apron",
+        location: "Logistics Yard",
+        facility: "Plant 3",
+        camera_id: "CAM_041",
+        counts: { smoke_only: 5, fire_only: 2, fire_and_smoke: 3 },
+      },
+      {
+        zone: "Finished Goods Lane",
+        location: "Dispatch Center",
+        facility: "Plant 4",
+        camera_id: "CAM_054",
+        counts: { smoke_only: 4, fire_only: 2, fire_and_smoke: 2 },
+      },
+    ];
+    const timeSlotsByType = {
+      smoke_only: [
+        [6, 12],
+        [7, 18],
+        [8, 24],
+        [10, 6],
+        [11, 42],
+        [13, 15],
+        [15, 36],
+        [18, 9],
+        [20, 30],
+      ],
+      fire_only: [
+        [9, 8],
+        [12, 28],
+        [14, 44],
+        [17, 11],
+        [21, 16],
+        [22, 37],
+      ],
+      fire_and_smoke: [
+        [8, 32],
+        [11, 54],
+        [13, 47],
+        [16, 18],
+        [18, 42],
+        [19, 57],
+        [21, 23],
+      ],
+    };
+    const severityByType = {
+      smoke_only: ["medium", "low", "medium", "medium", "high", "low", "medium"],
+      fire_only: ["high", "medium", "critical", "medium", "high", "low"],
+      fire_and_smoke: ["critical", "high", "high", "critical", "high", "high"],
+    };
+    const remainingByZone = zonePlans.map((zone) => ({
+      ...zone,
+      remaining: { ...zone.counts },
+    }));
 
-    const buildSummary = (index, overrides = {}) => {
-      const pattern = alertPatterns[index % alertPatterns.length];
-      const ts = new Date(overrides.simulated_timestamp ?? "2025-04-22T06:00:00");
-      if (!overrides.simulated_timestamp) {
-        ts.setDate(22 + (index % 7));
-        ts.setHours([6, 8, 11, 14, 16, 19, 22, 1, 4, 13][index % 10], (index * 13) % 60, 0, 0);
-      }
-      const alertType = overrides.alert_type ?? pattern.alert_type;
-      const hasFire = alertType === "fire_and_smoke" || alertType === "fire_only";
-      const hasSmoke = alertType === "smoke_only" || alertType === "fire_and_smoke";
-      const severity =
-        overrides.severity ??
-        (alertType === "fire_and_smoke" || alertType === "fire_only"
-          ? "high"
-          : alertType === "smoke_only"
-            ? "medium"
-            : "none");
-
-      return {
-        input_id: overrides.input_id ?? `FIRE-VID-${String(index + 1).padStart(4, "0")}`,
-        camera_id: overrides.camera_id ?? cameraPool[index % cameraPool.length],
-        location: overrides.location ?? pattern.location,
-        facility: overrides.facility ?? pattern.facility,
-        zone: overrides.zone ?? pattern.zone,
-        shift: overrides.shift ?? shiftForHour(ts.getHours()),
-        alert_type: alertType,
-        severity,
-        confidence_score: overrides.confidence_score ?? (alertType === "no_alert" ? 0.19 : Number((0.73 + ((index % 9) * 0.024)).toFixed(2))),
-        fire_detected: overrides.fire_detected ?? (hasFire ? "Yes" : "No"),
-        smoke_detected: overrides.smoke_detected ?? (hasSmoke ? "Yes" : "No"),
-        total_fire_events: overrides.total_fire_events ?? (hasFire ? 1 + (index % 3) : 0),
-        total_smoke_events: overrides.total_smoke_events ?? (hasSmoke ? 2 + (index % 4) : 0),
-        output_video_url: overrides.output_video_url ?? (alertType === "no_alert" ? "" : `minio://warehouse/fire/output_${String(index + 1).padStart(3, "0")}.mp4`),
-        simulated_timestamp: ts.toISOString(),
-        is_latest_demo_alert: overrides.is_latest_demo_alert ?? false,
-      };
+    const pickZoneForType = (alertType, dayIndex, typeIndex) => {
+      const candidates = remainingByZone
+        .filter((zone) => zone.remaining[alertType] > 0)
+        .sort((left, right) => {
+          const remainingDiff = right.remaining[alertType] - left.remaining[alertType];
+          if (remainingDiff !== 0) return remainingDiff;
+          return Object.values(right.remaining).reduce((sumValue, value) => sumValue + value, 0)
+            - Object.values(left.remaining).reduce((sumValue, value) => sumValue + value, 0);
+        });
+      const rotation = Math.min(candidates.length - 1, (dayIndex + typeIndex) % Math.max(Math.min(candidates.length, 3), 1));
+      const selected = candidates[Math.max(rotation, 0)];
+      selected.remaining[alertType] -= 1;
+      return selected;
     };
 
-    const baseline = createRows(48, (index) => buildSummary(index));
-    const latestDemoAlerts = [
-      buildSummary(48, {
-        input_id: "FIRE-VID-0049",
-        camera_id: "CAM_012",
-        location: "Warehouse B",
-        facility: "Plant 2",
-        zone: "Forklift Bay",
-        shift: "Swing Shift",
-        alert_type: "smoke_only",
-        severity: "medium",
-        confidence_score: 0.93,
-        total_fire_events: 0,
-        total_smoke_events: 4,
-        output_video_url: "minio://warehouse/fire/sample_forklift_smoke_alert.mp4",
-        simulated_timestamp: "2025-04-29T18:18:00.000Z",
-        is_latest_demo_alert: true,
-      }),
-      buildSummary(49, {
-        input_id: "FIRE-VID-0050",
-        camera_id: "CAM_006",
-        location: "Warehouse A",
-        facility: "Plant 1",
-        zone: "Loading Dock",
-        shift: "Night Shift",
-        alert_type: "fire_and_smoke",
-        severity: "high",
-        confidence_score: 0.97,
-        total_fire_events: 3,
-        total_smoke_events: 5,
-        output_video_url: "minio://warehouse/fire/sample_loading_dock_fire_alert.mp4",
-        simulated_timestamp: "2025-04-29T23:26:00.000Z",
-        is_latest_demo_alert: true,
-      }),
-    ];
+    const rows = [];
+    let globalIndex = 0;
 
-    return [...baseline, ...latestDemoAlerts];
+    dayPlans.forEach((dayPlan, dayIndex) => {
+      ["smoke_only", "fire_only", "fire_and_smoke"].forEach((alertType) => {
+        const count = dayPlan.counts[alertType];
+        for (let typeIndex = 0; typeIndex < count; typeIndex += 1) {
+          const zone = pickZoneForType(alertType, dayIndex, typeIndex);
+          const timeSlot = timeSlotsByType[alertType][(dayIndex + typeIndex) % timeSlotsByType[alertType].length];
+          const [hours, minutes] = timeSlot;
+          const timestamp = new Date(`${dayPlan.date}T00:00:00.000Z`);
+          timestamp.setUTCHours(hours, minutes, 0, 0);
+          const severity = severityByType[alertType][(globalIndex + typeIndex) % severityByType[alertType].length];
+          const hasFire = alertType === "fire_and_smoke" || alertType === "fire_only";
+          const hasSmoke = alertType === "fire_and_smoke" || alertType === "smoke_only";
+          const confidencePattern = alertType === "fire_and_smoke"
+            ? [0.98, 0.96, 0.94, 0.92, 0.9, 0.88]
+            : alertType === "fire_only"
+              ? [0.95, 0.91, 0.89, 0.86, 0.83, 0.8, 0.78]
+              : [0.89, 0.86, 0.84, 0.81, 0.79, 0.76, 0.74, 0.72];
+          const confidence_score = confidencePattern[(dayIndex + typeIndex + globalIndex) % confidencePattern.length];
+
+          rows.push({
+            input_id: `FIRE-VID-${String(globalIndex + 1).padStart(4, "0")}`,
+            camera_id: zone.camera_id,
+            location: zone.location,
+            facility: zone.facility,
+            zone: zone.zone,
+            shift: shiftForHour(hours),
+            alert_type: alertType,
+            severity,
+            confidence_score,
+            fire_detected: hasFire ? "Yes" : "No",
+            smoke_detected: hasSmoke ? "Yes" : "No",
+            total_fire_events: hasFire ? 1 + ((dayIndex + typeIndex) % 4) : 0,
+            total_smoke_events: hasSmoke ? 2 + ((dayIndex + typeIndex + 1) % 5) : 0,
+            output_video_url: `minio://vision-demo/fire/output/fire_monitor_${String(globalIndex + 1).padStart(3, "0")}.mp4`,
+            simulated_timestamp: timestamp.toISOString(),
+            is_latest_demo_alert: false,
+          });
+          globalIndex += 1;
+        }
+      });
+    });
+
+    return rows;
   })(),
   "class-wise-counting": createRows(55, (index) => {
     const classes = ["Truck", "Forklift", "Bike", "Box", "Pallet"];
@@ -460,7 +537,7 @@ export const dashboardInfo = {
   "region-alerts": "Shows where restricted-zone violations are happening, when they peak, how serious they are, and which incidents supervisors or security should action first.",
   "queue-management": "Measures queue build-up, staffing impact, breach thresholds, and wait time trends across operational counters and service zones.",
   "speed-estimation": "Shows where unsafe movement is happening across industrial zones, which object types exceed configured speed limits most often, and which detections require the quickest operational follow-up.",
-  "fire-detection": "A focused fire and smoke safety view showing what kind of alert is appearing, which zones are most affected, and where safety teams should focus first.",
+  "fire-detection": "Monitor visible fire and smoke risks across workplace zones, camera sources, and shifts so safety teams can respond before incidents escalate.",
   "class-wise-counting": "Breaks counts down by tracked class to compare actual versus expected activity and reveal which cameras and zones see the highest class mix.",
   "object-tracking": "Tracks object movements, time spent in zones, path sequences, and anomaly rates to reveal congestion and movement inefficiencies.",
   "ppe-detection": "Monitor whether workers are wearing required helmets and safety vests across workplace zones, shifts, and camera sources.",

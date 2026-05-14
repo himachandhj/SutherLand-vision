@@ -51,6 +51,8 @@ const SEVERITY_COLORS = {
   Low: "#27235C",
   None: "#6B6B8A",
 };
+const FIRE_ALERT_TYPE_ORDER = ["Smoke Only", "Fire Only", "Fire + Smoke"];
+const FIRE_SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"];
 const SHIFT_ORDER = ["Morning Shift", "Swing Shift", "Night Shift"];
 const SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "None"];
 const TRAINED_DEFECT_CLASSES = [
@@ -942,24 +944,33 @@ function formatFireAlertType(value) {
   return value || "Clear / No Alert";
 }
 
-function normalizeSeverity(value) {
-  const severity = String(value || "none").toLowerCase();
-  if (severity === "critical") return "High";
+function inferFireSeverity(alertType, confidenceScore = 0) {
+  if (alertType === "Fire + Smoke") return confidenceScore >= 0.94 ? "Critical" : "High";
+  if (alertType === "Fire Only") return confidenceScore >= 0.9 ? "High" : confidenceScore >= 0.8 ? "Medium" : "Low";
+  if (alertType === "Smoke Only") return confidenceScore >= 0.92 ? "High" : confidenceScore >= 0.82 ? "Medium" : "Low";
+  return "Low";
+}
+
+function normalizeFireSeverity(value, alertType, confidenceScore = 0) {
+  const severity = String(value || "").trim().toLowerCase();
+  if (severity === "critical") return "Critical";
   if (severity === "high") return "High";
   if (severity === "medium") return "Medium";
-  return "None";
+  if (severity === "low") return "Low";
+  return inferFireSeverity(alertType, confidenceScore);
 }
 
 function normalizeFireVideoSummary(row, index) {
   const timestamp = row.timestamp || row.simulated_timestamp || row.Date || row.date || new Date().toISOString();
   const alertType = formatFireAlertType(row.alertType || row.alert_type || row.AlertType || row.EventType);
-  const severity = normalizeSeverity(row.severity || row.Severity);
+  const confidenceScore = Number(row.confidenceScore ?? row.confidence_score ?? 0);
+  const severity = normalizeFireSeverity(row.severity || row.Severity, alertType, confidenceScore);
   const fireDetected = row.fireDetected || row.fire_detected || (alertType === "Fire Only" || alertType === "Fire + Smoke" ? "Yes" : "No");
   const smokeDetected = row.smokeDetected || row.smoke_detected || (alertType === "Smoke Only" || alertType === "Fire + Smoke" ? "Yes" : "No");
   const firstDetectionSec = Number(row.firstDetectionSec ?? row.first_detection_sec ?? (row.first_alert_frame && row.fps ? Number(row.first_alert_frame) / Number(row.fps) : undefined) ?? row.responseTimeSec ?? row.response_time_sec ?? 0);
   const fireFramePct = Number(row.fireFramePct ?? row.fire_frame_pct ?? (fireDetected === "Yes" ? 8 + (index % 6) * 3 : 0));
   const smokeFramePct = Number(row.smokeFramePct ?? row.smoke_frame_pct ?? (smokeDetected === "Yes" ? 12 + (index % 7) * 4 : 0));
-  const escalationNeeded = severity === "High" || alertType === "Fire + Smoke" ? "Yes" : "No";
+  const escalationNeeded = severity === "Critical" || severity === "High" || alertType === "Fire + Smoke" ? "Yes" : "No";
   const timestampWeight = new Date(timestamp).getTime() / 1_000_000_000;
 
   return {
@@ -976,7 +987,7 @@ function normalizeFireVideoSummary(row, index) {
     alertType,
     severity,
     status: row.status || (fireDetected === "Yes" || smokeDetected === "Yes" ? "Alert" : "Safe"),
-    confidenceScore: Number(row.confidenceScore ?? row.confidence_score ?? 0),
+    confidenceScore,
     firstDetectionSec,
     fireFramePct,
     smokeFramePct,
@@ -984,8 +995,13 @@ function normalizeFireVideoSummary(row, index) {
     totalSmokeEvents: Number(row.totalSmokeEvents ?? row.total_smoke_events ?? 0),
     escalationNeeded,
     outputVideo: row.outputVideo || row.output_video || row.output_video_url || row.minio_video_link || "",
+    evidence: row.outputVideo || row.output_video || row.output_video_url || row.minio_video_link || "",
     isLatestDemoAlert: Boolean(row.isLatestDemoAlert ?? row.is_latest_demo_alert),
-    firePriority: (severity === "High" ? 1000 : severity === "Medium" ? 400 : severity === "Low" ? 150 : 0) + (alertType === "Fire + Smoke" ? 220 : alertType === "Fire Only" ? 160 : alertType === "Smoke Only" ? 90 : 0) + timestampWeight,
+    isSyntheticDemo: Boolean(row.isSyntheticDemo ?? row.is_synthetic_demo),
+    firePriority:
+      (severity === "Critical" ? 1300 : severity === "High" ? 1000 : severity === "Medium" ? 450 : 180)
+      + (alertType === "Fire + Smoke" ? 240 : alertType === "Fire Only" ? 160 : 100)
+      + timestampWeight,
   };
 }
 
@@ -1272,6 +1288,58 @@ function buildPpeAugmentedRows(rows) {
   const liveSignatures = new Set(rows.map((row) => `${row.inputId}:${row.trackedWorkerId}:${row.timestamp}`));
   const availableDemoRows = demoRows.filter((row) => !liveSignatures.has(`${row.inputId}:${row.trackedWorkerId}:${row.timestamp}`));
   return [...rows, ...availableDemoRows.slice(0, Math.max(0, targetTotal - rows.length))];
+}
+
+function isVisibleFireAlert(row) {
+  return FIRE_ALERT_TYPE_ORDER.includes(String(row?.alertType || ""));
+}
+
+function alignFireDemoTimestamp(rawTimestamp, rawLatestTimestamp, anchorTimestamp) {
+  if (!rawTimestamp) return anchorTimestamp || new Date().toISOString();
+  if (!rawLatestTimestamp || !anchorTimestamp) return rawTimestamp;
+
+  const rawDate = new Date(rawTimestamp);
+  const rawLatest = new Date(rawLatestTimestamp);
+  const anchor = new Date(anchorTimestamp);
+  if (Number.isNaN(rawDate.getTime()) || Number.isNaN(rawLatest.getTime()) || Number.isNaN(anchor.getTime())) {
+    return rawTimestamp;
+  }
+
+  const aligned = new Date(anchor);
+  const dayOffset = Math.round((rawLatest.getTime() - rawDate.getTime()) / (24 * 60 * 60 * 1000));
+  aligned.setUTCDate(anchor.getUTCDate() - dayOffset);
+  aligned.setUTCHours(rawDate.getUTCHours(), rawDate.getUTCMinutes(), rawDate.getUTCSeconds(), rawDate.getUTCMilliseconds());
+  return aligned.toISOString();
+}
+
+function buildFireAugmentedRows(rows) {
+  const liveRows = byTimestamp(rows.filter(isVisibleFireAlert));
+  if (liveRows.length >= 120) return liveRows;
+
+  const rawDemoRows = (dashboardData["fire-detection"] ?? [])
+    .map((row, index) => normalizeFireVideoSummary({
+      ...row,
+      isSyntheticDemo: true,
+      is_synthetic_demo: true,
+      isLatestDemoAlert: false,
+      is_latest_demo_alert: false,
+    }, index))
+    .filter(isVisibleFireAlert);
+  const targetTotal = liveRows.length === 0 ? 139 : Math.max(130, Math.min(150, liveRows.length + Math.max(110, Math.round(liveRows.length * 3))));
+  const liveSignatures = new Set(liveRows.map((row) => `${row.inputId}:${row.cameraId}:${row.timestamp}`));
+  const rawLatestTimestamp = byTimestamp(rawDemoRows).at(-1)?.timestamp ?? new Date().toISOString();
+  const anchorTimestamp = byTimestamp(liveRows).at(-1)?.timestamp ?? rawLatestTimestamp;
+  const alignedDemoRows = rawDemoRows
+    .filter((row) => !liveSignatures.has(`${row.inputId}:${row.cameraId}:${row.timestamp}`))
+    .map((row, index) => {
+      const timestamp = alignFireDemoTimestamp(row.timestamp, rawLatestTimestamp, anchorTimestamp);
+      return {
+        ...row,
+        timestamp,
+        shift: shiftFromTimestamp(timestamp),
+      };
+    });
+  return byTimestamp([...liveRows, ...alignedDemoRows.slice(0, Math.max(0, targetTotal - liveRows.length))]);
 }
 
 function getGlobalFilters(rows, slug) {
@@ -2211,40 +2279,57 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
     }
     case "fire-detection": {
       const selections = interactive.fireSelections ?? {};
-      const alertTypeRows = applyFireChartFilters(rows, selections, ["alertType", "zone", "cameraId"]);
-      const zoneRows = applyFireChartFilters(rows, selections, ["zone", "cameraId"]);
+      const alertTypeRows = applyFireChartFilters(rows, selections, ["alertType"]);
+      const zoneRows = applyFireChartFilters(rows, selections, ["zone"]);
       const cameraRows = applyFireChartFilters(rows, selections, ["cameraId"]);
       const severityRows = applyFireChartFilters(rows, selections, ["severity"]);
+      const trendRows = applyFireChartFilters(rows, selections);
+      const trendGranularity = granularity === "Hourly" ? "Daily" : granularity;
 
-      const alertTypeDonut = ["Fire + Smoke", "Fire Only", "Smoke Only", "Clear / No Alert"].map((label) => ({
+      const alertTypeDonut = FIRE_ALERT_TYPE_ORDER.map((label) => ({
         label,
         value: alertTypeRows.filter((row) => row.alertType === label).length,
-        color: label === "Fire + Smoke" ? "#DE1B54" : label === "Fire Only" ? "#F04E7A" : label === "Smoke Only" ? "#F0718F" : "#27235C",
-      }));
+        color: label === "Smoke Only" ? "#27235C" : label === "Fire Only" ? "#F06A8F" : "#DE1B54",
+      })).filter((item) => item.value > 0);
 
-      const zoneRisk = Object.entries(groupBy(zoneRows.filter((row) => row.alertType !== "Clear / No Alert"), "zone"))
+      const zoneRisk = Object.entries(groupBy(zoneRows.filter(isVisibleFireAlert), "zone"))
         .map(([label, items]) => ({
           label,
           "Smoke Only": items.filter((item) => item.alertType === "Smoke Only").length,
           "Fire Only": items.filter((item) => item.alertType === "Fire Only").length,
           "Fire + Smoke": items.filter((item) => item.alertType === "Fire + Smoke").length,
-          totalRisk: items.filter((item) => item.alertType !== "Clear / No Alert").length,
+          totalRisk: items.length,
         }))
         .sort((a, b) => b.totalRisk - a.totalRisk);
-      const cameraAlerts = Object.entries(groupBy(cameraRows.filter((row) => row.alertType !== "Clear / No Alert"), "cameraId"))
+      const cameraAlerts = Object.entries(groupBy(cameraRows.filter(isVisibleFireAlert), "cameraId"))
         .map(([label, items]) => ({ label, value: items.length }))
         .sort((a, b) => b.value - a.value)
-        .slice(0, 8);
-      const severityData = ["High", "Medium", "Low", "None"].map((label) => ({
+        .slice(0, 7);
+      const severityData = FIRE_SEVERITY_ORDER.map((label) => ({
         label,
         value: severityRows.filter((row) => row.severity === label).length,
-        color: label === "High" ? "#DE1B54" : label === "Medium" ? "rgba(222, 27, 84, 0.6)" : label === "Low" ? "#F04E7A" : "#27235C",
+        color: SEVERITY_COLORS[label],
+      })).filter((item) => item.value > 0);
+      const trendData = groupRowsByGranularity(trendRows.filter(isVisibleFireAlert), trendGranularity).map(({ label, bucketKey, items }) => ({
+        label,
+        bucketKey,
+        smokeOnlyCount: items.filter((item) => item.alertType === "Smoke Only").length,
+        fireOnlyCount: items.filter((item) => item.alertType === "Fire Only").length,
+        fireAndSmokeCount: items.filter((item) => item.alertType === "Fire + Smoke").length,
+        totalRisk: items.length,
       }));
+      const trendBarsData = trendData.map((item) => ({
+        ...item,
+        "Smoke Only": item.smokeOnlyCount,
+        "Fire Only": item.fireOnlyCount,
+        "Fire + Smoke": item.fireAndSmokeCount,
+      }));
+
       return [
         <DonutChartCard
           key="1"
-          title="Alert Type Distribution"
-          description="Shows whether current fire and smoke risk is driven by smoke warnings, confirmed fire signals, or both together."
+          title="Alert Type Breakdown"
+          description="Shows whether current alerts are smoke-only, fire-only, or confirmed fire and smoke events."
           data={alertTypeDonut}
           showSlicePercent
           onSliceClick={interactive.onSelectFireAlertType}
@@ -2252,12 +2337,12 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         />,
         <BarChartCard
           key="2"
-          title="Highest-Risk Zones by Alert Volume"
-          description="Shows which operational zones are generating the most fire and smoke alerts for the current selection."
+          title="Highest-Risk Zones"
+          description="Highlights workplace zones generating the most fire and smoke alerts."
           data={zoneRisk}
           bars={[{ dataKey: "Smoke Only", color: "#F0718F" }, { dataKey: "Fire Only", color: "#F04E7A" }, { dataKey: "Fire + Smoke", color: "#DE1B54", showLabels: true }]}
           xAxisLabel="Zone"
-          yAxisLabel="Count"
+          yAxisLabel="Alert Count"
           stacked
           totalLabelKey="totalRisk"
           onBarClick={(payload) => interactive.onSelectFireZone?.(payload?.label)}
@@ -2265,25 +2350,46 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
         />,
         <BarChartCard
           key="3"
-          title="Most Triggered Cameras"
-          description="Shows which cameras are producing the most alerts for the currently selected alert type and zone."
+          title="Camera / Source Contribution"
+          description="Shows which camera sources are generating the most fire and smoke alerts."
           data={cameraAlerts}
           bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]}
           xAxisLabel="Alert Count"
-          yAxisLabel="Camera ID"
+          yAxisLabel="Camera / Source"
           layout="horizontal"
           showLegend={false}
           onBarClick={(payload) => interactive.onSelectFireCamera?.(payload?.label)}
           activeLabel={selections.cameraId}
         />,
-        <DonutChartCard
+        <BarChartCard
           key="4"
           title="Severity Distribution"
           description="Shows how serious the currently filtered fire and smoke alerts are, helping teams prioritize the highest-risk cases first."
           data={severityData}
-          showSlicePercent
-          onSliceClick={interactive.onSelectFireSeverity}
+          bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]}
+          xAxisLabel="Severity"
+          yAxisLabel="Alert Count"
+          showLegend={false}
+          cellFillForBar="value"
+          onBarClick={(payload) => interactive.onSelectFireSeverity?.(payload?.label)}
           activeLabel={selections.severity}
+        />,
+        <BarChartCard
+          key="5"
+          title="Fire & Smoke Trend Over Time"
+          description="Shows how fire and smoke risk changes over time across the selected period."
+          data={trendBarsData}
+          bars={[
+            { dataKey: "Smoke Only", color: "#27235C" },
+            { dataKey: "Fire Only", color: "#F06A8F" },
+            { dataKey: "Fire + Smoke", color: "#DE1B54" },
+          ]}
+          xAxisLabel={trendGranularity}
+          yAxisLabel="Alert Count"
+          stacked
+          totalLabelKey="totalRisk"
+          className="xl:col-span-2"
+          contentClassName="h-[26rem]"
         />,
       ];
     }
@@ -2399,7 +2505,7 @@ function getMultiSelectKeys(slug) {
     "region-alerts": ["cameraId", "severity", "alertType", "shift"],
     "queue-management": ["cameraId", "counterId"],
     "speed-estimation": ["cameraId", "objectType", "speedLimitKmh", "severity"],
-    "fire-detection": ["cameraId", "severity", "alertType", "shift"],
+    "fire-detection": ["cameraId", "severity", "shift"],
     "class-wise-counting": ["cameraId", "className"],
     "object-tracking": ["cameraId", "objectType"],
     "ppe-detection": ["cameraId", "shift", "missingPpeCategory"],
@@ -2452,7 +2558,6 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const [regionChartSelections, setRegionChartSelections] = useState({ timeBucket: "", zone: "", alertType: "", severity: "" });
   const [regionDemoIncidentCount, setRegionDemoIncidentCount] = useState(0);
   const [fireChartSelections, setFireChartSelections] = useState({ alertType: "", zone: "", cameraId: "", severity: "" });
-  const [fireDemoAlertCount, setFireDemoAlertCount] = useState(0);
   const [chartFilter, setChartFilter] = useState(null);
   const [liveFiltersInitialized, setLiveFiltersInitialized] = useState(!usesLiveDashboardData);
 
@@ -2495,10 +2600,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
 
   const effectiveFireRows = useMemo(() => {
     if (slug !== "fire-detection") return effectiveSourceRows;
-    const baselineRows = effectiveSourceRows.filter((row) => !row.isLatestDemoAlert);
-    const demoRows = byTimestamp(effectiveSourceRows.filter((row) => row.isLatestDemoAlert));
-    return [...baselineRows, ...demoRows.slice(0, fireDemoAlertCount)];
-  }, [slug, effectiveSourceRows, fireDemoAlertCount]);
+    return buildFireAugmentedRows(sourceRows);
+  }, [slug, effectiveSourceRows, sourceRows]);
 
   useEffect(() => {
     if (slug !== "region-alerts") return;
@@ -2509,8 +2612,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   useEffect(() => {
     if (slug !== "fire-detection") return;
     setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" });
-    setFireDemoAlertCount(0);
-  }, [slug, rows]);
+    setTimeGranularity("Daily");
+  }, [slug]);
 
   useEffect(() => {
     setChartFilter(null);
@@ -2546,9 +2649,10 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   ]);
 
   const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : slug === "crack-detection" ? crackApiLoading : slug === "unsafe-behavior-detection" ? unsafeApiLoading : ppeApiLoading) : false;
-  const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : slug === "crack-detection" ? crackApiError : slug === "unsafe-behavior-detection" ? unsafeApiError : ppeApiError) : "";
+  const liveDataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : slug === "crack-detection" ? crackApiError : slug === "unsafe-behavior-detection" ? unsafeApiError : ppeApiError) : "";
+  const dataError = slug === "fire-detection" && effectiveFireRows.length > 0 ? "" : liveDataError;
   const loading = skeletonLoading || dataLoading;
-  const showInlineLastUpdated = slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection";
+  const showInlineLastUpdated = slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection" && slug !== "fire-detection";
 
   const filterDefs = [
     { key: "location", label: isRegionAlertsDashboard ? tRegionAlerts("location") : "Location" },
@@ -2643,9 +2747,11 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     [slug, chartRows, timeGranularity, regionChartSelections, fireChartSelections, chartFilter, isRegionAlertsDashboard, regionAlertsLanguage],
   );
   const lastUpdated = useMemo(() => {
-    const latest = byTimestamp(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows).at(-1)?.timestamp;
+    const latest = slug === "fire-detection"
+      ? byTimestamp(sourceRows).at(-1)?.timestamp ?? byTimestamp(effectiveFireRows).at(-1)?.timestamp
+      : byTimestamp(effectiveSourceRows).at(-1)?.timestamp;
     return latest ? formatDateTime(latest) : "N/A";
-  }, [slug, effectiveSourceRows, effectiveFireRows]);
+  }, [slug, sourceRows, effectiveSourceRows, effectiveFireRows]);
   const optionsFor = (key, includeAllOption = true) => {
     const values = uniqueOptions(slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows, key);
     const optionValues = values.map((value) => ({ label: String(value), value: String(value) }));
@@ -2670,6 +2776,18 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
       const shiftOptions = ["Morning", "Afternoon", "Night"]
         .filter((label) => values.includes(label))
         .map((label) => ({ label, value: label }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...shiftOptions] : shiftOptions;
+    }
+    if (slug === "fire-detection" && key === "alertType") {
+      const alertTypeOptions = FIRE_ALERT_TYPE_ORDER.map((label) => ({ label, value: label }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...alertTypeOptions] : alertTypeOptions;
+    }
+    if (slug === "fire-detection" && key === "severity") {
+      const severityOptions = FIRE_SEVERITY_ORDER.map((label) => ({ label, value: label }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...severityOptions] : severityOptions;
+    }
+    if (slug === "fire-detection" && key === "shift") {
+      const shiftOptions = sortByPreferredOrder(values, SHIFT_ORDER).map((label) => ({ label, value: label }));
       return includeAllOption ? [{ label: "All", value: "All" }, ...shiftOptions] : shiftOptions;
     }
     if (key === "speedLimitKmh") {
@@ -2799,6 +2917,22 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     }));
   };
 
+  const handleFireSelectAll = () => {
+    if (slug !== "fire-detection") return;
+    setFilters((prev) => ({
+      ...prev,
+      location: "All",
+      zone: optionsFor("zone", false).map((option) => option.value),
+      cameraId: optionsFor("cameraId", false).map((option) => option.value),
+    }));
+    setExtraFilters((prev) => ({
+      ...prev,
+      alertType: "All",
+      shift: optionsFor("shift", false).map((option) => option.value),
+      severity: optionsFor("severity", false).map((option) => option.value),
+    }));
+  };
+
   const resetFilters = () => {
     const resetRows = slug === "fire-detection"
       ? effectiveFireRows
@@ -2807,7 +2941,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
         : rows;
     setFilters(getGlobalFilters(resetRows, slug));
     setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, resetRows));
-    setTimeGranularity("Hourly");
+    setTimeGranularity(slug === "fire-detection" ? "Daily" : "Hourly");
     setSortState(initialSortStateFor(slug, resolvedColumns));
     setRegionChartSelections({ timeBucket: "", zone: "", alertType: "", severity: "" });
     setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" });
@@ -2887,7 +3021,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 </div>
               ) : null}
               <div className="rounded-xl bg-brand-blue-light px-4 py-2 text-sm font-medium">
-                {slug === "region-alerts" || slug === "crack-detection" || slug === "ppe-detection"
+                {slug === "region-alerts" || slug === "crack-detection" || slug === "ppe-detection" || slug === "fire-detection"
                   ? `Last updated: ${lastUpdated}`
                   : `Visible results: ${fullyFilteredRows.length}`}
               </div>
@@ -2964,6 +3098,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                         ? "Use compact filters to focus the current defect view across cards, charts, and the register."
                         : slug === "ppe-detection"
                           ? "Use compact filters to focus the current PPE compliance story across cards, charts, and the event register."
+                        : slug === "fire-detection"
+                          ? "Use compact filters to focus the current fire and smoke risk story across cards, charts, and the register."
                         : "All KPI cards, charts, and table rows update from the same filtered dataset."}
                   </CardDescription>
                 </div>
@@ -3192,6 +3328,82 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     </div>
                   </div>
                 </>
+              ) : slug === "fire-detection" ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date From</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.from} onChange={(e) => setFilters((prev) => ({ ...prev, from: e.target.value }))} />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date To</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.to} onChange={(e) => setFilters((prev) => ({ ...prev, to: e.target.value }))} />
+                    </label>
+                    <SelectField
+                      label="Time Granularity"
+                      value={timeGranularity}
+                      onChange={setTimeGranularity}
+                      options={TIME_GRANULARITIES.map((label) => ({ label, value: label }))}
+                    />
+                    <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
+                    <SelectField
+                      label="Alert Type"
+                      value={typeof extraFilters.alertType === "string" ? extraFilters.alertType : "All"}
+                      onChange={(value) => setExtraFilters((prev) => ({ ...prev, alertType: value }))}
+                      options={optionsFor("alertType")}
+                    />
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5 xl:items-end">
+                    <RegionAlertsMultiSelectField
+                      label="Zone"
+                      options={optionsFor("zone", false)}
+                      selectedValues={filters.zone}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Camera / Source"
+                      options={optionsFor("cameraId", false)}
+                      selectedValues={filters.cameraId}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Shift"
+                      options={optionsFor("shift", false)}
+                      selectedValues={Array.isArray(extraFilters.shift) ? extraFilters.shift : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, shift: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Severity"
+                      options={optionsFor("severity", false)}
+                      selectedValues={Array.isArray(extraFilters.severity) ? extraFilters.severity : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, severity: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <div className="flex flex-wrap items-end justify-start gap-2 xl:justify-end">
+                      <Button variant="outline" className="h-[42px] rounded-lg border-brand-blue px-4 text-brand-blue hover:bg-brand-blue-tint" onClick={handleFireSelectAll}>
+                        Select All
+                      </Button>
+                      <Button variant="outline" className="h-[42px] rounded-lg border-brand-red px-4 text-brand-red hover:bg-brand-red-tint" onClick={resetFilters}>
+                        Clear All
+                      </Button>
+                    </div>
+                  </div>
+                </>
               ) : (
                 <>
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -3264,12 +3476,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       </Button>
                     </>
                   ) : null}
-                  {slug === "fire-detection" && fireDemoAlertCount < sourceRows.filter((row) => row.isLatestDemoAlert).length ? (
-                    <Button variant="outline" className="border-brand-red text-brand-red hover:bg-brand-red-tint" onClick={() => setFireDemoAlertCount((count) => count + 1)}>
-                      Simulate Latest Alert
-                    </Button>
-                  ) : null}
-                  {slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection" ? (
+                  {slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection" && slug !== "fire-detection" ? (
                     <Button variant="default" className="gap-2 shadow-card" onClick={resetFilters}>
                       Reset Filters
                     </Button>
@@ -3392,19 +3599,6 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   </CardContent>
                 </Card>
               ) : null}
-              {slug === "fire-detection" && fireDemoAlertCount > 0 ? (
-                <Card className="border-brand-red/20 bg-brand-red-tint/20">
-                  <CardContent className="flex flex-col gap-2 p-4 md:flex-row md:items-center md:justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-brand-blue">Latest fire/smoke sample alert added to the dashboard story</p>
-                      <p className="text-xs text-muted">The newest sample alert is now included so the cards, drill-down charts, and table reflect the latest safety event together.</p>
-                    </div>
-                    <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-brand-red">
-                      {fireDemoAlertCount} demo alert{fireDemoAlertCount > 1 ? "s" : ""} applied
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : null}
               {!showLiveEmptyState && !showFilteredEmptyState && (slug === "region-alerts" ? (
                 <>
                   <section className="space-y-3">
@@ -3462,6 +3656,16 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 <>
                   <CrossFilterSummary
                     selections={{ timeBucket: "", zone: fireChartSelections.zone, alertType: fireChartSelections.alertType, severity: fireChartSelections.severity }}
+                    copy={{
+                      t: (key, value) => ({
+                        crossFilteringActive: "Cross-filtering is active",
+                        crossFilteringDescription: "Chart selections are narrowing the fire and smoke story across cards, charts, and the register.",
+                        zoneChip: `Zone: ${value}`,
+                        violationChip: `Alert Type: ${value}`,
+                        severityChip: `Severity: ${value}`,
+                        clearSelections: "Clear selections",
+                      }[key] ?? ""),
+                    }}
                     onClear={() => setFireChartSelections({ alertType: "", zone: "", cameraId: "", severity: "" })}
                     onClearOne={(key) =>
                       setFireChartSelections((prev) => ({
@@ -3489,7 +3693,13 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       </CardContent>
                     </Card>
                   ) : null}
-                  <KpiGrid items={kpis} />
+                  <section className="space-y-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">FIRE &amp; SMOKE SAFETY SNAPSHOT</p>
+                      <p className="mt-1 text-sm text-muted">A focused view of current fire and smoke risk across monitored workplace areas.</p>
+                    </div>
+                    <KpiGrid items={kpis} />
+                  </section>
                 </>
               ) : slug === "crack-detection" ? (
                 <>
@@ -3543,6 +3753,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     ? "Unsafe Event Register"
                     : slug === "ppe-detection"
                       ? "PPE Event Register"
+                    : slug === "fire-detection"
+                      ? "Fire & Smoke Event Register"
                     : slug === "region-alerts"
                       ? tRegionAlerts("detectedIntrusionEvents")
                       : "Filtered Results"}
@@ -3554,6 +3766,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     ? "Business-friendly unsafe behavior records for the current filter selection."
                     : slug === "ppe-detection"
                       ? "Review each worker-level PPE event, missing item, compliance status, confidence, and output evidence."
+                    : slug === "fire-detection"
+                      ? "Review each fire or smoke alert with location, zone, camera, severity, confidence, and evidence."
                     : slug === "region-alerts"
                       ? tRegionAlerts("detectedIntrusionEventsDescription")
                       : "Sortable detailed results for the current filter selection."}
@@ -3568,7 +3782,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   slug === "region-alerts"
                     ? (row) => (row.isLatestDemoIncident ? "bg-brand-red-tint/90" : row.escalationNeeded === "Yes" ? "bg-brand-red-tint/70" : "")
                     : slug === "fire-detection"
-                      ? (row) => (row.isLatestDemoAlert ? "bg-brand-red-tint/90" : row.severity === "High" ? "bg-brand-red-tint/60" : "")
+                      ? (row) => ((row.severity === "Critical" || row.severity === "High") ? "bg-brand-red-tint/50" : "")
                       : slug === "speed-estimation"
                         ? (row) => (row.status === "Violation" ? "bg-brand-red-tint/40" : "")
                         : slug === "crack-detection"
@@ -3955,77 +4169,58 @@ export function buildDashboardDefinition(slug, rows, info) {
       ],
     },
     "fire-detection": {
-      title: "Warehouse Fire & Smoke Safety Center",
+      title: "Fire & Smoke Safety Monitor",
       description: info,
       extraFilterDefs: [
-        { key: "facility", label: "Facility" },
         { key: "shift", label: "Shift" },
         { key: "alertType", label: "Alert Type" },
         { key: "severity", label: "Severity" },
       ],
       metricDefs: [
         {
-          label: "Total Fire/Smoke Alerts",
+          label: "Total Alerts",
           icon: Flame,
-          compute: (items) => items.filter((item) => item.alertType !== "Clear / No Alert").length,
+          compute: (items) => items.filter(isVisibleFireAlert).length,
           format: String,
-          subtext: "All video summaries with confirmed fire or smoke activity.",
+          subtext: "All fire and smoke detections in the selected view.",
           valueClassName: () => "text-brand-red",
         },
         {
-          label: "Critical Alerts",
+          label: "High-Risk Alerts",
           icon: AlertTriangle,
-          compute: (items) => items.filter((item) => item.severity === "High").length,
+          compute: (items) => items.filter((item) => item.severity === "Critical" || item.severity === "High").length,
           format: String,
-          subtext: "Confirmed high-severity alerts that safety teams should review first.",
+          subtext: "Critical or high severity alerts requiring fast safety review.",
           valueClassName: () => "text-brand-red",
-        },
-        {
-          label: "Fire + Smoke Confirmed Alerts",
-          icon: Flame,
-          compute: (items) => items.filter((item) => item.alertType === "Fire + Smoke").length,
-          format: String,
-          subtext: "Alerts showing both smoke and direct fire signal in the same clip.",
-          valueClassName: () => "text-brand-red",
-        },
-        {
-          label: "Smoke-Only Warnings",
-          icon: Flame,
-          compute: (items) => items.filter((item) => item.alertType === "Smoke Only").length,
-          format: String,
-          subtext: "Warnings that may indicate early smoke or exhaust-like activity needing verification.",
-          valueClassName: () => "text-brand-blue",
         },
         {
           label: "Most Affected Zone",
           icon: Flame,
-          compute: (items) => Object.entries(groupBy(items.filter((item) => item.alertType !== "Clear / No Alert"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
+          compute: (items) => Object.entries(groupBy(items.filter(isVisibleFireAlert), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
           format: String,
-          subtext: "Zone accumulating the highest number of fire or smoke alerts.",
+          subtext: "Area with the highest concentration of fire or smoke alerts.",
           valueClassName: () => "text-brand-blue",
         },
         {
           label: "Most Triggered Camera",
-          icon: Flame,
-          compute: (items) => Object.entries(groupBy(items.filter((item) => item.alertType !== "Clear / No Alert"), "cameraId")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
+          icon: Activity,
+          compute: (items) => Object.entries(groupBy(items.filter(isVisibleFireAlert), "cameraId")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No alerts",
           format: String,
-          subtext: "Camera that most often captures potential fire or smoke events.",
+          subtext: "Camera source generating the highest number of alerts.",
           valueClassName: () => "text-brand-blue",
         },
       ],
       columns: [
-        { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "timestamp", label: "Time", sortable: true, render: formatDateTime },
         { key: "location", label: "Location", sortable: true },
         { key: "zone", label: "Zone", sortable: true },
-        { key: "facility", label: "Facility", sortable: true },
-        { key: "shift", label: "Shift", sortable: true },
+        { key: "cameraId", label: "Camera / Source", sortable: true },
         { key: "alertType", label: "Alert Type", sortable: true },
-        { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "High" ? "high" : value === "Medium" ? "medium" : "normal"}>{value}</Badge> },
-        { key: "confidenceScore", label: "Confidence Score", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "severity", label: "Severity", sortable: true, render: (value) => <Badge tone={value === "Critical" || value === "High" ? "high" : value === "Medium" ? "warning" : "alert"}>{value}</Badge> },
         { key: "fireDetected", label: "Fire Detected", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Yes" : "No") },
         { key: "smokeDetected", label: "Smoke Detected", sortable: true, render: (value) => badgeRender(value === "Yes" ? "Yes" : "No") },
-        { key: "outputVideo", label: "Output Video", sortable: false, render: (value) => (value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">Open output</a> : "N/A") },
-        { key: "timestamp", label: "Timestamp", sortable: true, render: formatDateTime },
+        { key: "confidenceScore", label: "Confidence", sortable: true, render: (value) => `${(Number(value || 0) * 100).toFixed(1)}%` },
+        { key: "evidence", label: "Evidence", sortable: false, render: (value) => (value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">View Evidence</a> : "Not available") },
       ],
     },
     "class-wise-counting": {
