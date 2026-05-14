@@ -50,6 +50,9 @@ export default function DetailPage({
 }) {
   const leftTabs = tabs.filter((tab) => tab !== "Fine-Tuning");
   const rightTab = tabs.find((tab) => tab === "Fine-Tuning");
+  const detailDescription = activeUseCase.id === "ppe-detection" && activeTab === "Model Playground"
+    ? "Upload a workplace image or video to check whether workers are wearing helmets and safety vests."
+    : activeUseCase.description;
 
   const renderTabButton = (tab) => {
     const active = activeTab === tab;
@@ -85,7 +88,7 @@ export default function DetailPage({
             <span className="font-medium text-slate-900">{activeUseCase.title}</span>
           </div>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">{activeUseCase.title}</h1>
-          <p className="mt-1 text-sm text-slate-500">{activeUseCase.description}</p>
+          <p className="mt-1 text-sm text-slate-500">{detailDescription}</p>
         </div>
       </header>
 

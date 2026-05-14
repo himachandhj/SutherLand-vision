@@ -38,6 +38,7 @@ import { useRegionAlertsData } from "../../src/hooks/useRegionAlertsData";
 import { useSpeedEstimationData } from "../../src/hooks/useSpeedEstimationData";
 import { useCrackDetectionData } from "../../src/hooks/useCrackDetectionData";
 import { useUnsafeBehaviorData } from "../../src/hooks/useUnsafeBehaviorData";
+import { dashboardData } from "./mock-data";
 import { average, byTimestamp, formatDate, formatDateTime, formatSeconds, groupBy, shiftFromTimestamp, sortRows, sum, toneForStatus, uniqueOptions } from "./helpers";
 
 const chartPalette = ["#27235C", "#DE1B54", "#3D3880", "#F04E7A", "#6B6B8A", "#C8C6E8"];
@@ -840,14 +841,44 @@ function defectEvidenceLinkRender(value) {
   return value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">View Evidence</a> : "Not available";
 }
 
+function normalizePpeShift(value, fallbackTimestamp = "") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "morning" || normalized === "morning shift") return "Morning";
+  if (normalized === "afternoon" || normalized === "afternoon shift" || normalized === "evening" || normalized === "swing shift") return "Afternoon";
+  if (normalized === "night" || normalized === "night shift") return "Night";
+
+  const fallbackDate = fallbackTimestamp ? new Date(fallbackTimestamp) : null;
+  if (fallbackDate && !Number.isNaN(fallbackDate.getTime())) {
+    const hour = fallbackDate.getHours();
+    if (hour >= 6 && hour < 14) return "Morning";
+    if (hour >= 14 && hour < 22) return "Afternoon";
+    return "Night";
+  }
+  return "Morning";
+}
+
+function formatPpeItemState(value) {
+  if (value === "MISSING") return "Missing";
+  if (value === "UNKNOWN") return "Unknown";
+  return "OK";
+}
+
+function formatPpeComplianceStatus(value) {
+  return value === "FAIL" ? "Violation" : "Compliant";
+}
+
+function getPpeMissingCategory(missingItems) {
+  const normalizedMissingItems = Array.isArray(missingItems)
+    ? missingItems.filter((item) => item === "Helmet" || item === "Vest")
+    : [];
+  if (normalizedMissingItems.includes("Helmet") && normalizedMissingItems.includes("Vest")) return "helmet_and_vest";
+  if (normalizedMissingItems.includes("Helmet")) return "helmet_only";
+  if (normalizedMissingItems.includes("Vest")) return "vest_only";
+  return "";
+}
+
 function normalizePPERecord(row, index) {
   const processedAt = row.processed_at || row.processedAt || row.timestamp || new Date().toISOString();
-  const deriveShift = (value) => {
-    const hour = new Date(value).getHours();
-    if (hour >= 6 && hour < 14) return "Morning";
-    if (hour >= 14 && hour < 22) return "Evening";
-    return "Night";
-  };
   const toItemState = (value) => {
     if (value === true) return "OK";
     if (value === false) return "MISSING";
@@ -860,39 +891,41 @@ function normalizePPERecord(row, index) {
 
   const helmet = row.helmet ? String(row.helmet).toUpperCase() : toItemState(row.helmet_worn);
   const vest = row.vest ? String(row.vest).toUpperCase() : toItemState(row.vest_worn);
-  const shoes = row.shoes ? String(row.shoes).toUpperCase() : toItemState(row.shoes_worn);
   const firstSeenSec = Number(row.first_seen_sec ?? row.firstSeenSec ?? 0);
   const lastSeenSec = Number(row.last_seen_sec ?? row.lastSeenSec ?? firstSeenSec);
   const durationSec = Number(row.duration_sec ?? row.durationSec ?? Math.max(0, lastSeenSec - firstSeenSec));
   const missingItems = Array.isArray(row.missing_items)
-    ? row.missing_items
+    ? row.missing_items.filter((item) => item === "Helmet" || item === "Vest")
     : [
         helmet === "MISSING" ? "Helmet" : null,
         vest === "MISSING" ? "Vest" : null,
-        shoes === "MISSING" ? "Shoes" : null,
       ].filter(Boolean);
-  const complianceStatus = String(row.compliance_status ?? row.complianceStatus ?? (missingItems.length > 0 ? "FAIL" : "PASS")).toUpperCase() === "FAIL" ? "FAIL" : "PASS";
+  const complianceStatus = missingItems.length > 0 ? "FAIL" : "PASS";
+  const evidence = row.output_media_url ?? row.outputMediaUrl ?? row.output_video_url ?? row.outputVideoUrl ?? "";
+  const shift = normalizePpeShift(row.shift, processedAt);
 
   return {
     inputId: row.input_id ?? row.inputId ?? "",
     cameraId: row.camera_id ?? row.cameraId ?? `CAM_${String((index % 15) + 1).padStart(3, "0")}`,
     location: row.location ?? "Warehouse A",
     zone: row.zone ?? "Storage Bay",
-    shift: row.shift ?? deriveShift(processedAt),
+    shift,
     trackedWorkerId: row.tracked_worker_id ?? row.trackedWorkerId ?? row.person_id ?? row.personId ?? `TID-${index + 1}`,
     helmet,
     vest,
-    shoes,
     complianceStatus,
     missingItems,
+    missingPpeCategory: getPpeMissingCategory(missingItems),
     framesObserved: Number(row.frames_observed ?? row.framesObserved ?? 0),
     firstSeenSec,
     lastSeenSec,
     durationSec,
-    outputVideoUrl: row.output_video_url ?? row.outputVideoUrl ?? "",
+    outputVideoUrl: evidence,
+    evidence,
     processedAt,
     timestamp: processedAt,
     confidenceScore: Number(row.confidence_score ?? row.confidenceScore ?? 0.88),
+    isSyntheticDemo: Boolean(row.isSyntheticDemo ?? row.is_synthetic_demo),
   };
 }
 
@@ -1225,6 +1258,22 @@ function rebalanceChartSeries(items, valueKey, targetMin, targetMax) {
   }));
 }
 
+function buildPpeAugmentedRows(rows) {
+  if (rows.length >= 180) return rows;
+
+  const demoRows = (dashboardData["ppe-detection"] ?? []).map((row, index) => normalizePPERecord({
+    ...row,
+    isSyntheticDemo: true,
+    is_synthetic_demo: true,
+  }, index));
+  const targetTotal = rows.length === 0
+    ? 216
+    : Math.max(180, Math.min(240, rows.length + Math.max(140, Math.round(rows.length * 3.5))));
+  const liveSignatures = new Set(rows.map((row) => `${row.inputId}:${row.trackedWorkerId}:${row.timestamp}`));
+  const availableDemoRows = demoRows.filter((row) => !liveSignatures.has(`${row.inputId}:${row.trackedWorkerId}:${row.timestamp}`));
+  return [...rows, ...availableDemoRows.slice(0, Math.max(0, targetTotal - rows.length))];
+}
+
 function getGlobalFilters(rows, slug) {
   const filters = {
     from: "",
@@ -1241,7 +1290,9 @@ function getGlobalFilters(rows, slug) {
     if (latestTimestamp) {
       const to = new Date(latestTimestamp);
       const from = new Date(to);
-      if (slug === "ppe-detection" || slug === "speed-estimation" || slug === "crack-detection" || slug === "unsafe-behavior-detection") {
+      if (slug === "ppe-detection") {
+        from.setDate(to.getDate() - 27);
+      } else if (slug === "speed-estimation" || slug === "crack-detection" || slug === "unsafe-behavior-detection") {
         from.setDate(to.getDate() - 1);
       } else {
         from.setDate(to.getDate() - 6);
@@ -1257,14 +1308,7 @@ function getInitialExtraFilters(slug, extraFilterDefs, rows = []) {
   const multiSelectKeys = getMultiSelectKeys(slug);
   const initial = {};
   for (const def of extraFilterDefs) {
-    if (slug === "ppe-detection" && def.key === "shift" && rows.length) {
-      const latest = [...rows]
-        .sort((a, b) => new Date(a.processed_at || a.timestamp || 0) - new Date(b.processed_at || b.timestamp || 0))
-        .at(-1);
-      initial[def.key] = latest?.shift || "Evening";
-    } else {
-      initial[def.key] = multiSelectKeys.includes(def.key) ? [] : "All";
-    }
+    initial[def.key] = multiSelectKeys.includes(def.key) ? [] : "All";
   }
   return initial;
 }
@@ -1272,6 +1316,7 @@ function getInitialExtraFilters(slug, extraFilterDefs, rows = []) {
 function initialSortStateFor(slug, columns) {
   if (slug === "region-alerts") return { key: "escalationPriority", direction: "desc" };
   if (slug === "fire-detection") return { key: "firePriority", direction: "desc" };
+  if (slug === "ppe-detection") return { key: "timestamp", direction: "desc" };
   if (slug === "speed-estimation") return { key: "speedPriority", direction: "desc" };
   if (slug === "crack-detection") return { key: "crackPriority", direction: "desc" };
   if (slug === "unsafe-behavior-detection") return { key: "unsafePriority", direction: "desc" };
@@ -1315,7 +1360,7 @@ function KpiGrid({ items, className = "" }) {
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-sm font-medium text-muted">{item.label}</p>
-                <p className={`mt-3 text-3xl font-bold ${item.valueClassName ?? "text-ink"}`}>{item.value}</p>
+                <p className={`mt-3 font-bold ${item.valueSizeClassName ?? "text-3xl"} ${item.valueClassName ?? "text-ink"}`}>{item.value}</p>
                 {item.subtext ? <p className="mt-2 text-xs text-muted">{item.subtext}</p> : null}
               </div>
               <div className="rounded-xl bg-brand-red-tint p-3 text-brand-red">
@@ -1377,6 +1422,7 @@ function RegionAlertsMultiSelectField({
   allLabel,
   selectAllLabel,
   clearAllLabel,
+  actionButtons = false,
 }) {
   const normalizedSelectedValues = Array.isArray(selectedValues) ? selectedValues.filter(Boolean) : [];
   const selectedLabels = options
@@ -1400,14 +1446,18 @@ function RegionAlertsMultiSelectField({
           <div className="mb-3 flex items-center justify-between gap-2">
             <button
               type="button"
-              className="text-xs font-semibold text-brand-blue transition hover:text-brand-red"
+              className={actionButtons
+                ? "rounded-lg border border-brand-blue/30 px-2.5 py-1.5 text-xs font-semibold text-brand-blue transition hover:border-brand-red hover:text-brand-red"
+                : "text-xs font-semibold text-brand-blue transition hover:text-brand-red"}
               onClick={() => onChange(options.map((option) => option.value))}
             >
               {selectAllLabel}
             </button>
             <button
               type="button"
-              className="text-xs font-semibold text-brand-red transition hover:text-brand-blue"
+              className={actionButtons
+                ? "rounded-lg border border-brand-red/40 px-2.5 py-1.5 text-xs font-semibold text-brand-red transition hover:border-brand-blue hover:text-brand-blue"
+                : "text-xs font-semibold text-brand-red transition hover:text-brand-blue"}
               onClick={() => onChange([])}
             >
               {clearAllLabel}
@@ -2295,32 +2345,34 @@ function buildDashboardViews(slug, rows, granularity, interactive = {}) {
     case "ppe-detection": {
       const failedRows = rows.filter((row) => row.complianceStatus === "FAIL");
       const byZone = Object.entries(groupBy(failedRows, "zone"))
-        .map(([label, items]) => ({ label, value: items.length, barFill: items.length >= 6 ? "#DE1B54" : "#27235C" }))
+        .map(([label, items]) => ({ label, value: items.length, barFill: items.length >= 10 ? "#DE1B54" : "#27235C" }))
         .sort((a, b) => b.value - a.value);
       const donut = [
-        { label: "Missing Helmet", value: rows.filter((row) => row.helmet === "MISSING").length, color: "#DE1B54" },
-        { label: "Missing Vest", value: rows.filter((row) => row.vest === "MISSING").length, color: "rgba(222, 27, 84, 0.6)" },
-        { label: "Missing Shoes", value: rows.filter((row) => row.shoes === "MISSING").length, color: "#27235C" },
         { label: "Compliant", value: rows.filter((row) => row.complianceStatus === "PASS").length, color: "#27235C" },
-      ];
-      const shiftOrder = ["Morning", "Evening", "Night"];
+        { label: "Missing Helmet", value: rows.filter((row) => row.missingPpeCategory === "helmet_only").length, color: "#DE1B54" },
+        { label: "Missing Vest", value: rows.filter((row) => row.missingPpeCategory === "vest_only").length, color: "rgba(222, 27, 84, 0.72)" },
+        { label: "Missing Helmet + Vest", value: rows.filter((row) => row.missingPpeCategory === "helmet_and_vest").length, color: "#F06A8F" },
+      ].filter((item) => item.value > 0);
+      const shiftOrder = ["Morning", "Afternoon", "Night"];
       const byShift = shiftOrder.map((label) => ({
         label,
         value: failedRows.filter((row) => row.shift === label).length,
       }));
-      const trend = groupRowsByGranularity(rows, granularity).map(({ label, items }) => ({
+      const trend = groupRowsByGranularity(rows, granularity).map(({ label, bucketKey, items }) => ({
         label,
+        bucketKey,
         complianceRate: Number(((items.filter((item) => item.complianceStatus === "PASS").length / Math.max(items.length, 1)) * 100).toFixed(1)),
       }));
       const byCamera = Object.entries(groupBy(failedRows, "cameraId"))
         .map(([label, items]) => ({ label, value: items.length }))
-        .sort((a, b) => b.value - a.value);
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 6);
       return [
-        <BarChartCard key="1" title="Top Zones with PPE Violations" description="Highlights zones where workers most frequently violate PPE rules." data={byZone} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Zone" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
-        <DonutChartCard key="2" title="PPE Violation Breakdown" description="Shows which PPE items are most frequently missing across workers." data={donut} showSlicePercent />,
-        <BarChartCard key="3" title="Violations by Shift" description="Identifies shifts where worker safety compliance is weakest." data={byShift} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Shift" yAxisLabel="Violation Count" showLegend={false} />,
-        <LineChartCard key="4" title="Compliance Rate Over Time" description="Tracks whether PPE compliance is improving or declining." data={trend} lines={[{ dataKey: "complianceRate", color: "#27235C" }]} xAxisLabel="Time" yAxisLabel="Compliance %" referenceLines={[{ value: 90, color: "#DE1B54", label: "90% Threshold" }]} />,
-        <BarChartCard key="5" title="Violations by Camera" description="Shows which cameras are capturing the highest concentration of non-compliant workers." data={byCamera} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Camera ID" yAxisLabel="Violation Count" showLegend={false} />,
+        <DonutChartCard key="1" title="PPE Violation Breakdown" description="Shows whether workers are compliant or missing required helmet or vest protection." data={donut} showSlicePercent />,
+        <BarChartCard key="2" title="Top Zones with PPE Violations" description="Highlights workplace zones where PPE violations are most concentrated." data={byZone} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Zone" yAxisLabel="Violation Count" cellFillForBar="value" showLegend={false} />,
+        <BarChartCard key="3" title="Violations by Shift" description="Identifies shifts where worker safety compliance needs more attention." data={byShift} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Shift" yAxisLabel="Violation Count" showLegend={false} />,
+        <BarChartCard key="4" title="Camera / Source Contribution" description="Shows which cameras or inspection sources capture the most PPE violations." data={byCamera} bars={[{ dataKey: "value", color: "#27235C", showLabels: true }]} xAxisLabel="Camera / Source" yAxisLabel="Violation Count" showLegend={false} />,
+        <LineChartCard key="5" title="Compliance Trend Over Time" description="Shows whether PPE compliance is improving or declining across the selected period." data={trend} lines={[{ dataKey: "complianceRate", color: "#27235C", name: "Compliance Rate" }]} xAxisLabel="Time" yAxisLabel="Compliance %" referenceLines={[{ value: 85, color: "#DE1B54", label: "85% Target" }]} className="xl:col-span-2" contentClassName="h-96" />,
       ];
     }
     default:
@@ -2350,7 +2402,7 @@ function getMultiSelectKeys(slug) {
     "fire-detection": ["cameraId", "severity", "alertType", "shift"],
     "class-wise-counting": ["cameraId", "className"],
     "object-tracking": ["cameraId", "objectType"],
-    "ppe-detection": ["cameraId", "shift"],
+    "ppe-detection": ["cameraId", "shift", "missingPpeCategory"],
   };
   return [...baseKeys, ...(dashboardSpecific[slug] || [])];
 }
@@ -2434,6 +2486,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   }, [slug, fireApiData, ppeApiData, regionApiData, speedApiData, crackApiData, unsafeApiData, rows]);
 
   const effectiveSourceRows = useMemo(() => {
+    if (slug === "ppe-detection") return buildPpeAugmentedRows(sourceRows);
     if (slug !== "region-alerts" || usesLiveDashboardData) return sourceRows;
     const baselineRows = sourceRows.filter((row) => !row.isLatestDemoIncident);
     const demoRows = byTimestamp(sourceRows.filter((row) => row.isLatestDemoIncident));
@@ -2470,7 +2523,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   useEffect(() => {
     if (!usesLiveDashboardData || liveFiltersInitialized) return;
     const liveLoading = slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : slug === "crack-detection" ? crackApiLoading : slug === "unsafe-behavior-detection" ? unsafeApiLoading : ppeApiLoading;
-    const liveRows = slug === "fire-detection" ? fireApiData : slug === "region-alerts" ? regionApiData : slug === "speed-estimation" ? speedApiData : slug === "crack-detection" ? crackApiData : slug === "unsafe-behavior-detection" ? unsafeApiData : ppeApiData;
+    const liveRows = slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows;
     if (liveLoading || liveRows.length === 0) return;
     setFilters(getGlobalFilters(liveRows, slug));
     setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, liveRows));
@@ -2486,12 +2539,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     speedApiLoading,
     crackApiLoading,
     unsafeApiLoading,
-    fireApiData,
-    ppeApiData,
-    regionApiData,
-    speedApiData,
-    crackApiData,
-    unsafeApiData,
+    effectiveSourceRows,
+    effectiveFireRows,
     resolvedExtraFilterDefs,
     resolvedColumns,
   ]);
@@ -2499,6 +2548,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
   const dataLoading = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiLoading : slug === "region-alerts" ? regionApiLoading : slug === "speed-estimation" ? speedApiLoading : slug === "crack-detection" ? crackApiLoading : slug === "unsafe-behavior-detection" ? unsafeApiLoading : ppeApiLoading) : false;
   const dataError = usesLiveDashboardData ? (slug === "fire-detection" ? fireApiError : slug === "region-alerts" ? regionApiError : slug === "speed-estimation" ? speedApiError : slug === "crack-detection" ? crackApiError : slug === "unsafe-behavior-detection" ? unsafeApiError : ppeApiError) : "";
   const loading = skeletonLoading || dataLoading;
+  const showInlineLastUpdated = slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection";
 
   const filterDefs = [
     { key: "location", label: isRegionAlertsDashboard ? tRegionAlerts("location") : "Location" },
@@ -2544,7 +2594,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     ? extraFilters.status
     : "";
   const sortedRows = useMemo(() => sortRows(fullyFilteredRows, sortState), [fullyFilteredRows, sortState]);
-  const showLiveEmptyState = usesLiveDashboardData && !dataLoading && !dataError && sourceRows.length === 0;
+  const showLiveEmptyState = usesLiveDashboardData && !dataLoading && !dataError && (slug === "fire-detection" ? effectiveFireRows : effectiveSourceRows).length === 0;
   const showFilteredEmptyState = !loading && !dataError && !showLiveEmptyState && fullyFilteredRows.length === 0;
   const showChartFilterEmptyState = showFilteredEmptyState && hasInteractiveChartFilter;
   const kpis = useMemo(
@@ -2556,6 +2606,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
           icon: metric.icon,
           value: metric.format(computed, fullyFilteredRows),
           valueClassName: metric.valueClassName?.(computed, fullyFilteredRows),
+          valueSizeClassName: metric.valueSizeClassName?.(computed, fullyFilteredRows),
           subtext: typeof metric.subtext === "function" ? metric.subtext(computed, fullyFilteredRows) : metric.subtext,
           group: metric.group,
           cardClassName: metric.cardClassName?.(computed, fullyFilteredRows),
@@ -2602,10 +2653,24 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
 
     if (slug === "ppe-detection" && key === "complianceStatus") {
       const statusOptions = [
-        { label: "PASS", value: "PASS" },
-        { label: "FAIL", value: "FAIL" },
+        { label: "Compliant", value: "PASS" },
+        { label: "Violation", value: "FAIL" },
       ];
       return includeAllOption ? [{ label: "All", value: "All" }, ...statusOptions] : statusOptions;
+    }
+    if (slug === "ppe-detection" && key === "missingPpeCategory") {
+      const missingPpeOptions = [
+        { label: "Helmet", value: "helmet_only" },
+        { label: "Vest", value: "vest_only" },
+        { label: "Helmet + Vest", value: "helmet_and_vest" },
+      ];
+      return includeAllOption ? [{ label: "All", value: "All" }, ...missingPpeOptions] : missingPpeOptions;
+    }
+    if (slug === "ppe-detection" && key === "shift") {
+      const shiftOptions = ["Morning", "Afternoon", "Night"]
+        .filter((label) => values.includes(label))
+        .map((label) => ({ label, value: label }));
+      return includeAllOption ? [{ label: "All", value: "All" }, ...shiftOptions] : shiftOptions;
     }
     if (key === "speedLimitKmh") {
       const speedOptions = values.map((value) => ({ label: `${value} kmh`, value: String(value) }));
@@ -2719,8 +2784,27 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
     }));
   };
 
+  const handlePpeSelectAll = () => {
+    if (slug !== "ppe-detection") return;
+    setFilters((prev) => ({
+      ...prev,
+      location: "All",
+      zone: optionsFor("zone", false).map((option) => option.value),
+      cameraId: optionsFor("cameraId", false).map((option) => option.value),
+    }));
+    setExtraFilters((prev) => ({
+      ...prev,
+      shift: optionsFor("shift", false).map((option) => option.value),
+      missingPpeCategory: optionsFor("missingPpeCategory", false).map((option) => option.value),
+    }));
+  };
+
   const resetFilters = () => {
-    const resetRows = usesLiveDashboardData ? sourceRows : rows;
+    const resetRows = slug === "fire-detection"
+      ? effectiveFireRows
+      : usesLiveDashboardData
+        ? effectiveSourceRows
+        : rows;
     setFilters(getGlobalFilters(resetRows, slug));
     setExtraFilters(getInitialExtraFilters(slug, resolvedExtraFilterDefs, resetRows));
     setTimeGranularity("Hourly");
@@ -2776,7 +2860,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
               </button>
               <div>
                 <h1 className="text-2xl font-semibold">{resolvedTitle}</h1>
-                {slug === "region-alerts" || slug === "crack-detection" ? null : <p className="mt-1 text-sm text-brand-blue-tint">Last updated: {lastUpdated}</p>}
+                {showInlineLastUpdated ? <p className="mt-1 text-sm text-brand-blue-tint">Last updated: {lastUpdated}</p> : null}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -2803,7 +2887,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                 </div>
               ) : null}
               <div className="rounded-xl bg-brand-blue-light px-4 py-2 text-sm font-medium">
-                {slug === "region-alerts" || slug === "crack-detection"
+                {slug === "region-alerts" || slug === "crack-detection" || slug === "ppe-detection"
                   ? `Last updated: ${lastUpdated}`
                   : `Visible results: ${fullyFilteredRows.length}`}
               </div>
@@ -2878,6 +2962,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       ? tRegionAlerts("filtersDescription")
                       : slug === "crack-detection"
                         ? "Use compact filters to focus the current defect view across cards, charts, and the register."
+                        : slug === "ppe-detection"
+                          ? "Use compact filters to focus the current PPE compliance story across cards, charts, and the event register."
                         : "All KPI cards, charts, and table rows update from the same filtered dataset."}
                   </CardDescription>
                 </div>
@@ -3036,6 +3122,76 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     </div>
                   </div>
                 </>
+              ) : slug === "ppe-detection" ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date From</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.from} onChange={(e) => setFilters((prev) => ({ ...prev, from: e.target.value }))} />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm">
+                      <span className="font-medium text-ink">Date To</span>
+                      <input className="rounded-lg border border-brand-blue bg-white px-3 py-2 text-sm outline-none focus:border-brand-red" type="date" value={filters.to} onChange={(e) => setFilters((prev) => ({ ...prev, to: e.target.value }))} />
+                    </label>
+                    <SelectField
+                      label="Time Granularity"
+                      value={timeGranularity}
+                      onChange={setTimeGranularity}
+                      options={TIME_GRANULARITIES.map((label) => ({ label, value: label }))}
+                    />
+                    <SelectField label="Location" value={filters.location} onChange={(value) => setFilters((prev) => ({ ...prev, location: value }))} options={optionsFor("location")} />
+                    <RegionAlertsMultiSelectField
+                      label="Missing PPE"
+                      options={optionsFor("missingPpeCategory", false)}
+                      selectedValues={Array.isArray(extraFilters.missingPpeCategory) ? extraFilters.missingPpeCategory : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, missingPpeCategory: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5 xl:items-end">
+                    <RegionAlertsMultiSelectField
+                      label="Zone"
+                      options={optionsFor("zone", false)}
+                      selectedValues={filters.zone}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, zone: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Camera / Source"
+                      options={optionsFor("cameraId", false)}
+                      selectedValues={filters.cameraId}
+                      onChange={(values) => setFilters((prev) => ({ ...prev, cameraId: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <RegionAlertsMultiSelectField
+                      label="Shift"
+                      options={optionsFor("shift", false)}
+                      selectedValues={Array.isArray(extraFilters.shift) ? extraFilters.shift : []}
+                      onChange={(values) => setExtraFilters((prev) => ({ ...prev, shift: values }))}
+                      allLabel="All"
+                      selectAllLabel="Select All"
+                      clearAllLabel="Clear All"
+                      actionButtons
+                    />
+                    <div className="flex flex-wrap items-end justify-start gap-2 xl:col-span-2 xl:justify-end">
+                      <Button variant="outline" className="h-[42px] rounded-lg border-brand-blue px-4 text-brand-blue hover:bg-brand-blue-tint" onClick={handlePpeSelectAll}>
+                        Select All
+                      </Button>
+                      <Button variant="outline" className="h-[42px] rounded-lg border-brand-red px-4 text-brand-red hover:bg-brand-red-tint" onClick={resetFilters}>
+                        Clear All
+                      </Button>
+                    </div>
+                  </div>
+                </>
               ) : (
                 <>
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -3113,7 +3269,7 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                       Simulate Latest Alert
                     </Button>
                   ) : null}
-                  {slug !== "region-alerts" && slug !== "crack-detection" ? (
+                  {slug !== "region-alerts" && slug !== "crack-detection" && slug !== "ppe-detection" ? (
                     <Button variant="default" className="gap-2 shadow-card" onClick={resetFilters}>
                       Reset Filters
                     </Button>
@@ -3362,6 +3518,14 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                     <KpiGrid items={kpis.filter((item) => item.group === "action")} />
                   </section>
                 </>
+              ) : slug === "ppe-detection" ? (
+                <section className="space-y-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-blue">PPE Compliance Snapshot</p>
+                    <p className="mt-1 text-sm text-muted">A focused view of worker safety compliance across the selected workplace view.</p>
+                  </div>
+                  <KpiGrid items={kpis} />
+                </section>
               ) : (
                 <KpiGrid items={kpis} />
               ))}
@@ -3377,6 +3541,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   ? "Defect Register"
                   : slug === "unsafe-behavior-detection"
                     ? "Unsafe Event Register"
+                    : slug === "ppe-detection"
+                      ? "PPE Event Register"
                     : slug === "region-alerts"
                       ? tRegionAlerts("detectedIntrusionEvents")
                       : "Filtered Results"}
@@ -3386,6 +3552,8 @@ export function DashboardPage({ slug, title, description, rows, metricDefs, colu
                   ? "Review each detected defect, affected area, severity, recommended action, confidence, and output evidence."
                   : slug === "unsafe-behavior-detection"
                     ? "Business-friendly unsafe behavior records for the current filter selection."
+                    : slug === "ppe-detection"
+                      ? "Review each worker-level PPE event, missing item, compliance status, confidence, and output evidence."
                     : slug === "region-alerts"
                       ? tRegionAlerts("detectedIntrusionEventsDescription")
                       : "Sortable detailed results for the current filter selection."}
@@ -3919,29 +4087,65 @@ export function buildDashboardDefinition(slug, rows, info) {
       description: info,
       extraFilterDefs: [
         { key: "shift", label: "Shift" },
-        { key: "complianceStatus", label: "Compliance Status" },
+        { key: "missingPpeCategory", label: "Missing PPE" },
       ],
       metricDefs: [
-        { label: "Total Workers Checked", icon: LayoutDashboard, compute: (items) => new Set(items.map((item) => `${item.inputId}:${item.trackedWorkerId}`)).size, format: String },
-        { label: "Workers with PPE Violations", icon: AlertTriangle, compute: (items) => items.filter((item) => item.complianceStatus === "FAIL").length, format: String, valueClassName: () => "text-brand-red" },
-        { label: "PPE Compliance Rate (%)", icon: Activity, compute: (items) => (items.length ? (items.filter((item) => item.complianceStatus === "PASS").length / items.length) * 100 : 0), format: (value) => `${Number(value || 0).toFixed(1)}%` },
-        { label: "Missing Helmet Cases", icon: HardHat, compute: (items) => items.filter((item) => item.helmet === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
-        { label: "Missing Vest Cases", icon: HardHat, compute: (items) => items.filter((item) => item.vest === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
-        { label: "Missing Shoe Cases", icon: HardHat, compute: (items) => items.filter((item) => item.shoes === "MISSING").length, format: String, valueClassName: () => "text-brand-red" },
-        { label: "Most Affected Zone", icon: AlertTriangle, compute: (items) => Object.entries(groupBy(items.filter((item) => item.complianceStatus === "FAIL"), "zone")).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? "No violations", format: String },
+        {
+          label: "Total Workers Checked",
+          icon: LayoutDashboard,
+          compute: (items) => items.length,
+          format: (value) => Number(value || 0).toLocaleString(),
+          subtext: "Workers detected in the selected inspection window.",
+          valueClassName: () => "text-brand-blue",
+          valueSizeClassName: () => "text-4xl xl:text-[2.7rem]",
+        },
+        {
+          label: "Workers with Violations",
+          icon: AlertTriangle,
+          compute: (items) => items.filter((item) => item.complianceStatus === "FAIL").length,
+          format: (value) => Number(value || 0).toLocaleString(),
+          subtext: "Workers missing required helmet or vest protection.",
+          valueClassName: () => "text-brand-red",
+          valueSizeClassName: () => "text-4xl xl:text-[2.7rem]",
+        },
+        {
+          label: "PPE Compliance Rate",
+          icon: Activity,
+          compute: (items) => (items.length ? (items.filter((item) => item.complianceStatus === "PASS").length / items.length) * 100 : 0),
+          format: (value) => `${Number(value || 0).toFixed(1)}%`,
+          subtext: "Percentage of workers meeting helmet and vest requirements.",
+          valueClassName: () => "text-brand-blue",
+          valueSizeClassName: () => "text-4xl xl:text-[2.7rem]",
+        },
+        {
+          label: "Most Common Missing PPE",
+          icon: HardHat,
+          compute: (items) => {
+            const categories = [
+              { label: "Helmet", count: items.filter((item) => item.missingPpeCategory === "helmet_only").length },
+              { label: "Vest", count: items.filter((item) => item.missingPpeCategory === "vest_only").length },
+              { label: "Helmet + Vest", count: items.filter((item) => item.missingPpeCategory === "helmet_and_vest").length },
+            ].sort((left, right) => right.count - left.count);
+            return categories[0]?.count ? categories[0].label : "No active gaps";
+          },
+          format: String,
+          subtext: "The PPE item most frequently missing in the current view.",
+          valueClassName: () => "text-brand-red",
+          valueSizeClassName: () => "text-4xl xl:text-[2.3rem]",
+        },
       ],
       columns: [
-        { key: "cameraId", label: "Camera ID", sortable: true },
+        { key: "timestamp", label: "Time", sortable: true, render: formatDateTime },
+        { key: "cameraId", label: "Camera / Source", sortable: true },
         { key: "zone", label: "Zone", sortable: true },
         { key: "shift", label: "Shift", sortable: true },
         { key: "trackedWorkerId", label: "Worker ID", sortable: true },
-        { key: "helmet", label: "Helmet", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
-        { key: "vest", label: "Vest", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
-        { key: "shoes", label: "Shoes", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{value}</Badge> },
-        { key: "missingItems", label: "Missing Items", sortable: true, render: (value) => Array.isArray(value) && value.length ? value.join(", ") : "None" },
-        { key: "complianceStatus", label: "Compliance Status", sortable: true, render: (value) => <Badge tone={value === "FAIL" ? "alert" : "normal"}>{value}</Badge> },
-        { key: "durationSec", label: "Duration (sec)", sortable: true },
-        { key: "outputVideoUrl", label: "Output Video", sortable: false, render: (value) => (value ? <a className="font-semibold text-brand-blue hover:underline" href={value} rel="noreferrer" target="_blank">Open video</a> : "N/A") },
+        { key: "helmet", label: "Helmet", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{formatPpeItemState(value)}</Badge> },
+        { key: "vest", label: "Vest", sortable: true, render: (value) => <Badge tone={value === "MISSING" ? "alert" : value === "UNKNOWN" ? "warning" : "normal"}>{formatPpeItemState(value)}</Badge> },
+        { key: "missingItems", label: "Missing Items", sortable: true, render: (value) => Array.isArray(value) && value.length ? value.join(" + ") : "None" },
+        { key: "complianceStatus", label: "Compliance Status", sortable: true, render: (value) => <Badge tone={value === "FAIL" ? "alert" : "normal"}>{formatPpeComplianceStatus(value)}</Badge> },
+        { key: "confidenceScore", label: "Confidence", sortable: true, render: (value) => `${Math.round(Number(value || 0) * 100)}%` },
+        { key: "evidence", label: "Evidence", sortable: false, render: defectEvidenceLinkRender },
       ],
     },
   };

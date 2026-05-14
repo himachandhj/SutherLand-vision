@@ -380,69 +380,66 @@ export const dashboardData = {
       status: anomaly === "Yes" ? "Alert" : "Normal",
     };
   }),
-  "ppe-detection": createRows(44, (index) => {
+  "ppe-detection": createRows(216, (index) => {
     const morningHours = [6, 7, 8, 9, 10, 11, 12, 13];
-    const eveningHours = [14, 15, 16, 17, 18, 19, 20, 21];
+    const afternoonHours = [14, 15, 16, 17, 18, 19, 20, 21];
     const nightHours = [22, 23, 0, 1, 2, 3, 4, 5];
     const zoneProfiles = [
-      { zone: "Forklift Bay", location: "Warehouse A", camera: cameras[0], shift: "Evening", vestBias: "high", helmetBias: "low" },
+      { zone: "Forklift Bay", location: "Warehouse A", camera: cameras[0], shift: "Afternoon", vestBias: "high", helmetBias: "low" },
       { zone: "Loading Dock", location: "Warehouse B", camera: cameras[4], shift: "Morning", vestBias: "medium", helmetBias: "high" },
       { zone: "Dispatch Area", location: "Warehouse C", camera: cameras[8], shift: "Morning", vestBias: "low", helmetBias: "low" },
       { zone: "Storage Bay", location: "Warehouse A", camera: cameras[2], shift: "Night", vestBias: "medium", helmetBias: "medium" },
       { zone: "Receiving Bay", location: "Warehouse B", camera: cameras[6], shift: "Morning", vestBias: "low", helmetBias: "low" },
-      { zone: "Packaging Zone", location: "Warehouse C", camera: cameras[10], shift: "Evening", vestBias: "medium", helmetBias: "medium" },
+      { zone: "Packaging Zone", location: "Warehouse C", camera: cameras[10], shift: "Afternoon", vestBias: "medium", helmetBias: "medium" },
     ];
     const profile = zoneProfiles[index % zoneProfiles.length];
-    const shiftCycle = [profile.shift, profile.shift, profile.shift === "Morning" ? "Evening" : "Night"];
+    const shiftCycle = [profile.shift, profile.shift, profile.shift === "Morning" ? "Afternoon" : "Night"];
     const shift = shiftCycle[index % shiftCycle.length];
-    const processedAt = new Date("2025-04-01T00:00:00");
-    processedAt.setDate(1 + (index % 26));
-    const hours = shift === "Morning" ? morningHours : shift === "Evening" ? eveningHours : nightHours;
+    const processedAt = new Date("2025-05-01T00:00:00");
+    processedAt.setDate(1 + (index % 28));
+    const hours = shift === "Morning" ? morningHours : shift === "Afternoon" ? afternoonHours : nightHours;
     processedAt.setHours(hours[index % hours.length], (index * 11) % 60, 0, 0);
 
     let helmet = "OK";
     let vest = "OK";
-    let shoes = "OK";
+    const combinedViolation = profile.zone === "Forklift Bay" && shift !== "Morning" && index % 11 === 0;
+    const helmetOnlyViolation = (profile.zone === "Loading Dock" && index % 5 === 0) || (profile.helmetBias === "medium" && index % 19 === 0);
+    const vestOnlyViolation = (profile.vestBias === "high" && index % 4 === 0) || (profile.zone === "Packaging Zone" && index % 7 === 0);
 
-    if ((profile.zone === "Forklift Bay" && shift !== "Morning" && index % 4 !== 0) || (profile.vestBias === "medium" && index % 7 === 0)) {
+    if (combinedViolation || vestOnlyViolation) {
       vest = "MISSING";
     }
-    if ((profile.zone === "Loading Dock" && index % 3 === 0) || (profile.helmetBias === "medium" && index % 8 === 0)) {
+    if (combinedViolation || helmetOnlyViolation) {
       helmet = "MISSING";
-    }
-    if (shift === "Night" && index % 6 === 0) {
-      shoes = "MISSING";
-    } else if (index % 10 === 0) {
-      shoes = "UNKNOWN";
     }
     if (profile.zone === "Dispatch Area" && index % 9 !== 0) {
       helmet = "OK";
       vest = "OK";
-      if (shoes === "MISSING") shoes = "OK";
     }
-    if (index % 13 === 0) {
-      helmet = helmet === "MISSING" ? "MISSING" : "UNKNOWN";
+    if (index % 17 === 0 && helmet !== "MISSING") {
+      helmet = "UNKNOWN";
+    }
+    if (index % 23 === 0 && vest !== "MISSING") {
+      vest = "UNKNOWN";
     }
 
     const missingItems = [];
     if (helmet === "MISSING") missingItems.push("Helmet");
     if (vest === "MISSING") missingItems.push("Vest");
-    if (shoes === "MISSING") missingItems.push("Shoes");
     const complianceStatus = missingItems.length > 0 ? "FAIL" : "PASS";
-    const firstSeenSec = 5 + (index % 8) * 7;
-    const durationSec = complianceStatus === "FAIL" ? 70 + (index % 6) * 24 : 24 + (index % 5) * 12;
+    const firstSeenSec = 6 + (index % 9) * 6;
+    const durationSec = complianceStatus === "FAIL" ? 66 + (index % 6) * 22 : 28 + (index % 5) * 11;
     const lastSeenSec = firstSeenSec + durationSec;
 
     return {
-      input_id: 8100 + Math.floor(index / 2),
+      input_id: 9100 + index,
       camera_id: profile.camera,
       location: profile.location,
       zone: profile.zone,
       shift,
-      tracked_worker_id: `TID-${500 + (index % 32)}`,
+      tracked_worker_id: `WRK-${String(700 + index).padStart(4, "0")}`,
       helmet,
       vest,
-      shoes,
       compliance_status: complianceStatus,
       missing_items: missingItems,
       frames_observed: durationSec * 6,
@@ -450,6 +447,7 @@ export const dashboardData = {
       last_seen_sec: lastSeenSec,
       duration_sec: durationSec,
       processed_at: processedAt.toISOString(),
+      confidence_score: Number((0.86 + ((index % 9) * 0.012)).toFixed(2)),
       output_video_url: `${API_BASE_URL}/static/PPE_VIDEO1.mp4`,
     };
   }),
@@ -465,7 +463,7 @@ export const dashboardInfo = {
   "fire-detection": "A focused fire and smoke safety view showing what kind of alert is appearing, which zones are most affected, and where safety teams should focus first.",
   "class-wise-counting": "Breaks counts down by tracked class to compare actual versus expected activity and reveal which cameras and zones see the highest class mix.",
   "object-tracking": "Tracks object movements, time spent in zones, path sequences, and anomaly rates to reveal congestion and movement inefficiencies.",
-  "ppe-detection": "Shows whether workers are safe, where helmet, vest, or shoe violations are happening, and which zones or shifts need immediate PPE attention.",
+  "ppe-detection": "Monitor whether workers are wearing required helmets and safety vests across workplace zones, shifts, and camera sources.",
 };
 
 export const globalKeys = {
