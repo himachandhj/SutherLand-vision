@@ -42,7 +42,7 @@ ANNOTATION_META_FOLDER = "_annotation_meta"
 DEFAULT_CLASSES_BY_USE_CASE = {
     "ppe-detection": ["person", "helmet", "vest"],
     "fire-detection": ["fire", "smoke"],
-    "crack-detection": ["crack"],
+    "crack-detection": ["crack", "spalling", "rust_stain", "delamination", "efflorescence", "exposed_reinforcement"],
     "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "region-alerts": ["person", "car", "bus", "truck", "motorcycle", "bicycle", "forklift"],
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -138,12 +138,17 @@ def _class_names(usecase_slug: str, extra: list[str] | None = None) -> list[str]
 
 def _normalize_detected_class_name(value: Any) -> str:
     name = str(value or "").strip().lower()
+    name = name.replace("-", "_").replace(" ", "_")
     if "smoking" in name or "cigarette" in name:
         return "smoking"
     if "smoke" in name:
         return "smoke"
     if "fire" in name or "flame" in name:
         return "fire"
+    if name in {"ruststain", "rust_stain"}:
+        return "rust_stain"
+    if name in {"exposedreinforcement", "exposed_reinforcement"}:
+        return "exposed_reinforcement"
     return name
 
 
