@@ -50,9 +50,6 @@ REGION_ALERTS_HANDOFF_GUIDANCE = (
     "Prepared dataset fine-tunes only the detector used by Region Alerts Detection. "
     "ROI selection, restricted-zone rules, confidence thresholds, and trigger settings are configured separately in Integration."
 )
-DEFECT_DETECTION_HANDOFF_GUIDANCE = (
-    "This dataset will be prepared for object detection fine-tuning using the selected defect labels."
-)
 
 
 def _model_dump(model: FineTuningDatasetReadyPayload) -> dict[str, Any]:
@@ -219,8 +216,6 @@ def _task_type(usecase_slug: str) -> str:
 
 
 def _handoff_guidance(usecase_slug: str) -> str | None:
-    if usecase_slug == "crack-detection":
-        return DEFECT_DETECTION_HANDOFF_GUIDANCE
     if usecase_slug == "object-tracking":
         return OBJECT_TRACKING_HANDOFF_GUIDANCE
     if usecase_slug == "region-alerts":

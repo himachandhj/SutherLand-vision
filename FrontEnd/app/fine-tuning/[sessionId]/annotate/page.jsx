@@ -42,15 +42,6 @@ function makeBoxId(prefix = "box") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const DEFECT_CLASS_COLORS = {
-  crack: "#dc2626",
-  spalling: "#2563eb",
-  rust_stain: "#c2410c",
-  delamination: "#16a34a",
-  efflorescence: "#7c3aed",
-  exposed_reinforcement: "#0f766e",
-};
-
 const CLASS_COLOR_PALETTE = [
   "#e11d48",
   "#2563eb",
@@ -64,7 +55,6 @@ const CLASS_COLOR_PALETTE = [
 
 function getClassColor(className) {
   const normalized = String(className || "unknown").toLowerCase().trim();
-  if (DEFECT_CLASS_COLORS[normalized]) return DEFECT_CLASS_COLORS[normalized];
   let hash = 0;
   for (let index = 0; index < normalized.length; index += 1) {
     hash = normalized.charCodeAt(index) + ((hash << 5) - hash);
@@ -201,22 +191,13 @@ function annotationClassName(box) {
   return String(box?.class_name || "object").trim().toLowerCase();
 }
 
-function formatClassLabel(className) {
-  return String(className || "object")
-    .trim()
-    .split("_")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 const REGION_ALERTS_CLASSES = ["person", "car", "bus", "truck", "motorcycle", "bicycle", "forklift"];
 
 function defaultClassOptions(useCaseId) {
   const defaults = {
     "class-wise-object-counting": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
     "fire-detection": ["fire", "smoke"],
-    "crack-detection": ["crack", "spalling", "rust_stain", "delamination", "efflorescence", "exposed_reinforcement"],
+    "crack-detection": ["crack"],
     "unsafe-behavior-detection": ["smoking", "phone_usage"],
     "ppe-detection": ["person", "helmet", "vest"],
     "object-tracking": ["person", "car", "bus", "truck", "motorcycle", "bicycle"],
@@ -264,14 +245,6 @@ function reviewStatusConfig(status) {
   if (status === "completed") return { label: "Completed", tone: "compliant" };
   if (status === "needs_review") return { label: "Needs review", tone: "warning" };
   return { label: "Unlabeled", tone: "alert" };
-}
-
-function getItemReviewStatus(item, liveSuggestions = [], liveAnnotations = []) {
-  if (liveSuggestions.length) return "needs_review";
-  if (liveAnnotations.length || Number(item?.saved_annotation_count ?? item?.annotation_count ?? 0) > 0 || item?.has_label) {
-    return "completed";
-  }
-  return item?.review_status ?? "unlabeled";
 }
 
 function priorityConfig(tier) {
@@ -344,17 +317,15 @@ export default function AnnotationEditorPage() {
   const [assistSummary, setAssistSummary] = useState(null);
   const [assistModelStatus, setAssistModelStatus] = useState(null);
   const [advancedToolsOpen, setAdvancedToolsOpen] = useState(false);
-  const [coordinatesOpen, setCoordinatesOpen] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
   const [lastSuggestionContext, setLastSuggestionContext] = useState("");
   const [showAllSuggestions, setShowAllSuggestions] = useState(false);
   const [showAllLabels, setShowAllLabels] = useState(true);
   const [hiddenAnnotationClasses, setHiddenAnnotationClasses] = useState({});
-  const [hiddenAnnotationIds, setHiddenAnnotationIds] = useState({});
   const [expandedAnnotationGroups, setExpandedAnnotationGroups] = useState({});
   const [showAllAnnotationsByClass, setShowAllAnnotationsByClass] = useState({});
   const [batchFindCount, setBatchFindCount] = useState("5");
   const [batchOnlyUnlabeled, setBatchOnlyUnlabeled] = useState(true);
-  const [imageFilter, setImageFilter] = useState("all");
   const [hasSavedSampleLabels, setHasSavedSampleLabels] = useState(false);
   const [hasValidatedSuggestions, setHasValidatedSuggestions] = useState(false);
   const [hasApprovedSuggestions, setHasApprovedSuggestions] = useState(false);
@@ -373,7 +344,7 @@ export default function AnnotationEditorPage() {
   const classOptions = workspace?.classes?.length ? workspace.classes : defaultClassOptions(activeUseCase.id);
   const promptSuggestions = classOptions.slice(0, 6);
   const workspaceItems = workspace?.items ?? [];
-  const sortedWorkspaceItems = useMemo(() => {
+  const displayItems = useMemo(() => {
     if (!assistMode) return workspaceItems;
     return [...workspaceItems].sort((left, right) => {
       const scoreGap = Number(right?.priority_score ?? 0) - Number(left?.priority_score ?? 0);
@@ -386,23 +357,7 @@ export default function AnnotationEditorPage() {
       return String(left?.file_name ?? "").localeCompare(String(right?.file_name ?? ""));
     });
   }, [assistMode, workspaceItems]);
-  const displayItems = useMemo(
-    () =>
-      sortedWorkspaceItems.filter((item) => {
-        const key = itemKey(item);
-        const reviewStatus = getItemReviewStatus(item, suggestionsByItem[key] ?? [], annotationsByItem[key] ?? []);
-        if (imageFilter === "labeled") return reviewStatus === "completed";
-        if (imageFilter === "unlabeled") return reviewStatus === "unlabeled";
-        return true;
-      }),
-    [annotationsByItem, imageFilter, sortedWorkspaceItems, suggestionsByItem],
-  );
-  const activeItem =
-    displayItems.find((item) => itemKey(item) === activeItemId) ??
-    displayItems[0] ??
-    sortedWorkspaceItems.find((item) => itemKey(item) === activeItemId) ??
-    sortedWorkspaceItems[0] ??
-    null;
+  const activeItem = displayItems.find((item) => itemKey(item) === activeItemId) ?? workspaceItems.find((item) => itemKey(item) === activeItemId) ?? displayItems[0] ?? workspaceItems[0] ?? null;
   const activeKey = itemKey(activeItem) || activeItemId;
   const currentAnnotations = activeKey ? annotationsByItem[activeKey] ?? [] : [];
   const currentSuggestions = activeKey ? suggestionsByItem[activeKey] ?? [] : [];
@@ -438,14 +393,18 @@ export default function AnnotationEditorPage() {
     [currentSuggestions, hiddenAnnotationClasses],
   );
   const visibleCanvasAnnotations = useMemo(
-    () =>
-      currentAnnotations.filter(
-        (box) => !hiddenAnnotationClasses[annotationClassName(box)] && !hiddenAnnotationIds[box.id],
-      ),
-    [currentAnnotations, hiddenAnnotationClasses, hiddenAnnotationIds],
+    () => currentAnnotations.filter((box) => !hiddenAnnotationClasses[annotationClassName(box)]),
+    [currentAnnotations, hiddenAnnotationClasses],
   );
   const activeItemIndex = displayItems.findIndex((item) => itemKey(item) === activeKey);
-  const activeReviewStatus = getItemReviewStatus(activeItem, currentSuggestions, currentAnnotations);
+  const lowConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "low").length;
+  const mediumConfidenceCount = currentSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "medium").length;
+  const activeReviewStatus = currentSuggestions.length
+    ? "needs_review"
+    : currentAnnotations.length || Number(activeItem?.saved_annotation_count ?? activeItem?.annotation_count ?? 0) > 0 || activeItem?.has_label
+      ? "completed"
+      : activeItem?.review_status ?? "unlabeled";
+  const activePriority = priorityConfig(activeItem?.priority_tier ?? "low");
   const activeReview = reviewStatusConfig(activeReviewStatus);
   const saveState = activeKey
     ? dirtyItems[activeKey]
@@ -456,6 +415,7 @@ export default function AnnotationEditorPage() {
           ? "Saved"
           : "Ready"
     : "No image selected";
+  const assistPhase = assistPhaseConfig(assistModelStatus?.phase);
   const savedImageCount = useMemo(
     () => workspaceItems.filter((item) => Number(item?.saved_annotation_count ?? item?.annotation_count ?? 0) > 0).length,
     [workspaceItems],
@@ -476,20 +436,35 @@ export default function AnnotationEditorPage() {
     if (lastSuggestionContext !== "test") return 0;
     return Number(autoLabelPreview?.returned_item_count ?? autoLabelPreview?.processed_item_count ?? 0);
   }, [autoLabelPreview, lastSuggestionContext]);
-  const isDefectDetection = activeUseCase.id === "crack-detection";
+  const isRegionAlerts = activeUseCase.id === "region-alerts";
   const hasPendingSuggestions = pendingSuggestionCount > 0;
   const requiresApprovedSave = hasApprovedSuggestions && !hasSavedApprovedSuggestions;
-  const activeImageSummary = activeItem?.file_name ?? "Select an image from the left panel.";
-  const activeImageStatusLabel = activeReviewStatus === "completed" ? "Labeled" : activeReviewStatus === "needs_review" ? "Validation" : "Unlabeled";
-  const manualClassSelectorTitle = isDefectDetection ? "Select defect type" : "Select class";
-  const manualClassSelectorHelper = isDefectDetection
-    ? "Choose the class for the next box."
-    : "Choose the class for the next box you draw on the canvas.";
-  const assistLabelTitle = isDefectDetection ? "Assisted Labeling" : "Assisted Labeling";
-  const promptFieldLabel = isDefectDetection ? "Find defect types" : "Prompt objects";
-  const promptFieldPlaceholder = isDefectDetection ? "crack, spalling, rust_stain" : "fire, smoke";
-  const addPromptButtonLabel = isDefectDetection ? "Add as Class" : "Add Prompt as Class";
-  const coordinatesPanelTitle = isDefectDetection ? "Edit Box Coordinates" : "Edit Box Coordinates";
+  const workflowStage = !assistMode
+    ? { label: "Manual labeling", tone: "normal" }
+    : hasPendingSuggestions
+      ? { label: "Review suggestions", tone: "warning" }
+      : requiresApprovedSave
+        ? { label: "Save approved labels", tone: "warning" }
+        : hasApprovedSuggestions && hasSavedApprovedSuggestions
+        ? { label: "Ready for remaining images", tone: "compliant" }
+        : hasSavedSampleLabels
+          ? { label: "Ready for test", tone: "normal" }
+          : { label: "Build sample labels", tone: "normal" };
+  const workflowHelperText = !assistMode
+    ? isRegionAlerts
+      ? "Label people and vehicles in representative images or extracted video frames from the target environment."
+      : "Label a few sample images manually."
+    : hasPendingSuggestions
+      ? "Review these suggestions carefully before applying to the dataset."
+      : requiresApprovedSave
+        ? "Please save approved labels before proceeding."
+        : hasApprovedSuggestions && hasSavedApprovedSuggestions
+          ? "Apply auto-labeling to remaining images."
+          : hasSavedSampleLabels
+            ? "Now test auto-labeling on a few unseen images."
+            : isRegionAlerts
+              ? "Start with labeled images or extracted video frames from the target environment."
+              : "Label a few sample images manually.";
 
   const setLoadingFlag = (key, value) => {
     setLoading((current) => ({ ...current, [key]: value }));
@@ -537,7 +512,6 @@ export default function AnnotationEditorPage() {
     setAssistSummary(null);
     setAssistModelStatus(null);
     setAdvancedToolsOpen(false);
-    setCoordinatesOpen(false);
     setLastSuggestionContext("");
     setShowAllSuggestions(false);
     resetValidationFlow();
@@ -599,18 +573,6 @@ export default function AnnotationEditorPage() {
       return changed ? next : current;
     });
   }, [currentAnnotations]);
-
-  useEffect(() => {
-    if (!displayItems.length) return;
-    if (displayItems.some((item) => itemKey(item) === activeItemId)) return;
-    setActiveItemId(itemKey(displayItems[0]));
-    setSelectedBoxId("");
-    setDraftBox(null);
-    setDrawStart(null);
-    setAwaitingSamPoint(false);
-    setSamPreview(null);
-    setCoordinatesOpen(false);
-  }, [activeItemId, displayItems]);
 
   const ensureWorkspaceLoaded = async () => {
     if (workspace?.items?.length) return workspace;
@@ -686,7 +648,7 @@ export default function AnnotationEditorPage() {
     if (announce) {
       setMessage(
         addedTerms.length
-          ? `Added ${addedTerms.map(formatClassLabel).join(", ")} to the class list.`
+          ? `Added ${addedTerms.join(", ")} to the class list.`
           : "Those prompts are already available in the class list.",
       );
     }
@@ -792,12 +754,6 @@ export default function AnnotationEditorPage() {
       ...current,
       [activeKey]: (current[activeKey] ?? []).filter((box) => box.id !== boxId),
     }));
-    setHiddenAnnotationIds((current) => {
-      if (!current[boxId]) return current;
-      const next = { ...current };
-      delete next[boxId];
-      return next;
-    });
     markItemDirty(activeKey, true);
     setSelectedBoxId((current) => (current === boxId ? "" : current));
     setSaveResult(null);
@@ -822,13 +778,6 @@ export default function AnnotationEditorPage() {
     setShowAllAnnotationsByClass((current) => ({
       ...current,
       [className]: !current[className],
-    }));
-  };
-
-  const toggleAnnotationVisibility = (boxId) => {
-    setHiddenAnnotationIds((current) => ({
-      ...current,
-      [boxId]: !current[boxId],
     }));
   };
 
@@ -1388,169 +1337,191 @@ export default function AnnotationEditorPage() {
     setDrawStart(null);
     setAwaitingSamPoint(false);
     setSamPreview(null);
-    setCoordinatesOpen(false);
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur md:px-6">
-        <div className="mx-auto flex w-full max-w-[1920px] flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <header className="border-b border-slate-200 bg-white px-6 py-4">
+        <div className="mx-auto flex w-full max-w-[1920px] flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-3">
-            <Link className="inline-flex items-center justify-center rounded-xl border border-brand-blue px-3 py-2 text-sm font-semibold text-brand-blue transition hover:bg-brand-blue-tint" href={backHref}>
+            <Link className="inline-flex items-center justify-center rounded-lg border border-brand-blue px-4 py-2.5 text-sm font-semibold text-brand-blue transition hover:bg-brand-blue-tint" href={backHref}>
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back to Labels
             </Link>
-            <h1 className="text-base font-semibold tracking-tight text-slate-900 sm:text-lg">
-              <span className="text-slate-500">Step 3</span> <span className="text-slate-300">•</span> Annotation Editor
-            </h1>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Step 3</div>
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Annotation Editor</h1>
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
-            <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-slate-700">
-              {activeUseCase.title}
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Use case</div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">{activeUseCase.title}</div>
             </div>
-            <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-slate-700">
-              Session #{sessionId || "Unknown"}
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Session</div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">#{sessionId || "Unknown"}</div>
             </div>
-            <div className="max-w-full rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-slate-700">
-              <span className="font-semibold text-slate-500">Dataset:</span> {workspace?.dataset_name ?? "Loading..."}
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Dataset</div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">{workspace?.dataset_name ?? "Loading..."}</div>
             </div>
-            <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-slate-700">
-              <span className="font-semibold text-slate-500">Status</span>
-              <Badge tone={statusToneForSaveState(saveState)}>{saveState}</Badge>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Save status</div>
+              <div className="mt-1 flex items-center gap-2">
+                <Badge tone={statusToneForSaveState(saveState)}>{saveState}</Badge>
+                <span className="truncate text-sm font-semibold text-slate-900">{activeItem?.file_name ?? "No image selected"}</span>
+              </div>
             </div>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto grid w-full max-w-[1920px] items-start gap-3 px-4 py-4 xl:grid-cols-[minmax(240px,18%)_minmax(0,1fr)_minmax(320px,24%)]">
-        <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-panel xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-hidden">
-          <div className="flex h-full flex-col">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">Images</div>
-                <p className="mt-1 text-sm text-slate-500">{formatCount(workspaceItems.length, "0")} loaded</p>
-              </div>
-              <Badge tone={assistMode ? "warning" : "normal"}>
-                {displayItems.length ? `${formatCount(Math.max(activeItemIndex + 1, 1), "1")} / ${formatCount(displayItems.length, "0")}` : formatCount(displayItems.length, "0")}
-              </Badge>
+      <main className="mx-auto grid w-full max-w-[1920px] gap-3 px-4 py-6 xl:grid-cols-[260px_minmax(0,1fr)_340px]">
+        <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-panel">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Images</div>
+              <p className="mt-1 text-sm text-slate-500">{formatCount(workspaceItems.length, "0")} loaded</p>
             </div>
-
-            <div className="mt-4 grid grid-cols-3 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-1">
-              {[
-                { value: "all", label: "All" },
-                { value: "unlabeled", label: "Unlabeled" },
-                { value: "labeled", label: "Labeled" },
-              ].map((filterOption) => (
+            <Badge tone={assistMode ? "warning" : "normal"}>{assistMode ? "Assist workflow" : formatCount(activeItemIndex + 1, "0")}</Badge>
+          </div>
+          <div className="mt-4 flex gap-2">
+            <Button disabled={activeItemIndex <= 0} onClick={() => goToRelativeItem(-1)} type="button" variant="outline">
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button disabled={!displayItems.length || activeItemIndex >= displayItems.length - 1} onClick={() => goToRelativeItem(1)} type="button" variant="outline">
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="mt-4 max-h-[70vh] space-y-2 overflow-y-auto pr-1">
+            {displayItems.length ? displayItems.map((item) => {
+              const key = itemKey(item);
+              const active = key === activeKey;
+              const suggestionCount = suggestionsByItem[key]?.length ?? 0;
+              const liveSuggestions = suggestionsByItem[key] ?? [];
+              const reviewStatus = liveSuggestions.length
+                ? "needs_review"
+                : (annotationsByItem[key]?.length ?? 0) || Number(item.saved_annotation_count ?? item.annotation_count ?? 0) > 0 || item.has_label
+                  ? "completed"
+                  : item.review_status ?? "unlabeled";
+              const review = reviewStatusConfig(reviewStatus);
+              const priority = priorityConfig(item.priority_tier ?? "low");
+              const lowConfidenceSuggestions = liveSuggestions.filter((box) => normalizeQuality(box.quality, box.confidence) === "low").length;
+              return (
                 <button
-                  key={filterOption.value}
-                  className={`rounded-xl px-3 py-2 text-xs font-semibold transition ${imageFilter === filterOption.value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
-                  onClick={() => setImageFilter(filterOption.value)}
+                  key={key}
+                  className={`w-full rounded-2xl border px-3 py-3 text-left transition ${active ? "border-brandRed bg-brandRed/[0.05]" : "border-slate-200 bg-slate-50 hover:border-brandBlue/30 hover:bg-white"}`}
+                  onClick={() => {
+                    setActiveItemId(key);
+                    setSelectedBoxId("");
+                    setDraftBox(null);
+                    setDrawStart(null);
+                    setAwaitingSamPoint(false);
+                    setSamPreview(null);
+                  }}
                   type="button"
                 >
-                  {filterOption.label}
+                  <div className="truncate text-sm font-semibold text-slate-900">{item.file_name}</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Badge tone={review.tone}>{review.label}</Badge>
+                    {dirtyItems[key] ? <Badge tone="warning">Unsaved</Badge> : null}
+                    {assistMode ? <Badge tone={priority.tone}>{priority.label}</Badge> : null}
+                    {suggestionCount ? <Badge tone={lowConfidenceSuggestions ? "alert" : "warning"}>{suggestionCount} suggestions</Badge> : null}
+                  </div>
+                  <div className="mt-2 text-xs leading-5 text-slate-500">
+                    {(item.saved_annotation_count ?? item.annotation_count ?? annotationsByItem[key]?.length ?? 0)} saved · {formatTimestamp(item.last_modified)}
+                  </div>
+                  {assistMode && item.priority_reason ? <p className="mt-1 text-xs leading-5 text-slate-500">{item.priority_reason}</p> : null}
+                  {assistMode && item.has_low_confidence_predictions ? (
+                    <p className="mt-1 text-xs font-semibold text-brandRed">Low-confidence detections need attention.</p>
+                  ) : null}
+                  {assistMode && !item.has_low_confidence_predictions && item.has_medium_confidence_predictions ? (
+                    <p className="mt-1 text-xs font-semibold text-amber-600">Medium-confidence detections need confirmation.</p>
+                  ) : null}
+                  {assistMode && reviewStatus === "unlabeled" && !suggestionCount ? (
+                    <p className="mt-1 text-xs font-semibold text-slate-600">No suggestions yet. Manual pass recommended.</p>
+                  ) : null}
+                  {item.label_source ? (
+                    <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                      {item.label_source}
+                    </div>
+                  ) : null}
                 </button>
-              ))}
-            </div>
-
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <Button disabled={activeItemIndex <= 0} onClick={() => goToRelativeItem(-1)} type="button" variant="outline">
-                <ChevronLeft className="mr-2 h-4 w-4" />
-                Previous
-              </Button>
-              <Button disabled={!displayItems.length || activeItemIndex >= displayItems.length - 1} onClick={() => goToRelativeItem(1)} type="button" variant="outline">
-                Next
-                <ChevronRight className="ml-2 h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-              {displayItems.length ? (
-                displayItems.map((item) => {
-                  const key = itemKey(item);
-                  const active = key === activeKey;
-                  const liveSuggestions = suggestionsByItem[key] ?? [];
-                  const liveAnnotations = annotationsByItem[key] ?? [];
-                  const reviewStatus = getItemReviewStatus(item, liveSuggestions, liveAnnotations);
-                  const review = reviewStatusConfig(reviewStatus);
-                  const reviewLabel = reviewStatus === "completed" ? "Labeled" : reviewStatus === "needs_review" ? "Validation" : "Unlabeled";
-                  const priority = priorityConfig(item.priority_tier ?? "low");
-                  const suggestionCount = liveSuggestions.length;
-                  const savedCount = item.saved_annotation_count ?? item.annotation_count ?? liveAnnotations.length ?? 0;
-
-                  return (
-                    <button
-                      key={key}
-                      className={`w-full rounded-2xl border px-3 py-3 text-left transition ${active ? "border-brandRed bg-brandRed/[0.05]" : "border-slate-200 bg-slate-50 hover:border-brandBlue/20 hover:bg-white"}`}
-                      onClick={() => {
-                        setActiveItemId(key);
-                        setSelectedBoxId("");
-                        setDraftBox(null);
-                        setDrawStart(null);
-                        setAwaitingSamPoint(false);
-                        setSamPreview(null);
-                        setCoordinatesOpen(false);
-                      }}
-                      type="button"
-                    >
-                      <div className="truncate text-sm font-semibold text-slate-900">{item.file_name}</div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <Badge tone={review.tone}>{reviewLabel}</Badge>
-                        {dirtyItems[key] ? <Badge tone="warning">Unsaved</Badge> : null}
-                        {suggestionCount ? <Badge tone="warning">{formatCount(suggestionCount, "0")} suggestions</Badge> : null}
-                        {assistMode ? <Badge tone={priority.tone}>{priority.label}</Badge> : null}
-                      </div>
-                      <div className="mt-2 text-xs text-slate-600">{formatCount(savedCount, "0")} saved boxes</div>
-                      <div className="mt-1 text-[11px] leading-5 text-slate-400">{formatTimestamp(item.last_modified)}</div>
-                    </button>
-                  );
-                })
-              ) : (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-500">
-                  {loading.workspace
-                    ? "Loading images..."
-                    : workspaceItems.length
-                      ? "No images match this filter."
-                      : "No images are available in this workspace yet."}
-                </div>
-              )}
-            </div>
+              );
+            }) : (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-500">
+                {loading.workspace ? "Loading images..." : "No images are available in this workspace yet."}
+              </div>
+            )}
           </div>
         </aside>
 
-        <section className="space-y-3">
-          <div className="rounded-3xl border border-slate-200 bg-white px-4 py-3 shadow-panel">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Current image</div>
-                <div className="mt-1 truncate text-base font-semibold text-slate-900">{activeImageSummary}</div>
-                <p className="mt-1 text-sm text-slate-500">
-                  {activeImageStatusLabel} • {formatCount(currentAnnotations.length, "0")} {currentAnnotations.length === 1 ? "box" : "boxes"} • {formatCount(currentSuggestions.length, "0")} suggestions
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Badge tone={activeReview.tone}>{activeImageStatusLabel}</Badge>
-                {activeItem?.label_source ? <Badge tone="normal">{activeItem.label_source}</Badge> : null}
-              </div>
-            </div>
-          </div>
-
+        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-panel">
           {error ? (
-            <div className="rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] px-4 py-3 text-sm text-brandRed">
+            <div className="mb-4 rounded-2xl border border-brandRed/20 bg-brandRed/[0.04] px-4 py-3 text-sm text-brandRed">
               {error}
             </div>
           ) : null}
           {message ? (
-            <div className="rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm text-slate-700">
+            <div className="mb-4 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-4 py-3 text-sm text-slate-700">
               {message}
             </div>
           ) : null}
+          {isRegionAlerts ? (
+            <div className="mb-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-slate-700">
+              <p>
+                Fine-tuning improves the object detector used by Region Alerts Detection. ROI selection, restricted-zone rules, confidence thresholds, and trigger settings are configured separately in Integration.
+              </p>
+              <p className="mt-2">
+                For Region Alerts Detection, fine-tuning focuses on improving person/vehicle detection quality. Use labeled images or extracted video frames from the target environment. Video datasets should be converted into image frames before annotation.
+              </p>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Current image</div>
+              <p className="mt-1 text-sm text-slate-500">{activeItem?.file_name ?? "Select an image from the left panel."}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Badge tone={activeReview.tone}>{activeReview.label}</Badge>
+                {assistMode ? <Badge tone={activePriority.tone}>{activePriority.label}</Badge> : null}
+                {activeItem?.label_source ? <Badge tone="normal">{activeItem.label_source}</Badge> : null}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Badge tone="normal">{formatCount(savedImageCount, "0")} labeled</Badge>
+                <Badge tone="normal">{formatCount(validationImageCount, "0")} validation</Badge>
+                <Badge tone={assistPhase.tone}>{assistPhase.label === "Idle" ? "Assist idle" : assistPhase.label}</Badge>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge tone="normal">{currentAnnotations.length} boxes</Badge>
+              <Badge tone={currentSuggestions.length ? "warning" : "normal"}>{currentSuggestions.length} suggestions</Badge>
+              {lowConfidenceCount ? <Badge tone="alert">{lowConfidenceCount} low</Badge> : null}
+              {mediumConfidenceCount ? <Badge tone="warning">{mediumConfidenceCount} medium</Badge> : null}
+            </div>
+          </div>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Saved annotations</div>
+              <div className="mt-1 font-semibold text-slate-900">{formatCount(activeItem?.saved_annotation_count ?? activeItem?.annotation_count ?? currentAnnotations.length, "0")}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Priority reason</div>
+              <div className="mt-1 font-semibold text-slate-900">{activeItem?.priority_reason ?? "Continue labeling current image."}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Last modified</div>
+              <div className="mt-1 font-semibold text-slate-900">{formatTimestamp(activeItem?.last_modified)}</div>
+            </div>
+          </div>
           {awaitingSamPoint ? (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
+            <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
               Click on the image to segment the object with SAM.
             </div>
           ) : null}
           {samPreview ? (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
+            <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-slate-700">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="font-semibold text-slate-900">SAM preview ready</div>
@@ -1560,32 +1531,43 @@ export default function AnnotationEditorPage() {
               </div>
             </div>
           ) : null}
-
-          <div className="overflow-hidden rounded-[30px] border border-slate-900 bg-slate-950 shadow-[0_24px_80px_rgba(15,23,42,0.28)]">
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 bg-[radial-gradient(circle_at_top_left,_rgba(37,99,235,0.2),_transparent_45%),linear-gradient(135deg,_rgba(15,23,42,0.98),_rgba(2,6,23,1))] px-4 py-3 text-slate-200">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Canvas workspace</div>
-                <div className="mt-1 truncate text-sm font-semibold text-white">{activeImageSummary}</div>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs sm:text-sm">
-                  <span className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-white">
-                    Selected: {formatClassLabel(selectedClass)}
+          <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Class colors</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {classOptions.map((className) => {
+                const color = getClassColor(className);
+                return (
+                  <span
+                    key={`legend-${className}`}
+                    className="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold text-slate-700"
+                    style={{ borderColor: color, backgroundColor: hexToRgba(color, 0.12) }}
+                  >
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
+                    {className}
                   </span>
-                  <span className="text-slate-400">Click and drag to draw a box.</span>
-                </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-950 p-4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-slate-200">
+              <div>
+                <div className="font-semibold text-white">Canvas zoom</div>
+                <p className="mt-1 text-xs leading-5 text-slate-400">Zoom scales the image and annotation overlay together.</p>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setShowAllLabels((current) => !current)} type="button" variant="outline">
                   {showAllLabels ? <EyeOff className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}
                   {showAllLabels ? "Hide labels" : "Show labels"}
                 </Button>
-                <div className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300">
-                  Zoom {Math.round(zoomLevel * 100)}%
-                </div>
                 <Button disabled={zoomLevel <= 0.75} onClick={() => updateZoomLevel(zoomLevel - 0.25)} type="button" variant="outline">
-                  <ZoomOut className="h-4 w-4" />
+                  <ZoomOut className="mr-2 h-4 w-4" />
+                  -
                 </Button>
                 <Button disabled={zoomLevel >= 2.5} onClick={() => updateZoomLevel(zoomLevel + 0.25)} type="button" variant="outline">
-                  <ZoomIn className="h-4 w-4" />
+                  <ZoomIn className="mr-2 h-4 w-4" />
+                  +
                 </Button>
                 <Button disabled={zoomLevel === 1} onClick={() => setZoomLevel(1)} type="button" variant="outline">
                   <RefreshCcw className="mr-2 h-4 w-4" />
@@ -1594,12 +1576,12 @@ export default function AnnotationEditorPage() {
               </div>
             </div>
             {activeItem?.preview_url ? (
-              <div className="flex min-h-[78vh] items-center justify-center overflow-auto bg-[radial-gradient(circle_at_top,_rgba(148,163,184,0.16),_transparent_35%),linear-gradient(180deg,_rgba(15,23,42,0.96),_rgba(2,6,23,1))] p-4">
+              <div className="flex min-h-[74vh] items-center justify-center overflow-auto">
                 <div className="origin-center transition-transform duration-150" style={{ transform: `scale(${zoomLevel})` }}>
                   <div className="relative w-fit max-w-full overflow-hidden rounded-2xl border border-slate-700 bg-black">
                     <img
                       alt={activeItem.file_name}
-                      className="block max-h-[80vh] max-w-full select-none"
+                      className="block max-h-[76vh] max-w-full select-none"
                       draggable={false}
                       src={activeItem.preview_url}
                     />
@@ -1621,77 +1603,72 @@ export default function AnnotationEditorPage() {
                       onPointerMove={handleCanvasPointerMove}
                       onPointerUp={handleCanvasPointerUp}
                     >
-                      {showAllLabels
-                        ? visibleCanvasSuggestions.map((box) => {
-                            const classColor = getClassColor(box.class_name);
-                            return (
-                              <div
-                                key={box.id}
-                                className="pointer-events-none absolute border-2 border-dashed"
-                                style={{
-                                  ...annotationStyle(box),
-                                  borderColor: classColor,
-                                  backgroundColor: hexToRgba(classColor, 0.14),
-                                }}
-                              >
-                                <span
-                                  className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
-                                  style={{
-                                    backgroundColor: classColor,
-                                    color: getReadableTextColor(classColor),
-                                  }}
-                                >
-                                  {formatClassLabel(box.class_name)}
-                                  {box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
-                                </span>
-                              </div>
-                            );
-                          })
-                        : null}
+                      {showAllLabels ? visibleCanvasSuggestions.map((box) => {
+                        const classColor = getClassColor(box.class_name);
+                        return (
+                          <div
+                            key={box.id}
+                            className="pointer-events-none absolute border-2 border-dashed"
+                            style={{
+                              ...annotationStyle(box),
+                              borderColor: classColor,
+                              backgroundColor: hexToRgba(classColor, 0.14),
+                            }}
+                          >
+                            <span
+                              className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
+                              style={{
+                                backgroundColor: classColor,
+                                color: getReadableTextColor(classColor),
+                              }}
+                            >
+                              {box.class_name}{box.confidence ? ` ${Math.round(box.confidence * 100)}%` : ""}
+                            </span>
+                          </div>
+                        );
+                      }) : null}
                       {samPreview?.annotation ? (
                         <div
                           className="pointer-events-none absolute border-2 border-dashed border-emerald-300 bg-emerald-300/10"
                           style={annotationStyle(samPreview.annotation)}
                         >
                           <span className="absolute left-0 top-0 max-w-full truncate bg-emerald-500 px-2 py-0.5 text-[11px] font-semibold text-white">
-                            {formatClassLabel(samPreview.annotation.class_name)} SAM
+                            {samPreview.annotation.class_name} SAM
                           </span>
                         </div>
                       ) : null}
-                      {showAllLabels
-                        ? visibleCanvasAnnotations.map((box) => {
-                            const classColor = getClassColor(box.class_name);
-                            const isSelected = selectedBoxId === box.id;
-                            return (
-                              <button
-                                key={box.id}
-                                className="absolute border-2 text-left"
-                                style={{
-                                  ...annotationStyle(box),
-                                  borderColor: classColor,
-                                  backgroundColor: hexToRgba(classColor, 0.14),
-                                  boxShadow: isSelected ? `0 0 0 2px #ffffff, 0 0 0 4px ${hexToRgba(classColor, 0.9)}` : "none",
-                                }}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setSelectedBoxId(box.id);
-                                }}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                type="button"
-                              >
-                                <span
-                                  className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
-                                  style={{
-                                    backgroundColor: classColor,
-                                    color: getReadableTextColor(classColor),
-                                  }}
-                                >
-                                  {formatClassLabel(box.class_name)}
-                                </span>
-                              </button>
-                            );
-                          })
-                        : null}
+                      {showAllLabels ? visibleCanvasAnnotations.map((box) => {
+                        const classColor = getClassColor(box.class_name);
+                        const isSelected = selectedBoxId === box.id;
+                        return (
+                          <button
+                            key={box.id}
+                            className="absolute border-2 text-left"
+                            style={{
+                              ...annotationStyle(box),
+                              borderColor: classColor,
+                              backgroundColor: hexToRgba(classColor, 0.14),
+                              boxShadow: isSelected ? `0 0 0 2px #ffffff, 0 0 0 4px ${hexToRgba(classColor, 0.9)}` : "none",
+                            }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedBoxId(box.id);
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            type="button"
+                          >
+                            <span
+                              className="absolute left-0 top-0 max-w-full truncate px-2 py-0.5 text-[11px] font-semibold"
+                              style={{
+                                backgroundColor: classColor,
+                                color: getReadableTextColor(classColor),
+                              }}
+                            >
+                              {box.class_name}
+                            </span>
+                          </button>
+                        );
+                      }) : null}
                       {draftBox ? (
                         <div
                           className="pointer-events-none absolute border-2"
@@ -1708,7 +1685,7 @@ export default function AnnotationEditorPage() {
                               color: getReadableTextColor(getClassColor(selectedClass)),
                             }}
                           >
-                            {formatClassLabel(selectedClass)}
+                            {selectedClass}
                           </span>
                         </div>
                       ) : null}
@@ -1717,526 +1694,522 @@ export default function AnnotationEditorPage() {
                 </div>
               </div>
             ) : (
-              <div className="flex min-h-[78vh] items-center justify-center bg-[linear-gradient(180deg,_rgba(15,23,42,0.96),_rgba(2,6,23,1))] px-6 text-center text-sm leading-6 text-slate-400">
+              <div className="flex min-h-[70vh] items-center justify-center rounded-2xl border border-dashed border-slate-700 bg-slate-900 text-center text-sm leading-6 text-slate-400">
                 {loading.workspace ? "Loading annotation workspace..." : "No image selected."}
               </div>
             )}
           </div>
+
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Suggestions</div>
+                <p className="mt-1 text-sm leading-6 text-slate-500">
+                  {currentSuggestions.length
+                    ? "Review these suggestions carefully before applying to the dataset."
+                    : "No pending suggestions for this image."}
+                </p>
+              </div>
+              <Badge tone={currentSuggestions.length ? "warning" : "normal"}>{formatCount(currentSuggestions.length, "0")}</Badge>
+            </div>
+            {currentSuggestions.length ? (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-slate-500">
+                <span>Showing {formatCount(visibleSuggestions.length, "0")} of {formatCount(currentSuggestions.length, "0")} suggestions</span>
+                {hasMoreSuggestions ? (
+                  <Button onClick={() => setShowAllSuggestions((current) => !current)} type="button" variant="outline">
+                    {showAllSuggestions ? "Show fewer suggestions" : `Show all suggestions (${formatCount(currentSuggestions.length, "0")})`}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="mt-4 space-y-2">
+              {currentSuggestions.length ? visibleSuggestions.map((box) => {
+                const quality = normalizeQuality(box.quality, box.confidence);
+                const palette = suggestionPalette(quality);
+                const classColor = getClassColor(box.class_name);
+                return (
+                  <div
+                    key={box.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm"
+                    style={{ borderColor: classColor, backgroundColor: hexToRgba(classColor, 0.08) }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-semibold"
+                          style={{
+                            backgroundColor: classColor,
+                            color: getReadableTextColor(classColor),
+                          }}
+                        >
+                          <span className="truncate">{box.class_name}</span>
+                        </span>
+                        {box.confidence ? <span className="text-xs font-semibold text-slate-500">{Math.round(box.confidence * 100)}%</span> : null}
+                      </div>
+                      <div className="mt-1">
+                        <Badge tone={palette.badgeTone}>{quality}</Badge>
+                      </div>
+                    </div>
+                    <button className="rounded-full p-1 text-brandBlue hover:bg-brandBlue/[0.08]" onClick={() => acceptSuggestion(box)} type="button" title="Accept suggestion">
+                      <Check className="h-4 w-4" />
+                    </button>
+                    <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteSuggestion(box.id)} type="button" title="Delete suggestion">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              }) : (
+                <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-500">
+                  Suggestions will appear here after you test auto-labeling or use an advanced tool.
+                </div>
+              )}
+            </div>
+            {hasPendingSuggestions ? (
+              <div className="mt-4 grid gap-3">
+                <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={approveAllSuggestions} type="button">
+                  Approve Suggestions
+                </Button>
+                <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={continueEditingSuggestions} type="button" variant="outline">
+                  Continue Editing
+                </Button>
+                <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={clearPendingSuggestions} type="button" variant="outline">
+                  Clear Suggestions
+                </Button>
+              </div>
+            ) : null}
+          </div>
         </section>
 
-        <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-panel xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-hidden">
-          <div className="flex h-full flex-col">
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">{manualClassSelectorTitle}</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">{manualClassSelectorHelper}</p>
-                  </div>
-                  <Badge tone="normal">{formatClassLabel(selectedClass)}</Badge>
-                </div>
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {classOptions.map((className) => {
-                    const classColor = getClassColor(className);
-                    const isSelected = selectedClass === className;
-                    return (
-                      <button
-                        key={className}
-                        className="flex items-center gap-2 rounded-2xl border px-3 py-2.5 text-left text-sm font-semibold transition"
-                        style={{
-                          borderColor: classColor,
-                          backgroundColor: isSelected ? hexToRgba(classColor, 0.18) : "#ffffff",
-                          boxShadow: isSelected ? `inset 0 0 0 1px ${classColor}` : "none",
-                          color: "#0f172a",
-                        }}
-                        onClick={() => setSelectedClass(className)}
-                        type="button"
-                      >
-                        <span className="h-3 w-3 rounded-full" style={{ backgroundColor: classColor }} />
-                        <span className="flex-1 truncate">{formatClassLabel(className)}</span>
-                        {isSelected ? <Check className="h-4 w-4" /> : null}
-                      </button>
-                    );
-                  })}
-                </div>
+        <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-panel">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Guided labeling workflow</div>
+                <p className="mt-1 text-sm leading-6 text-slate-600">{workflowHelperText}</p>
               </div>
+              <Badge tone={workflowStage.tone}>{workflowStage.label}</Badge>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Badge tone="normal">{formatCount(savedImageCount, "0")} sample images saved</Badge>
+              <Badge tone="normal">{formatCount(unlabeledImageCount, "0")} unlabeled remaining</Badge>
+              <Badge tone={assistMode ? "warning" : "normal"}>{assistMode ? "Assist Mode On" : "Assist Mode Off"}</Badge>
+            </div>
+            {requiresApprovedSave ? (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
+                Please save approved labels before proceeding.
+              </div>
+            ) : null}
+            {hasCurrentItemSuggestions ? (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
+                You have unapproved suggestions. Saving will discard them.
+              </div>
+            ) : null}
+          </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Current Annotations</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">Review boxes for this image.</p>
-                  </div>
-                  <Badge tone={currentAnnotations.length ? "normal" : "warning"}>{formatCount(currentAnnotations.length, "0")}</Badge>
-                </div>
-                <div className="mt-3 space-y-2">
-                  {annotationGroups.length ? (
-                    annotationGroups.map((group) => {
-                      const classColor = getClassColor(group.className);
-                      return (
-                        <div key={group.className} className="rounded-2xl border border-slate-200 bg-white">
-                          <div className="flex items-center justify-between gap-2 px-3 py-2.5">
-                            <button className="min-w-0 flex-1 text-left" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button">
-                              <div className="flex items-center gap-2">
-                                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: classColor }} />
-                                <span className="truncate text-sm font-semibold text-slate-800">{formatClassLabel(group.className)}</span>
-                                <span className="text-xs font-semibold text-slate-500">{formatCount(group.count, "0")}</span>
-                              </div>
-                            </button>
-                            <div className="flex items-center gap-1">
-                              <button
-                                className={`rounded-full p-1.5 transition ${group.isHidden ? "text-slate-400 hover:bg-slate-100" : "text-slate-600 hover:bg-slate-100"}`}
-                                onClick={() => toggleAnnotationClassVisibility(group.className)}
-                                type="button"
-                                title={group.isHidden ? `Show ${formatClassLabel(group.className)}` : `Hide ${formatClassLabel(group.className)}`}
-                              >
-                                {group.isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                              </button>
-                              <button className="rounded-full p-1.5 text-slate-600 transition hover:bg-slate-100" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button" title={group.isExpanded ? "Collapse group" : "Expand group"}>
-                                {group.isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                              </button>
-                            </div>
-                          </div>
-                          {group.isExpanded ? (
-                            <div className="border-t border-slate-100 px-3 py-3">
-                              {group.hasMore ? (
-                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
-                                  <span>Showing {formatCount(group.visibleBoxes.length, "0")} of {formatCount(group.count, "0")} boxes</span>
-                                  <Button onClick={() => toggleAnnotationClassShowAll(group.className)} type="button" variant="outline">
-                                    {group.showAllForClass ? "Show fewer" : `Show all (${formatCount(group.count, "0")})`}
-                                  </Button>
-                                </div>
-                              ) : null}
-                              <div className="space-y-2">
-                                {group.visibleBoxes.map((box) => {
-                                  const boxNumber = group.boxes.findIndex((entry) => entry.id === box.id) + 1;
-                                  const isHidden = Boolean(hiddenAnnotationIds[box.id]);
-                                  return (
-                                    <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-brandRed/[0.04]" : "border-slate-200 bg-white"}`}>
-                                      <button
-                                        className="min-w-0 flex-1 text-left"
-                                        onClick={() => {
-                                          setSelectedBoxId(box.id);
-                                          setCoordinatesOpen(true);
-                                        }}
-                                        type="button"
-                                      >
-                                        <div className="font-semibold text-slate-800">Box {boxNumber}</div>
-                                        <div className="text-xs text-slate-500">{isHidden ? "Hidden on canvas" : "Visible on canvas"}</div>
-                                      </button>
-                                      <div className="flex items-center gap-1">
-                                        <button
-                                          className="rounded-full p-1.5 text-slate-600 transition hover:bg-slate-100"
-                                          onClick={() => toggleAnnotationVisibility(box.id)}
-                                          type="button"
-                                          title={isHidden ? "Show box" : "Hide box"}
-                                        >
-                                          {isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                        </button>
-                                        <button
-                                          className="rounded-full p-1.5 text-brandBlue transition hover:bg-brandBlue/[0.08]"
-                                          onClick={() => {
-                                            setSelectedBoxId(box.id);
-                                            setCoordinatesOpen(true);
-                                          }}
-                                          type="button"
-                                          title="Edit box"
-                                        >
-                                          <Check className="h-4 w-4" />
-                                        </button>
-                                        <button className="rounded-full p-1.5 text-brandRed transition hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
-                                          <Trash2 className="h-4 w-4" />
-                                        </button>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ) : null}
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Annotations</div>
+              <Badge tone={currentAnnotations.length ? "normal" : "warning"}>{formatCount(currentAnnotations.length, "0")}</Badge>
+            </div>
+            <div className="mt-3 space-y-2">
+              {annotationGroups.length ? annotationGroups.map((group) => {
+                const classColor = getClassColor(group.className);
+                return (
+                  <div key={group.className} className="rounded-2xl border border-slate-200 bg-white">
+                    <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                      <button className="min-w-0 flex-1 text-left" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: classColor }} />
+                          <span className="truncate text-sm font-semibold text-slate-800">{group.className}</span>
+                          <span className="text-xs font-semibold text-slate-500">({formatCount(group.count, "0")})</span>
                         </div>
-                      );
-                    })
-                  ) : (
-                    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
-                      No saved boxes for this image yet.
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          className={`rounded-full p-1.5 transition ${group.isHidden ? "text-slate-400 hover:bg-slate-100" : "text-slate-600 hover:bg-slate-100"}`}
+                          onClick={() => toggleAnnotationClassVisibility(group.className)}
+                          type="button"
+                          title={group.isHidden ? `Show ${group.className}` : `Hide ${group.className}`}
+                        >
+                          {group.isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                        <button className="rounded-full p-1.5 text-slate-600 transition hover:bg-slate-100" onClick={() => toggleAnnotationGroupExpansion(group.className)} type="button" title={group.isExpanded ? "Collapse group" : "Expand group"}>
+                          {group.isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </div>
-                  )}
-                </div>
-              </div>
+                    {group.isExpanded ? (
+                      <div className="border-t border-slate-100 px-3 py-3">
+                        {group.hasMore ? (
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                            <span>Showing {formatCount(group.visibleBoxes.length, "0")} of {formatCount(group.count, "0")} annotations</span>
+                            <Button onClick={() => toggleAnnotationClassShowAll(group.className)} type="button" variant="outline">
+                              {group.showAllForClass ? "Show fewer" : `Show more (${formatCount(group.count, "0")})`}
+                            </Button>
+                          </div>
+                        ) : null}
+                        <div className="space-y-2">
+                          {group.visibleBoxes.map((box) => (
+                            <div key={box.id} className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm ${selectedBoxId === box.id ? "border-brandRed bg-white" : "border-slate-200 bg-white"}`}>
+                              <button className="min-w-0 flex-1 truncate text-left font-semibold text-slate-700" onClick={() => setSelectedBoxId(box.id)} type="button">
+                                {box.class_name} · {Math.round(box.width * 100)}% x {Math.round(box.height * 100)}%
+                              </button>
+                              <button className="rounded-full p-1 text-brandRed hover:bg-brandRed/[0.08]" onClick={() => deleteAnnotationBox(box.id)} type="button" title="Delete box">
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }) : (
+                <p className="text-sm leading-6 text-slate-500">No saved boxes for this image yet.</p>
+              )}
+            </div>
+          </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">Label Actions</div>
-                  <p className="mt-1 text-sm leading-6 text-slate-500">Save labels after reviewing the boxes you want to keep.</p>
-                </div>
-                <div className="mt-3 space-y-2 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-slate-500">Mode</span>
-                    <span className="font-semibold">{assistMode ? "Assist" : "Manual"}</span>
-                  </div>
-                  <div className="text-slate-600">
-                    Saved: {formatCount(savedImageCount, "0")} • Remaining: {formatCount(unlabeledImageCount, "0")} • Validation: {formatCount(validationImageCount, "0")}
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-slate-500">Assist</span>
-                    <Badge tone={assistMode ? "warning" : "normal"}>{assistMode ? "On" : "Off"}</Badge>
-                  </div>
-                </div>
-                {requiresApprovedSave ? (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
-                    Please save approved labels before proceeding.
-                  </div>
-                ) : null}
-                {hasCurrentItemSuggestions ? (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
-                    You have unapproved suggestions. Saving will discard them.
-                  </div>
-                ) : null}
-                <div className="mt-3 grid gap-2">
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Workflow actions</div>
+                <p className="mt-1 text-sm leading-6 text-slate-500">Save current labels, validate assist suggestions, and continue only after review.</p>
+              </div>
+              <Badge tone={workflowStage.tone}>{workflowStage.label}</Badge>
+            </div>
+            <div className="mt-4 grid gap-3">
+              <Button
+                disabled={!workspaceItems.length || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam}
+                onClick={handleAssistModeToggle}
+                type="button"
+                variant={assistMode ? "default" : "outline"}
+              >
+                <Wand2 className="mr-2 h-4 w-4" />
+                {assistMode ? "Assist Mode On" : "Assist Mode"}
+              </Button>
+              <Button
+                disabled={!activeItem || loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam}
+                onClick={handleSaveLabels}
+                type="button"
+                variant={!assistMode || !hasSavedSampleLabels || requiresApprovedSave ? "default" : "outline"}
+              >
+                <Check className="mr-2 h-4 w-4" />
+                {loading.save ? "Saving..." : "Save Labels"}
+              </Button>
+              {assistMode && requiresApprovedSave ? (
+                <Button
+                  disabled={!pendingApprovedSaveKeys.length || loading.save || loading.auto || loading.trainAssist || loading.propagate || loading.sam}
+                  onClick={handleSaveAllApprovedLabels}
+                  type="button"
+                  variant="outline"
+                >
+                  <Check className="mr-2 h-4 w-4" />
+                  {loading.save ? "Saving..." : "Save All Approved Labels"}
+                </Button>
+              ) : null}
+              {assistMode && hasSavedSampleLabels && !hasValidatedSuggestions && !hasApprovedSuggestions && (!hasPendingSuggestions || loading.trainAssist || loading.propagate) ? (
+                <Button
+                  disabled={hasPendingSuggestions || loading.trainAssist || loading.propagate || loading.save || loading.auto || loading.sam}
+                  onClick={handleTestAutoLabeling}
+                  type="button"
+                >
+                  <Wand2 className="mr-2 h-4 w-4" />
+                  {loading.trainAssist || loading.propagate ? "Testing..." : "Test Auto-Labeling on Few Images"}
+                </Button>
+              ) : null}
+              {assistMode && hasApprovedSuggestions && unlabeledImageCount > 0 ? (
+                <Button
+                  disabled={!hasSavedApprovedSuggestions || hasPendingSuggestions || loading.propagate || loading.trainAssist || loading.save || loading.auto || loading.sam}
+                  onClick={handleLabelRemainingImages}
+                  type="button"
+                >
+                  <Wand2 className="mr-2 h-4 w-4" />
+                  {loading.propagate ? "Predicting..." : "Label Remaining Images"}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="text-sm font-semibold text-slate-900">Manual annotation tools</div>
+            <div className="mt-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Class before drawing</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {classOptions.map((className) => {
+                  const classColor = getClassColor(className);
+                  const isSelected = selectedClass === className;
+                  return (
+                    <button
+                      key={className}
+                      className="rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                      style={{
+                        borderColor: classColor,
+                        backgroundColor: isSelected ? classColor : hexToRgba(classColor, 0.1),
+                        color: isSelected ? getReadableTextColor(classColor) : classColor,
+                      }}
+                      onClick={() => setSelectedClass(className)}
+                      type="button"
+                    >
+                      {className}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <label className="mt-4 block text-sm font-semibold text-slate-700">
+            Prompt objects
+            <input
+              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
+              placeholder="fire, smoke"
+              value={autoLabelPrompt}
+              onChange={(event) => setAutoLabelPrompt(event.target.value)}
+            />
+            <span className="mt-2 block text-xs font-normal leading-5 text-slate-500">
+              Add new class names here, then use Find Objects to run prompt-based suggestions without opening Advanced Tools.
+            </span>
+          </label>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <Button disabled={loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam} onClick={() => addPromptTermsToClasses(parsePromptTerms(autoLabelPrompt))} type="button" variant="outline">
+              Add Prompt as Class
+            </Button>
+            <Button disabled={!activeItem || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam} onClick={handleFindObjectsFromPrompt} type="button">
+              <Wand2 className="mr-2 h-4 w-4" />
+              {loading.auto ? "Finding..." : "Find Objects"}
+            </Button>
+          </div>
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-sm font-semibold text-slate-900">Batch Find Objects</div>
+            <p className="mt-1 text-sm leading-6 text-slate-500">Run prompt-based suggestions on a small batch without opening each image one by one.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Images to process
+                <select
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-slate-700 outline-none transition focus:border-brandBlue"
+                  value={batchFindCount}
+                  onChange={(event) => setBatchFindCount(event.target.value)}
+                >
+                  {BATCH_FIND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
+                <input
+                  checked={batchOnlyUnlabeled}
+                  className="h-4 w-4 rounded border-slate-300 text-brandBlue focus:ring-brandBlue"
+                  onChange={(event) => setBatchOnlyUnlabeled(event.target.checked)}
+                  type="checkbox"
+                />
+                Only unlabeled images
+              </label>
+            </div>
+            <div className="mt-4">
+              <Button
+                disabled={!workspaceItems.length || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam}
+                onClick={handleBatchFindObjects}
+                type="button"
+                variant="outline"
+              >
+                <Wand2 className="mr-2 h-4 w-4" />
+                {loading.auto ? "Finding..." : "Find Objects on Batch"}
+              </Button>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {promptSuggestions.map((suggestion) => (
+              <button
+                key={suggestion}
+                className="rounded-full border border-brandBlue/15 bg-brandBlue/[0.04] px-3 py-1.5 text-xs font-semibold text-brandBlue hover:bg-brandBlue/[0.08]"
+                onClick={() => {
+                  const currentTerms = parsePromptTerms(autoLabelPrompt);
+                  if (currentTerms.includes(suggestion)) return;
+                  setAutoLabelPrompt(currentTerms.length ? `${currentTerms.join(", ")}, ${suggestion}` : suggestion);
+                }}
+                type="button"
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <button
+              className="flex w-full items-center justify-between gap-3 text-left"
+              onClick={() => setAdvancedToolsOpen((current) => !current)}
+              type="button"
+            >
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Advanced Tools</div>
+                <p className="mt-1 text-sm leading-6 text-slate-500">Technical tools for segmentation refinement. These tools never auto-save labels.</p>
+              </div>
+              <Badge tone="normal">{advancedToolsOpen ? "Hide" : "Show"}</Badge>
+            </button>
+            {advancedToolsOpen ? (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-3">
                   <Button
-                    disabled={!activeItem || loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam}
-                    onClick={handleSaveLabels}
-                    type="button"
-                    variant="default"
-                  >
-                    <Check className="mr-2 h-4 w-4" />
-                    {loading.save ? "Saving..." : "Save Labels"}
-                  </Button>
-                  <Button
-                    disabled={!workspaceItems.length || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam}
-                    onClick={handleAssistModeToggle}
+                    disabled={!activeItem || loading.save || loading.auto || loading.assist || loading.sam || loading.trainAssist || loading.propagate}
+                    onClick={handleSamButton}
                     type="button"
                     variant="outline"
                   >
                     <Wand2 className="mr-2 h-4 w-4" />
-                    {assistMode ? "Assist Mode On" : "Assist Mode"}
+                    {loading.sam ? "Segmenting..." : selectedAnnotation ? "Refine with SAM" : awaitingSamPoint ? "Cancel SAM Click" : "Segment Object"}
                   </Button>
-                  {assistMode && requiresApprovedSave ? (
-                    <Button
-                      disabled={!pendingApprovedSaveKeys.length || loading.save || loading.auto || loading.trainAssist || loading.propagate || loading.sam}
-                      onClick={handleSaveAllApprovedLabels}
-                      type="button"
-                      variant="outline"
-                    >
-                      <Check className="mr-2 h-4 w-4" />
-                      {loading.save ? "Saving..." : "Save All Approved Labels"}
-                    </Button>
-                  ) : null}
-                  {assistMode && hasSavedSampleLabels && !hasValidatedSuggestions && !hasApprovedSuggestions && (!hasPendingSuggestions || loading.trainAssist || loading.propagate) ? (
-                    <Button
-                      disabled={hasPendingSuggestions || loading.trainAssist || loading.propagate || loading.save || loading.auto || loading.sam}
-                      onClick={handleTestAutoLabeling}
-                      type="button"
-                      variant="outline"
-                    >
-                      <Wand2 className="mr-2 h-4 w-4" />
-                      {loading.trainAssist || loading.propagate ? "Testing..." : "Test Auto-Labeling on Few Images"}
-                    </Button>
-                  ) : null}
-                  {assistMode && hasApprovedSuggestions && unlabeledImageCount > 0 ? (
-                    <Button
-                      disabled={!hasSavedApprovedSuggestions || hasPendingSuggestions || loading.propagate || loading.trainAssist || loading.save || loading.auto || loading.sam}
-                      onClick={handleLabelRemainingImages}
-                      type="button"
-                      variant="outline"
-                    >
-                      <Wand2 className="mr-2 h-4 w-4" />
-                      {loading.propagate ? "Predicting..." : "Label Remaining Images"}
-                    </Button>
+                  {samPreview ? (
+                    <>
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-slate-700">
+                        <div className="font-semibold text-slate-900">SAM refinement</div>
+                        <p className="mt-1">{samPreview.message}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Badge tone="normal">{samPreview.input_type === "box" ? "Box refine" : "Click prompt"}</Badge>
+                          <Badge tone="normal">{samPreview.annotation?.class_name ?? selectedClass}</Badge>
+                        </div>
+                      </div>
+                      <Button disabled={loading.sam || loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate} onClick={acceptSamPreview} type="button" variant="outline">
+                        Accept SAM Preview
+                      </Button>
+                      <Button disabled={loading.sam || loading.trainAssist || loading.propagate} onClick={discardSamPreview} type="button" variant="outline">
+                        Discard SAM Preview
+                      </Button>
+                    </>
                   ) : null}
                 </div>
               </div>
+            ) : null}
+          </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">{assistLabelTitle}</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">Find likely defect boxes quickly, then review before saving.</p>
-                  </div>
-                  <Badge tone={hasPendingSuggestions ? "warning" : "normal"}>
-                    {hasPendingSuggestions ? `${formatCount(pendingSuggestionCount, "0")} pending` : "Ready"}
-                  </Badge>
-                </div>
-                <label className="mt-3 block text-sm font-semibold text-slate-700">
-                  {promptFieldLabel}
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Advanced coordinates</div>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {selectedAnnotation
+                ? "Edit normalized 0–1 coordinates for the selected annotation. Changes update the box overlay immediately."
+                : "Select a box to edit coordinates."}
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-5">
+              <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Class
+                <select
+                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal normal-case tracking-normal text-slate-700 outline-none transition focus:border-brandBlue disabled:bg-slate-100"
+                  disabled={!selectedAnnotation}
+                  value={selectedAnnotation?.class_name ?? selectedClass}
+                  onChange={(event) => updateSelectedAnnotationBox("class_name", event.target.value)}
+                >
+                  {classOptions.map((className) => (
+                    <option key={className} value={className}>{className}</option>
+                  ))}
+                </select>
+              </label>
+              {[
+                ["x_center", "X"],
+                ["y_center", "Y"],
+                ["width", "Width"],
+                ["height", "Height"],
+              ].map(([field, label]) => (
+                <label key={field} className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  {label}
                   <input
-                    className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brandBlue"
-                    placeholder={promptFieldPlaceholder}
-                    value={autoLabelPrompt}
-                    onChange={(event) => setAutoLabelPrompt(event.target.value)}
+                    className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 outline-none transition focus:border-brandBlue disabled:bg-slate-100"
+                    disabled={!selectedAnnotation}
+                    max="1"
+                    min={field === "width" || field === "height" ? "0.001" : "0"}
+                    step="0.001"
+                    type="number"
+                    value={selectedAnnotation ? selectedAnnotation[field] : ""}
+                    onChange={(event) => updateSelectedAnnotationBox(field, event.target.value)}
                   />
                 </label>
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  <Button disabled={loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam} onClick={() => addPromptTermsToClasses(parsePromptTerms(autoLabelPrompt))} type="button" variant="outline">
-                    {addPromptButtonLabel}
-                  </Button>
-                  <Button disabled={!activeItem || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam} onClick={handleFindObjectsFromPrompt} type="button">
-                    <Wand2 className="mr-2 h-4 w-4" />
-                    {loading.auto ? "Finding..." : "Find Objects"}
-                  </Button>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {promptSuggestions.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      className="rounded-full border border-brandBlue/15 bg-brandBlue/[0.04] px-3 py-1.5 text-xs font-semibold text-brandBlue hover:bg-brandBlue/[0.08]"
-                      onClick={() => {
-                        const currentTerms = parsePromptTerms(autoLabelPrompt);
-                        if (currentTerms.includes(suggestion)) return;
-                        setAutoLabelPrompt(currentTerms.length ? `${currentTerms.join(", ")}, ${suggestion}` : suggestion);
-                      }}
-                      type="button"
-                    >
-                      {formatClassLabel(suggestion)}
-                    </button>
-                  ))}
-                </div>
-                <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                  <Button
-                    disabled={!workspaceItems.length || loading.auto || loading.assist || loading.save || loading.trainAssist || loading.propagate || loading.sam}
-                    onClick={handleBatchFindObjects}
-                    type="button"
-                    variant="outline"
-                  >
-                    <Wand2 className="mr-2 h-4 w-4" />
-                    {loading.auto ? "Finding..." : "Batch Find"}
-                  </Button>
-                  <label className="text-sm font-semibold text-slate-700">
-                    Batch Size
-                    <select
-                      className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-700 outline-none transition focus:border-brandBlue"
-                      value={batchFindCount}
-                      onChange={(event) => setBatchFindCount(event.target.value)}
-                    >
-                      {BATCH_FIND_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
-                    <input
-                      checked={batchOnlyUnlabeled}
-                      className="h-4 w-4 rounded border-slate-300 text-brandBlue focus:ring-brandBlue"
-                      onChange={(event) => setBatchOnlyUnlabeled(event.target.checked)}
-                      type="checkbox"
-                    />
-                    Unlabeled only
-                  </label>
-                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <button
+              className="flex w-full items-center justify-between gap-3 text-left"
+              onClick={() => setInsightsOpen((current) => !current)}
+              type="button"
+            >
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Insights</div>
+                <p className="mt-1 text-sm leading-6 text-slate-500">Latest assist and suggestion details stay here so the main labeling flow remains uncluttered.</p>
+              </div>
+              <span className="text-sm font-semibold text-slate-500">{insightsOpen ? "▲" : "▼"}</span>
+            </button>
+            {insightsOpen ? (
+              <div className="mt-4 space-y-4">
                 {autoLabelPreview ? (
-                  <div className="mt-3 rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] px-3 py-2 text-sm text-slate-700">
+                  <div className="rounded-2xl border border-brandBlue/15 bg-brandBlue/[0.04] p-3 text-sm text-slate-700">
                     <div className="font-semibold text-slate-900">Latest suggestion run</div>
                     <p className="mt-1">{autoLabelPreview.message}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Badge tone="normal">
+                        {autoLabelPreview.source_label ?? (autoLabelPreview.mode_used === "grounding" ? "Prompt-based" : "YOLO")}
+                      </Badge>
+                      {autoLabelPreview.fallback_used ? <Badge tone="warning">Fallback used</Badge> : null}
+                    </div>
+                    <p className="mt-2">Suggested items: {formatCount(autoLabelPreview.suggested_label_count, "0")}</p>
+                    {autoLabelPreview.low_confidence_item_count ? (
+                      <p className="mt-1 text-brandRed">Low-confidence items: {formatCount(autoLabelPreview.low_confidence_item_count, "0")}</p>
+                    ) : null}
                   </div>
                 ) : null}
                 {assistModelStatus ? (
-                  <div className="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-semibold text-slate-900">Assist status</div>
-                      <Badge tone={assistPhaseConfig(assistModelStatus?.phase).tone}>{assistPhaseConfig(assistModelStatus?.phase).label}</Badge>
+                      <div className="font-semibold text-slate-900">Assist workflow status</div>
+                      <Badge tone={assistPhase.tone}>{assistPhase.label}</Badge>
                     </div>
                     <p className="mt-1">{assistModelStatus.message}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {assistModelStatus?.summary?.labeled_images ? (
+                        <Badge tone="normal">{formatCount(assistModelStatus.summary.labeled_images, "0")} labeled images</Badge>
+                      ) : null}
+                      {assistModelStatus?.summary?.train_images !== undefined ? (
+                        <Badge tone="normal">{formatCount(assistModelStatus.summary.train_images, "0")} train</Badge>
+                      ) : null}
+                      {assistModelStatus?.summary?.val_images !== undefined ? (
+                        <Badge tone="normal">{formatCount(assistModelStatus.summary.val_images, "0")} val</Badge>
+                      ) : null}
+                      {assistModelStatus?.summary?.base_model ? (
+                        <Badge tone="normal">{assistModelStatus.summary.base_model}</Badge>
+                      ) : null}
+                    </div>
+                    {assistModelStatus.warning ? (
+                      <p className="mt-2 text-amber-700">{assistModelStatus.warning}</p>
+                    ) : null}
                   </div>
                 ) : null}
                 {assistMode && assistSummary ? (
-                  <div className="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
                     <div className="font-semibold text-slate-900">Assist review summary</div>
                     <p className="mt-1">{assistSummary.focusMessage}</p>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Suggestions</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">
-                      {currentSuggestions.length ? "Review suggestions here before applying them to labels." : "No suggestions yet."}
-                    </p>
-                  </div>
-                  <Badge tone={currentSuggestions.length ? "warning" : "normal"}>{formatCount(currentSuggestions.length, "0")}</Badge>
-                </div>
-                {currentSuggestions.length ? (
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-slate-500">
-                    <span>Showing {formatCount(visibleSuggestions.length, "0")} of {formatCount(currentSuggestions.length, "0")} suggestions</span>
-                    {hasMoreSuggestions ? (
-                      <Button onClick={() => setShowAllSuggestions((current) => !current)} type="button" variant="outline">
-                        {showAllSuggestions ? "Show fewer" : `Show all (${formatCount(currentSuggestions.length, "0")})`}
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-                <div className="mt-3 space-y-2">
-                  {currentSuggestions.length ? (
-                    visibleSuggestions.map((box) => {
-                      const quality = normalizeQuality(box.quality, box.confidence);
-                      const palette = suggestionPalette(quality);
-                      const classColor = getClassColor(box.class_name);
-                      return (
-                        <div
-                          key={box.id}
-                          className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm"
-                          style={{ borderColor: classColor, backgroundColor: hexToRgba(classColor, 0.08) }}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className="inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-semibold"
-                                style={{
-                                  backgroundColor: classColor,
-                                  color: getReadableTextColor(classColor),
-                                }}
-                              >
-                                <span className="truncate">{formatClassLabel(box.class_name)}</span>
-                              </span>
-                              {box.confidence ? <span className="text-xs font-semibold text-slate-500">{Math.round(box.confidence * 100)}%</span> : null}
-                              <Badge tone={palette.badgeTone}>{quality}</Badge>
-                            </div>
-                          </div>
-                          <button className="rounded-full p-1.5 text-brandBlue transition hover:bg-brandBlue/[0.08]" onClick={() => acceptSuggestion(box)} type="button" title="Accept suggestion">
-                            <Check className="h-4 w-4" />
-                          </button>
-                          <button className="rounded-full p-1.5 text-brandRed transition hover:bg-brandRed/[0.08]" onClick={() => deleteSuggestion(box.id)} type="button" title="Reject suggestion">
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
-                      No suggestions yet.
-                    </div>
-                  )}
-                </div>
-                {hasPendingSuggestions ? (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                    <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={approveAllSuggestions} type="button">
-                      Approve
-                    </Button>
-                    <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={continueEditingSuggestions} type="button" variant="outline">
-                      Keep Editing
-                    </Button>
-                    <Button disabled={loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate || loading.sam} onClick={clearPendingSuggestions} type="button" variant="outline">
-                      Clear
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <button
-                  className="flex w-full items-center justify-between gap-3 text-left"
-                  onClick={() => setAdvancedToolsOpen((current) => !current)}
-                  type="button"
-                >
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Advanced Tools</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">Segmentation refinement tools.</p>
-                  </div>
-                  <Badge tone="normal">{advancedToolsOpen ? "Hide" : "Show"}</Badge>
-                </button>
-                {advancedToolsOpen ? (
-                  <div className="mt-4 space-y-3">
-                    <Button
-                      disabled={!activeItem || loading.save || loading.auto || loading.assist || loading.sam || loading.trainAssist || loading.propagate}
-                      onClick={handleSamButton}
-                      type="button"
-                      variant="outline"
-                    >
-                      <Wand2 className="mr-2 h-4 w-4" />
-                      {loading.sam ? "Segmenting..." : selectedAnnotation ? "Refine with SAM" : awaitingSamPoint ? "Cancel SAM Click" : "Segment Object"}
-                    </Button>
-                    {samPreview ? (
-                      <>
-                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-slate-700">
-                          <div className="font-semibold text-slate-900">SAM refinement</div>
-                          <p className="mt-1">{samPreview.message}</p>
-                        </div>
-                        <Button disabled={loading.sam || loading.save || loading.auto || loading.assist || loading.trainAssist || loading.propagate} onClick={acceptSamPreview} type="button" variant="outline">
-                          Accept SAM Preview
-                        </Button>
-                        <Button disabled={loading.sam || loading.trainAssist || loading.propagate} onClick={discardSamPreview} type="button" variant="outline">
-                          Discard SAM Preview
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <button
-                  className="flex w-full items-start justify-between gap-3 text-left"
-                  onClick={() => setCoordinatesOpen((current) => !current)}
-                  type="button"
-                >
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">{coordinatesPanelTitle}</div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500">Select a box, then fine-tune coordinates.</p>
-                  </div>
-                  <Badge tone="normal">{coordinatesOpen ? "Hide" : selectedAnnotation ? "Edit" : "Show"}</Badge>
-                </button>
-                {coordinatesOpen ? (
-                  <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
-                    <div className="space-y-4">
-                      <label className="block text-sm font-semibold text-slate-700">
-                        Class
-                        <select
-                          className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal text-slate-700 outline-none transition focus:border-brandBlue disabled:bg-slate-100"
-                          disabled={!selectedAnnotation}
-                          value={selectedAnnotation?.class_name ?? selectedClass}
-                          onChange={(event) => updateSelectedAnnotationBox("class_name", event.target.value)}
-                        >
-                          {classOptions.map((className) => (
-                            <option key={className} value={className}>{formatClassLabel(className)}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <div>
-                        <div className="text-sm font-semibold text-slate-700">Coordinates</div>
-                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                          {[
-                            ["x_center", "X"],
-                            ["y_center", "Y"],
-                            ["width", "Width"],
-                            ["height", "Height"],
-                          ].map(([field, label]) => (
-                            <label key={field} className="block text-sm font-semibold text-slate-700">
-                              {label}
-                              <input
-                                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal text-slate-700 outline-none transition focus:border-brandBlue disabled:bg-slate-100"
-                                disabled={!selectedAnnotation}
-                                max="1"
-                                min={field === "width" || field === "height" ? "0.001" : "0"}
-                                step="0.001"
-                                type="number"
-                                value={selectedAnnotation ? selectedAnnotation[field] : ""}
-                                onChange={(event) => updateSelectedAnnotationBox(field, event.target.value)}
-                              />
-                            </label>
-                          ))}
-                        </div>
-                        <p className="mt-3 text-xs text-slate-500">Changes apply to the selected box immediately.</p>
-                      </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Badge tone="alert">High priority {formatCount(assistSummary?.prioritySummary?.high, "0")}</Badge>
+                      <Badge tone="warning">Needs review {formatCount(assistSummary?.prioritySummary?.needs_review, "0")}</Badge>
+                      <Badge tone="normal">Unlabeled {formatCount(assistSummary?.prioritySummary?.unlabeled, "0")}</Badge>
+                      <Badge tone="compliant">Completed {formatCount(assistSummary?.prioritySummary?.completed, "0")}</Badge>
                     </div>
                   </div>
                 ) : null}
+                {!autoLabelPreview && !assistModelStatus && !(assistMode && assistSummary) ? (
+                  <p className="text-sm leading-6 text-slate-500">No assist insights yet. They will appear here after you test auto-labeling or review propagated suggestions.</p>
+                ) : null}
               </div>
-            </div>
+            ) : null}
+          </div>
 
-            <div className="mt-3 border-t border-slate-200 pt-3">
-              <div className="grid grid-cols-2 gap-2">
-                <Button disabled={activeItemIndex <= 0} onClick={() => goToRelativeItem(-1)} type="button" variant="outline">
-                  <ArrowLeft className="mr-2 h-4 w-4" />
-                  Previous
-                </Button>
-                <Button disabled={!displayItems.length || activeItemIndex >= displayItems.length - 1} onClick={() => goToRelativeItem(1)} type="button" variant="outline">
-                  Next
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              </div>
-            </div>
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <Button disabled={activeItemIndex <= 0} onClick={() => goToRelativeItem(-1)} type="button" variant="outline">
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Prev
+            </Button>
+            <Button disabled={!displayItems.length || activeItemIndex >= displayItems.length - 1} onClick={() => goToRelativeItem(1)} type="button" variant="outline">
+              Next
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
           </div>
         </aside>
       </main>
