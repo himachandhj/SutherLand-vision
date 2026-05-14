@@ -306,6 +306,52 @@ const CRACK_PREVIEW_FRAME_CLASS =
   "relative flex min-h-[16rem] w-full items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4";
 
 const CRACK_PREVIEW_MEDIA_CLASS = "block max-h-[20rem] max-w-full rounded-xl object-contain";
+const STANDARD_PREVIEW_FRAME_CLASS =
+  "relative flex h-[28rem] w-full items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4";
+const STANDARD_PREVIEW_MEDIA_CLASS = "block max-h-full max-w-full rounded-xl object-contain";
+
+function buildFireSmokeSummary(metrics, detections, sourceLabel) {
+  const normalizedMetrics = metrics && typeof metrics === "object" ? metrics : {};
+  const normalizedDetections = Array.isArray(detections) ? detections : [];
+  const fireDetections = normalizedDetections.filter((detection) => String(detection?.class || "").toLowerCase().includes("fire"));
+  const smokeDetections = normalizedDetections.filter((detection) => String(detection?.class || "").toLowerCase().includes("smoke"));
+
+  const fireDetected = getMetricBoolean(normalizedMetrics, ["fire_detected"]) ?? fireDetections.length > 0;
+  const smokeDetected = getMetricBoolean(normalizedMetrics, ["smoke_detected"]) ?? smokeDetections.length > 0;
+  const totalDetections = getMetricNumber(normalizedMetrics, [
+    "total_detections",
+    "total_fire_smoke_detections",
+    "detections_count",
+  ]) ?? (fireDetections.length + smokeDetections.length);
+  const framesWithAlerts = getMetricNumber(normalizedMetrics, [
+    "frames_with_fire_smoke",
+    "frames_with_alerts",
+    "frames_with_detections",
+  ]);
+  const highestConfidence = getMetricNumber(normalizedMetrics, ["max_confidence", "confidence_score"])
+    ?? normalizedDetections.reduce((best, detection) => {
+      const confidence = Number(detection?.confidence);
+      return Number.isFinite(confidence) ? Math.max(best, confidence) : best;
+    }, 0);
+
+  const summary = [
+    { label: "Fire detected", value: fireDetected ? "Yes" : "No" },
+    { label: "Smoke detected", value: smokeDetected ? "Yes" : "No" },
+    { label: "Fire/smoke detections", value: formatMetricValue(totalDetections) },
+  ];
+
+  if (framesWithAlerts !== null) {
+    summary.push({ label: "Frames with fire/smoke", value: formatMetricValue(framesWithAlerts) });
+  }
+  if (highestConfidence > 0) {
+    summary.push({ label: "Detection confidence", value: formatMetricValue(highestConfidence) });
+  }
+  if (sourceLabel) {
+    summary.push({ label: "Source", value: sourceLabel });
+  }
+
+  return summary;
+}
 
 export default function ModelPlayground({
   activeUseCase,
@@ -317,27 +363,29 @@ export default function ModelPlayground({
   const fileInputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [currentInput, setCurrentInput] = useState(null);
-  const [fireDetectionMode, setFireDetectionMode] = useState("both");
   const [ppeDetectionMode, setPpeDetectionMode] = useState("helmet_vest");
   const [speedDetectionClass, setSpeedDetectionClass] = useState("all");
   const [roiRect, setRoiRect] = useState(null);
   const [roiStart, setRoiStart] = useState(null);
   const [roiDraft, setRoiDraft] = useState(null);
 
-  const supportsFireMode = activeUseCase.id === "fire-detection";
+  const isFireDetection = activeUseCase.id === "fire-detection";
   const supportsPpeMode = activeUseCase.id === "ppe-detection";
-  const supportsRoi = activeUseCase.id === "fire-detection" || activeUseCase.id === "region-alerts";
+  const supportsRoi = activeUseCase.id === "region-alerts";
   const isSpeedEstimation = activeUseCase.id === "speed-estimation";
   const isCrackDetection = activeUseCase.id === "crack-detection";
   const isUnsafeBehaviorDetection = activeUseCase.id === "unsafe-behavior-detection";
   const isLegacyClasswiseCounting = activeUseCase.id === "class-wise-object-counting";
   const isPpeDetection = activeUseCase.id === "ppe-detection";
-  const showsPreviewGuidance = supportsFireMode || supportsPpeMode || supportsRoi || isSpeedEstimation || isUnsafeBehaviorDetection;
+  const requiresManualRunAfterUpload = isFireDetection || isPpeDetection || isCrackDetection;
+  const showsPreviewGuidance = supportsPpeMode || supportsRoi || isSpeedEstimation || isUnsafeBehaviorDetection;
   const showsCrackUploadedFilePreview = isCrackDetection && currentInput?.kind === "file";
   const showsPpeUploadedFilePreview = isPpeDetection && currentInput?.kind === "file";
+  const showsFireUploadedFilePreview = isFireDetection && currentInput?.kind === "file";
   const ppeSummary = isPpeDetection ? buildPpeSummary(playgroundState.metrics, playgroundState.detections) : [];
   const defectSummary = isCrackDetection ? buildDefectSummary(playgroundState.metrics, playgroundState.detections) : [];
   const defectTypeCounts = isCrackDetection ? getDefectTypeCounts(playgroundState.metrics, playgroundState.detections) : [];
+  const fireSmokeSummary = isFireDetection ? buildFireSmokeSummary(playgroundState.metrics, playgroundState.detections, playgroundState.sourceLabel) : [];
 
   useEffect(() => {
     return () => {
@@ -349,7 +397,6 @@ export default function ModelPlayground({
 
   useEffect(() => {
     setCurrentInput(null);
-    setFireDetectionMode("both");
     setPpeDetectionMode("helmet_vest");
     setSpeedDetectionClass("all");
     setRoiRect(activeUseCase.id === "region-alerts" ? persistedRegionAlertsRoi ?? null : null);
@@ -364,12 +411,12 @@ export default function ModelPlayground({
 
   const previewOptions = useMemo(
     () => ({
-      fireDetectionMode: supportsFireMode ? fireDetectionMode : undefined,
+      fireDetectionMode: isFireDetection ? "both" : undefined,
       ppe_detection_mode: supportsPpeMode ? ppeDetectionMode : undefined,
       speed_detection_class: isSpeedEstimation ? speedDetectionClass : undefined,
       roi: supportsRoi && roiRect ? roiRect : undefined,
     }),
-    [fireDetectionMode, isSpeedEstimation, ppeDetectionMode, roiRect, speedDetectionClass, supportsFireMode, supportsPpeMode, supportsRoi],
+    [isFireDetection, isSpeedEstimation, ppeDetectionMode, roiRect, speedDetectionClass, supportsPpeMode, supportsRoi],
   );
 
   const replaceCurrentInput = (nextInput) => {
@@ -400,7 +447,7 @@ export default function ModelPlayground({
       previewType: previewKindFromFile(file),
     };
     replaceCurrentInput(nextInput);
-    if (!isPpeDetection) {
+    if (!requiresManualRunAfterUpload) {
       await runCurrentInput(nextInput);
     }
   };
@@ -457,19 +504,23 @@ export default function ModelPlayground({
         </div>
 
         <input ref={fileInputRef} accept="image/*,video/*,.mp4,.avi,.mov,.mkv,.webm" className="hidden" type="file" onChange={handleFileChange} />
-        {showsCrackUploadedFilePreview || showsPpeUploadedFilePreview ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-panel">
-            <div className={CRACK_PREVIEW_FRAME_CLASS}>
+        {showsCrackUploadedFilePreview || showsPpeUploadedFilePreview || showsFireUploadedFilePreview ? (
+          <div className={showsFireUploadedFilePreview ? "" : "rounded-2xl border border-slate-200 bg-white p-6 shadow-panel"}>
+            <div className={showsFireUploadedFilePreview ? STANDARD_PREVIEW_FRAME_CLASS : CRACK_PREVIEW_FRAME_CLASS}>
               {currentInput.previewType === "video" ? (
                 <video
-                  className={CRACK_PREVIEW_MEDIA_CLASS}
+                  className={showsFireUploadedFilePreview ? STANDARD_PREVIEW_MEDIA_CLASS : CRACK_PREVIEW_MEDIA_CLASS}
                   controls
                   playsInline
                   preload="metadata"
                   src={currentInput.previewSrc}
                 />
               ) : (
-                <img alt={currentInput.label} className={CRACK_PREVIEW_MEDIA_CLASS} src={currentInput.previewSrc} />
+                <img
+                  alt={currentInput.label}
+                  className={showsFireUploadedFilePreview ? STANDARD_PREVIEW_MEDIA_CLASS : CRACK_PREVIEW_MEDIA_CLASS}
+                  src={currentInput.previewSrc}
+                />
               )}
             </div>
             <div className="mt-3 text-sm font-medium text-slate-700">{currentInput.label}</div>
@@ -494,7 +545,9 @@ export default function ModelPlayground({
             </div>
             <div className="text-lg font-semibold text-slate-900">Upload image or video</div>
             <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-              {isPpeDetection
+              {isFireDetection
+                ? "Upload a fire or smoke image/video to preview detections."
+                : isPpeDetection
                 ? "Upload a workplace image or video to check whether workers are wearing helmets and safety vests."
                 : `Drop files here or click to preview a sample inference for ${activeUseCase.title}.`}
             </p>
@@ -562,30 +615,6 @@ export default function ModelPlayground({
               </div>
             ) : null}
 
-            {supportsFireMode ? (
-              <div className="mt-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Fire detection mode</div>
-                <div className="mt-2 inline-flex rounded-xl border border-slate-200 bg-white p-1">
-                  {[
-                    { value: "fire", label: "Detect fire only" },
-                    { value: "smoke", label: "Detect smoke only" },
-                    { value: "both", label: "Detect both fire and smoke" },
-                  ].map((option) => (
-                    <button
-                      key={option.value}
-                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
-                        fireDetectionMode === option.value ? "bg-slate-50 text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
-                      }`}
-                      onClick={() => setFireDetectionMode(option.value)}
-                      type="button"
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
             {isSpeedEstimation ? (
               <div className="mt-4">
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Vehicle filter</div>
@@ -619,9 +648,7 @@ export default function ModelPlayground({
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Region of interest</div>
                     <p className="mt-1 text-sm leading-6 text-slate-500">
-                      {activeUseCase.id === "region-alerts"
-                        ? "Drag a rectangle on the current input preview. Region Alerts will treat it as the restricted zone."
-                        : "Drag a rectangle on the current input preview. Fire Detection will keep detections only inside that ROI."}
+                      Drag a rectangle on the current input preview. Region Alerts will treat it as the restricted zone.
                     </p>
                     {activeUseCase.id === "region-alerts" ? (
                       <div className="mt-3 rounded-2xl border border-brandBlue/10 bg-brandBlue/[0.03] px-4 py-4 text-sm text-slate-600">
@@ -716,9 +743,33 @@ export default function ModelPlayground({
                   Upload Another File
                 </button>
               ) : null}
-              {activeUseCase.id === "fire-detection" && currentInput?.previewType === "video" ? (
+            </div>
+          </div>
+        ) : null}
+        {isFireDetection ? (
+          <div className="mt-6">
+            <p className="text-sm leading-6 text-slate-500">Upload a workplace image or video to detect visible fire and smoke risks.</p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-xl bg-brandBlue px-4 py-3 text-sm font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!currentInput || playgroundState.status === "loading"}
+                onClick={() => void runCurrentInput()}
+                type="button"
+              >
+                {playgroundState.status === "loading" ? "Running Fire & Smoke preview..." : "Run Fire & Smoke Preview"}
+              </button>
+              {currentInput?.kind === "file" ? (
+                <button
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brandBlue/30"
+                  onClick={() => fileInputRef.current?.click()}
+                  type="button"
+                >
+                  Upload Another File
+                </button>
+              ) : null}
+              {currentInput?.previewType === "video" ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-slate-700">
-                  Fire Detection playground previews use a representative frame from the video.
+                  Fire &amp; Smoke previews use a representative frame from uploaded videos.
                 </div>
               ) : null}
             </div>
@@ -769,12 +820,12 @@ export default function ModelPlayground({
           <div className="flex h-[28rem] items-center justify-center rounded-2xl border border-brandRed/20 bg-brandRed/5 px-8 text-center text-lg font-medium text-slate-700">{playgroundState.error}</div>
         ) : (
           <div>
-            <div className={isCrackDetection ? CRACK_PREVIEW_FRAME_CLASS : "relative flex h-[28rem] items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 p-4"}>
+            <div className={isCrackDetection ? CRACK_PREVIEW_FRAME_CLASS : STANDARD_PREVIEW_FRAME_CLASS}>
               {playgroundState.outputVideoUrl ? (
                 <video
                   key={playgroundState.outputVideoUrl}
                   autoPlay
-                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : "max-h-full max-w-full rounded-xl object-contain"}
+                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : STANDARD_PREVIEW_MEDIA_CLASS}
                   controls
                   muted
                   playsInline
@@ -785,7 +836,7 @@ export default function ModelPlayground({
               ) : (
                 <img
                   alt="Processed output"
-                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : "max-h-full max-w-full rounded-xl object-contain"}
+                  className={isCrackDetection ? CRACK_PREVIEW_MEDIA_CLASS : STANDARD_PREVIEW_MEDIA_CLASS}
                   src={playgroundState.imageBase64}
                 />
               )}
@@ -815,6 +866,18 @@ export default function ModelPlayground({
                     </div>
                   </div>
                 ) : null}
+              </div>
+            ) : isFireDetection ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Fire &amp; Smoke Summary</div>
+                <div className="mt-3 space-y-3">
+                  {fireSmokeSummary.map((item) => (
+                    <div key={item.label} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                      <span className="text-sm text-slate-500">{item.label}</span>
+                      <span className="text-base font-semibold text-slate-900">{item.value}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
